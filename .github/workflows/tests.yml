@@ -25,7 +25,7 @@ jobs:
     env:
       NERP_E2E_OUTPUT: ${{ github.workspace }}/e2e-output
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ---- services ----
       - name: Start YugabyteDB
@@ -121,7 +121,7 @@ jobs:
         working-directory: backend
         run: cargo build --locked
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -194,7 +194,7 @@ jobs:
 
       - name: Upload server log and failure screenshots
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-failure
           path: |
