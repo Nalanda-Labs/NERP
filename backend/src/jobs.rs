@@ -2,8 +2,7 @@
 //! any instance.
 //!
 //! Claiming is optimistic (`UPDATE … WHERE status = 'pending'` and check that one row
-//! changed) rather than `SELECT … FOR UPDATE SKIP LOCKED`, so it behaves the same on every
-//! YugabyteDB version. A running job holds a lease (`locked_until`); if its worker dies, the
+//! changed), so two workers never take the same job. A running job holds a lease (`locked_until`); if its worker dies, the
 //! reaper puts it back in the queue.
 //!
 //! Recurring maintenance is scheduled through a Redis lock, so each task runs once per

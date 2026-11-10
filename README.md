@@ -7,7 +7,7 @@ A company management platform (CRM, tasks and projects, documents, email), writt
 
 | Part     | Stack                                                                         |
 |----------|-------------------------------------------------------------------------------|
-| backend  | Rust 2024, Axum 0.8, SQLx 0.9, YugabyteDB (YSQL), Redis/Valkey               |
+| backend  | Rust 2024, Axum 0.8, SQLx 0.9, PostgreSQL 18, Redis/Valkey                    |
 | frontend | SvelteKit 3 (SPA, static adapter), Svelte 5 runes, TypeScript, Tailwind CSS 4 |
 
 ## Modules
@@ -29,7 +29,7 @@ A company management platform (CRM, tasks and projects, documents, email), writt
 The safeguards always keep at least one active administrator, and nobody can deactivate themselves.
 
 **Platform services** (done)
-- **Background jobs:** a queue in YugabyteDB, worked on by every instance with `WORKER_ENABLED=true`.
+- **Background jobs:** a queue in PostgreSQL, worked on by every instance with `WORKER_ENABLED=true`.
   Failed jobs retry with backoff (up to 5 attempts). If a worker dies, its jobs return to the queue.
   Recurring maintenance (cleaning up old notifications and jobs) runs once per interval across all
   instances, coordinated by a Redis lock. Admins can watch the queue under *System*.
@@ -175,8 +175,8 @@ The safeguards always keep at least one active administrator, and nobody can dea
   - streamed CSV export, with protection against spreadsheet formula injection
   - a recycle bin with restore, purged automatically after 30 days (emptying it also removes
     the records' generated documents, and emails no other record shows, with their files)
-- **Built for millions of records:** range-sharded indexes that YugabyteDB can split, a trigram
-  index for search, counts capped at 10,000, keyset-paged exports, and rate recalculation in
+- **Built for millions of records:** indexes in the order lists are read, a trigram index for
+  search, counts capped at 10,000, keyset-paged exports, and rate recalculation in
   batches.
 
 ### Documents (CRM phase 2)
@@ -663,7 +663,9 @@ tests/db/              database feature and migration checks
 
 ## Development
 
-Prerequisites: Rust 1.85+, Node 22+, YugabyteDB, and Redis or Valkey.
+Prerequisites: Rust 1.85+, Node 22+, PostgreSQL 18 (with the bundled `pgcrypto` and `pg_trgm`
+extensions), and Redis or Valkey. The database user needs to create the `nerp` database on first
+start (or create it yourself and grant the user ownership).
 
 ```sh
 # backend: creates the `nerp` database on first run and applies migrations
@@ -765,16 +767,18 @@ All settings are environment variables (see `backend/.env.example`):
 | `LIVEKIT_RECORDINGS_DIR` | empty | folder LiveKit Egress writes recordings to (as NERP sees it); empty: no recording |
 | `LIVEKIT_EGRESS_DIR` | `LIVEKIT_RECORDINGS_DIR` | the same folder as Egress sees it, if different (e.g. in a container) |
 
-## YugabyteDB notes
+## Database notes
 
-- Migrations run **one statement at a time** (`backend/src/migrate.rs`), not as one transaction
-  per file. On YugabyteDB, a schema change mid-batch needs a retry that multi-statement queries
-  can't do, and failed schema changes aren't rolled back. Progress within a migration is
-  recorded, so a migration that stops halfway resumes where it stopped.
-
-- Primary keys are UUIDs, so writes spread across tablets instead of hot-spotting one range.
-- Migrations run without an advisory lock, because YugabyteDB's support for it varies by version.
-  Start one instance first when upgrading, then scale out.
+- NERP runs on PostgreSQL 18. It used YugabyteDB until November 2026; to move such a database,
+  start NERP once on an empty PostgreSQL database (the migrations create the schema), stop it,
+  empty the rows the migrations seeded, and load a data-only dump made with `ysql_dump
+  --data-only --disable-triggers` (leaving out `_sqlx_migrations` and `_nerp_migration_progress`),
+  then compare the row counts table by table.
+- Migrations (`backend/src/migrate.rs`) run each file in one transaction, so a failed migration
+  leaves nothing half done. An advisory lock lets several instances start at once: one migrates,
+  the others wait.
+- Primary keys are UUIDs. Human-readable numbers (tasks, documents, invoices) come from counter
+  rows updated in the creating transaction, so they have no gaps.
 
 ## Marketing
 

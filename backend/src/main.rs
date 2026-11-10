@@ -86,10 +86,9 @@ async fn main() -> Result<()> {
         .acquire_timeout(Duration::from_secs(10))
         .connect(&config.database_url)
         .await
-        .context("connecting to YugabyteDB")?;
+        .context("connecting to PostgreSQL")?;
 
-    // Statement-by-statement migrations (see migrate.rs). Run a single instance at a time
-    // when upgrading.
+    // Migrations (see migrate.rs): one transaction each, one instance at a time.
     migrate::run(&db).await.context("running migrations")?;
     tracing::info!("database migrations are up to date");
 
@@ -206,13 +205,13 @@ async fn ensure_database(url: &str) -> Result<()> {
     let Some(name) = opts.get_database().map(str::to_owned) else {
         return Ok(());
     };
-    // Connect to the default "yugabyte" database to check for / create ours.
+    // Connect to the default "postgres" database to check for / create ours.
     let mut conn = opts
         .clone()
-        .database("yugabyte")
+        .database("postgres")
         .connect()
         .await
-        .context("connecting to YugabyteDB")?;
+        .context("connecting to PostgreSQL")?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
         .bind(&name)
         .fetch_one(&mut conn)

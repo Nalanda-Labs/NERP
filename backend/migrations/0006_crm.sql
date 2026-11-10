@@ -149,7 +149,7 @@ CREATE INDEX crm_items_assigned_idx ON crm_items (entity_type ASC, assigned_to A
 CREATE INDEX crm_items_company_idx ON crm_items (company_id ASC) WHERE company_id IS NOT NULL;
 CREATE INDEX crm_items_source_item_idx ON crm_items (source_item_id ASC) WHERE source_item_id IS NOT NULL;
 CREATE INDEX crm_items_deleted_idx ON crm_items (deleted_at ASC) WHERE deleted_at IS NOT NULL;
-CREATE INDEX crm_items_search_idx ON crm_items USING ybgin (search_text gin_trgm_ops);
+CREATE INDEX crm_items_search_idx ON crm_items USING gin (search_text gin_trgm_ops);
 
 -- Contacts linked to a deal, lead or company (many-to-many).
 CREATE TABLE crm_item_contacts (
@@ -230,7 +230,7 @@ CREATE TABLE crm_products (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX crm_products_name_idx ON crm_products USING ybgin (lower(name) gin_trgm_ops);
+CREATE INDEX crm_products_name_idx ON crm_products USING gin (lower(name) gin_trgm_ops);
 
 CREATE TABLE crm_item_products (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

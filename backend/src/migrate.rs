@@ -1,17 +1,13 @@
-//! Database migrations, run one statement at a time.
+//! Database migrations.
 //!
-//! sqlx runs each migration file as a single multi-statement transaction. On YugabyteDB
-//! that fails for larger migrations: DDL bumps the catalog version, the next statement in
-//! the same batch needs a retry, and retries aren't supported for multi-statement queries
-//! (YugabyteDB issue #21833). DDL is also not rolled back when the batch fails.
-//!
-//! So each statement is executed on its own (YugabyteDB can retry it), and progress within
-//! a migration is recorded: if a migration stops halfway, the next start resumes at the
-//! statement that failed instead of re-running statements that already took effect.
-//! Applied migrations are recorded in sqlx's `_sqlx_migrations` table, with sqlx's checksums.
+//! Each migration file runs in one transaction (PostgreSQL rolls schema changes back too), so
+//! a migration either applies completely or not at all. Its statements are run one by one so
+//! an error names the statement that failed. An advisory lock lets several instances start at
+//! once: one migrates, the others wait. Applied migrations are recorded in sqlx's
+//! `_sqlx_migrations` table, with sqlx's checksums.
 
 use anyhow::{bail, Context, Result};
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool};
 use std::time::Instant;
 
 /// Splits SQL into statements on `;`, ignoring semicolons inside quotes, comments and
@@ -88,22 +84,28 @@ fn push(out: &mut Vec<String>, stmt: &str) {
     }
 }
 
+/// Any fixed number: the advisory lock that lets only one instance migrate at a time.
+const LOCK_KEY: i64 = 0x6e65_7270_6d69_67; // "nerpmig"
+
 pub async fn run(db: &PgPool) -> Result<()> {
     let migrator = sqlx::migrate!("./migrations");
+    let mut conn = db.acquire().await?;
+    // Instances starting together wait here; the first one migrates, the rest find nothing to do.
+    sqlx::query("SELECT pg_advisory_lock($1)").bind(LOCK_KEY).execute(&mut *conn).await?;
+    let result = apply(&mut conn, &migrator).await;
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)").bind(LOCK_KEY).execute(&mut *conn).await;
+    result
+}
+
+async fn apply(conn: &mut sqlx::PgConnection, migrator: &sqlx::migrate::Migrator) -> Result<()> {
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS _sqlx_migrations (
              version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
              success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)",
     )
-    .execute(db)
+    .execute(&mut *conn)
     .await?;
-    sqlx::raw_sql("CREATE TABLE IF NOT EXISTS _nerp_migration_progress (version BIGINT PRIMARY KEY, done_statements INT NOT NULL)")
-        .execute(db)
-        .await?;
-
-    let applied: Vec<(i64, bool, Vec<u8>)> = sqlx::query_as("SELECT version, success, checksum FROM _sqlx_migrations")
-        .fetch_all(db)
-        .await?;
+    let applied: Vec<(i64, bool, Vec<u8>)> = sqlx::query_as("SELECT version, success, checksum FROM _sqlx_migrations").fetch_all(&mut *conn).await?;
     for m in migrator.iter() {
         if let Some((_, success, checksum)) = applied.iter().find(|a| a.0 == m.version) {
             if !success {
@@ -115,37 +117,22 @@ pub async fn run(db: &PgPool) -> Result<()> {
             continue;
         }
         let statements = split_statements(m.sql.as_str());
-        let done: i32 = sqlx::query_scalar("SELECT done_statements FROM _nerp_migration_progress WHERE version = $1")
-            .bind(m.version)
-            .fetch_optional(db)
-            .await?
-            .unwrap_or(0);
-        if done > 0 {
-            tracing::warn!(version = m.version, resumed_at = done + 1, "resuming a migration that stopped halfway");
-        }
         let started = Instant::now();
-        for (i, stmt) in statements.iter().enumerate().skip(done as usize) {
+        let mut tx = conn.begin().await?;
+        for (i, stmt) in statements.iter().enumerate() {
             sqlx::raw_sql(sqlx::AssertSqlSafe(stmt.clone()))
-                .execute(db)
+                .execute(&mut *tx)
                 .await
                 .with_context(|| format!("migration {} ({}), statement {}:\n{}", m.version, m.description, i + 1, first_line(stmt)))?;
-            sqlx::query(
-                "INSERT INTO _nerp_migration_progress (version, done_statements) VALUES ($1, $2)
-                 ON CONFLICT (version) DO UPDATE SET done_statements = EXCLUDED.done_statements",
-            )
-            .bind(m.version)
-            .bind(i as i32 + 1)
-            .execute(db)
-            .await?;
         }
         sqlx::query("INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES ($1, $2, TRUE, $3, $4)")
             .bind(m.version)
             .bind(m.description.as_ref())
             .bind(m.checksum.as_ref())
             .bind(started.elapsed().as_nanos() as i64)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM _nerp_migration_progress WHERE version = $1").bind(m.version).execute(db).await?;
+        tx.commit().await?;
         tracing::info!(version = m.version, description = %m.description, statements = statements.len(), "applied migration");
     }
     Ok(())
