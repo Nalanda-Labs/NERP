@@ -1,0 +1,16 @@
+# Nightly NERP backup, then a test restore of it (see deploy/backup and BACKUP.md).
+# Install: copy to /etc/systemd/system/, adjust paths and user, then
+#   systemctl enable --now nerp-backup.timer
+[Unit]
+Description=NERP backup (database and uploaded files) and its verification
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nerp
+Group=nerp
+ExecStart=/opt/nerp/deploy/backup/nerp-backup.sh --env /opt/nerp/backend/.env --dest /var/backups/nerp --keep-days 14
+ExecStartPost=/opt/nerp/deploy/backup/nerp-verify-backup.sh --env /opt/nerp/backend/.env --dest /var/backups/nerp
+Nice=10
+IOSchedulingClass=idle

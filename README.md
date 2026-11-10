@@ -10,6 +10,10 @@ A company management platform (CRM, tasks and projects, documents, email), writt
 | backend  | Rust 2024, Axum 0.8, SQLx 0.9, PostgreSQL 18, Redis/Valkey                    |
 | frontend | SvelteKit 3 (SPA, static adapter), Svelte 5 runes, TypeScript, Tailwind CSS 4 |
 
+**Guides:** [SETUP.md](SETUP.md) (development and production setup) ·
+[BACKUP.md](BACKUP.md) (backups and restoring) · [SECURITY.md](SECURITY.md) (security review,
+penetration tests, reporting vulnerabilities)
+
 ## Modules
 
 **Core** (done)
@@ -756,6 +760,7 @@ All settings are environment variables (see `backend/.env.example`):
 | `LUALATEX_BIN` / `SOFFICE_BIN` | `lualatex` / `soffice` | external document engines (optional; Typst is built in) |
 | `DOC_RENDER_TIMEOUT_SECS` / `DOC_RENDER_CONCURRENCY` | `60` / `2` | limits for LuaLaTeX and LibreOffice runs |
 | `CRM_WEBHOOK_ALLOW_PRIVATE` | `false` | let automation webhooks call private-network addresses (loopback, LAN) |
+| `MAIL_ALLOW_PRIVATE` | `false` | let mailboxes use mail servers on private networks (loopback, LAN), e.g. a company mail server |
 | `DATA_ENCRYPTION_KEY` | derived from `JWT_SECRET` | key for secrets stored in the database (mailbox passwords); 32+ characters |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | enables "Connect Gmail" (see Email → OAuth) |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | — / — / `common` | enables "Connect Microsoft 365" |

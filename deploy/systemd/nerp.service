@@ -1,0 +1,29 @@
+# The NERP server. Install: copy to /etc/systemd/system/, adjust paths and user, then
+#   systemctl enable --now nerp
+[Unit]
+Description=NERP
+After=network-online.target postgresql.service redis.service valkey.service
+Wants=network-online.target
+
+[Service]
+User=nerp
+Group=nerp
+# NERP reads backend/.env from its working directory.
+WorkingDirectory=/opt/nerp/backend
+ExecStart=/opt/nerp/backend/target/release/nerp
+Restart=on-failure
+RestartSec=5
+# Hardening: NERP only writes its upload folder and the temporary folder.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/nerp/backend/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
