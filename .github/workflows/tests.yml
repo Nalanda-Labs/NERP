@@ -1,0 +1,203 @@
+# Tests: the end-to-end suites (tests/e2e) against a real server, with YugabyteDB, Redis,
+# Mailpit, Dovecot, the document engines (lualatex, soffice, pdftotext), OpenLDAP (slapd),
+# coturn and LiveKit, so every suite runs; none should report itself skipped.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: End-to-end suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    services:
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+    env:
+      NERP_E2E_OUTPUT: ${{ github.workspace }}/e2e-output
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- services ----
+      - name: Start YugabyteDB
+        run: |
+          docker run -d --name yugabyte -p 5433:5433 yugabytedb/yugabyte:2026.1.2.0-b137 \
+            bin/yugabyted start --background=false \
+            --tserver_flags="yb_enable_read_committed_isolation=true"
+
+      - name: Start Mailpit (SMTP with STARTTLS on 1025, API on 8026)
+        run: |
+          mkdir -p "$RUNNER_TEMP/certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 \
+            -keyout "$RUNNER_TEMP/certs/key.pem" -out "$RUNNER_TEMP/certs/cert.pem"
+          chmod 644 "$RUNNER_TEMP/certs/"*.pem
+          docker run -d --name mailpit -p 1025:1025 -p 8026:8025 -v "$RUNNER_TEMP/certs:/certs:ro" \
+            axllent/mailpit:v1.33.1 \
+            --smtp-tls-cert /certs/cert.pem --smtp-tls-key /certs/key.pem --smtp-require-starttls
+
+      - name: Install Dovecot, OpenLDAP, coturn, document engines and fonts
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            dovecot-imapd postgresql-client poppler-utils \
+            slapd ldap-utils coturn \
+            texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
+            fonts-noto-core fonts-noto-cjk fonts-texgyre fonts-liberation fonts-dejavu-core \
+            libreoffice-writer-nogui libreoffice-calc-nogui
+          # The suites run their own slapd (127.0.0.1:3893) and turnserver (127.0.0.1:3478)
+          # as the runner user: stop the system services the packages started, and lift
+          # slapd's AppArmor profile, which would keep it out of the suites' output folder.
+          sudo systemctl disable --now slapd coturn || true
+          sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true
+
+      - name: Check the template fonts and build lualatex's font cache
+        run: |
+          # Every font the document templates name (backend/assets/doc-templates and
+          # src/crm/esign.rs), except Libertinus Serif and DejaVu Sans Mono, which Typst embeds.
+          # A missing one would only show as a silent fallback, so fail here instead.
+          missing=0
+          for f in "Noto Sans" "Noto Serif" "Noto Sans Devanagari" "Noto Sans Bengali" \
+                   "Noto Sans Arabic" "Noto Sans Hebrew" "Noto Sans Thai" "Noto Sans Armenian" \
+                   "Noto Sans Georgian" "Noto Sans CJK SC" "Noto Sans CJK JP" \
+                   "TeX Gyre Pagella" "Liberation Serif"; do
+            if fc-list "$f" | grep -q .; then echo "ok      $f"; else echo "MISSING $f"; missing=1; fi
+          done
+          [ "$missing" = 0 ]
+          luaotfload-tool --update
+
+      - name: Install LiveKit server
+        env:
+          LIVEKIT_VERSION: 1.13.9
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/livekit.tar.gz" \
+            "https://github.com/livekit/livekit/releases/download/v$LIVEKIT_VERSION/livekit_${LIVEKIT_VERSION}_linux_amd64.tar.gz"
+          sudo tar -xzf "$RUNNER_TEMP/livekit.tar.gz" -C /usr/local/bin livekit-server
+          livekit-server --version
+
+      - name: Configure Dovecot (IMAP on 127.0.0.1:143, test mailboxes)
+        run: |
+          sudo mkdir -p /var/lib/nerp-mail
+          sudo chown "$(id -u):$(id -g)" /var/lib/nerp-mail
+          printf '%s\n' 'sales@nerp.test:{PLAIN}nerptest' 'support@nerp.test:{PLAIN}nerptest' \
+            | sudo tee /etc/dovecot/nerp-users > /dev/null
+          sudo tee /etc/dovecot/dovecot.conf > /dev/null <<EOF
+          protocols = imap
+          listen = 127.0.0.1
+          ssl = no
+          disable_plaintext_auth = no
+          auth_mechanisms = plain login
+          mail_location = maildir:~/Maildir
+          log_path = syslog
+          namespace inbox {
+            inbox = yes
+            separator = /
+          }
+          passdb {
+            driver = passwd-file
+            args = /etc/dovecot/nerp-users
+          }
+          userdb {
+            driver = static
+            args = uid=$(id -u) gid=$(id -g) home=/var/lib/nerp-mail/%u
+          }
+          EOF
+          sudo systemctl restart dovecot
+
+      # ---- build ----
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Build backend
+        working-directory: backend
+        run: cargo build --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            tests/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Install test dependencies and Chromium
+        working-directory: tests
+        run: npm ci && npx playwright install --with-deps chromium-headless-shell
+
+      # ---- run ----
+      - name: Wait for YugabyteDB and create the database
+        run: |
+          for i in $(seq 1 90); do pg_isready -q -h 127.0.0.1 -p 5433 && break; sleep 2; done
+          psql postgres://yugabyte:yugabyte@127.0.0.1:5433/yugabyte -c 'CREATE DATABASE nerp'
+
+      - name: Write backend/.env
+        working-directory: backend
+        run: |
+          cp .env.example .env
+          set_env() { sed -i "/^$1=/d" .env; printf '%s=%s\n' "$1" "$2" >> .env; }
+          set_env DATABASE_URL postgres://yugabyte:yugabyte@127.0.0.1:5433/nerp
+          set_env JWT_SECRET "$(openssl rand -hex 32)"
+          set_env STATIC_DIR ../frontend/build
+          set_env COOKIE_SECURE false
+          set_env PUBLIC_URL http://localhost:8080
+          set_env SMTP_SECURITY starttls
+          set_env SMTP_ACCEPT_INVALID_CERTS true
+          set_env CRM_WEBHOOK_ALLOW_PRIVATE true
+          # mock OAuth provider that api11/ui11 start on 127.0.0.1:8099
+          for p in GOOGLE MICROSOFT; do
+            lower=$(echo "$p" | tr A-Z a-z)
+            set_env ${p}_CLIENT_ID "${lower:0:1}"
+            set_env ${p}_CLIENT_SECRET shh
+            set_env ${p}_OAUTH_AUTH_URL "http://127.0.0.1:8099/$lower/authorize"
+            set_env ${p}_OAUTH_TOKEN_URL "http://127.0.0.1:8099/$lower/token"
+          done
+
+      - name: Start the server and create the administrator
+        working-directory: backend
+        env:
+          # directory sign-in (api36, ui37, api42)
+          LDAP_ENABLED: 'true'
+          # video calls through TURN (ui40)
+          WEBRTC_ICE_SERVERS: '[{"urls":"turn:127.0.0.1:3478?transport=udp","username":"nerp-test","credential":"nerp-test-turn"}]'
+          # calls through LiveKit and recording (api39, api43, ui41)
+          LIVEKIT_URL: ws://127.0.0.1:7890
+          LIVEKIT_API_URL: http://127.0.0.1:7899
+          LIVEKIT_API_KEY: nerp-test-key
+          LIVEKIT_API_SECRET: nerp-test-secret-0123456789abcdefghijkl
+          LIVEKIT_RECORDINGS_DIR: ${{ github.workspace }}/e2e-output/livekit-recordings
+        run: |
+          nohup ./target/debug/nerp > "$RUNNER_TEMP/nerp.log" 2>&1 &
+          for i in $(seq 1 120); do curl -sf http://localhost:8080/api/setup > /dev/null && break; sleep 2; done
+          curl -sf -X POST http://localhost:8080/api/setup -H 'content-type: application/json' \
+            -d '{"company_name":"Acme Ltd","email":"admin@acme.test","password":"supersecret1","first_name":"Ada","last_name":"Admin"}'
+
+      - name: Run the end-to-end suites
+        working-directory: tests/e2e
+        run: |
+          node run-all.ts | tee "$RUNNER_TEMP/e2e.txt"
+          # Everything is installed here, so a skipped suite means a broken setup: fail on it.
+          if grep -q '^skip ' "$RUNNER_TEMP/e2e.txt"; then
+            echo '::error::Some suites skipped themselves (see the "skip" lines above)'
+            exit 1
+          fi
+
+      - name: Upload server log and failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure
+          path: |
+            ${{ runner.temp }}/nerp.log
+            ${{ env.NERP_E2E_OUTPUT }}/*.png
+          if-no-files-found: ignore

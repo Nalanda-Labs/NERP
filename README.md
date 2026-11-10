@@ -1,5 +1,8 @@
 # NERP
 
+[![Build](https://github.com/Nalanda-Labs/NERP/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/Nalanda-Labs/NERP/actions/workflows/build.yml)
+[![Tests](https://github.com/Nalanda-Labs/NERP/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Nalanda-Labs/NERP/actions/workflows/tests.yml)
+
 A company management platform (CRM, tasks and projects, documents, email), written from scratch.
 
 | Part     | Stack                                                                         |

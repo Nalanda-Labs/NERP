@@ -26,10 +26,10 @@ on `../db/cleanup.ts`). Leftovers from interrupted runs: `node ../db/cleanup-tes
   `.env`).
 - For `api11` and `ui11` (Gmail / Microsoft 365 sign-in): the tests start a mock OAuth
   provider on 127.0.0.1:8099; start the server with
-  `GOOGLE_CLIENT_ID=g GOOGLE_CLIENT_SECRET=s GOOGLE_OAUTH_AUTH_URL=http://127.0.0.1:8099/google/authorize GOOGLE_OAUTH_TOKEN_URL=http://127.0.0.1:8099/google/token`
+  `GOOGLE_CLIENT_ID=g GOOGLE_CLIENT_SECRET=shh GOOGLE_OAUTH_AUTH_URL=http://127.0.0.1:8099/google/authorize GOOGLE_OAUTH_TOKEN_URL=http://127.0.0.1:8099/google/token`
   (and the same with `MICROSOFT_…` and `/microsoft/…`). Without them, skip those two.
 - For `api36`, `ui37` and `api42` (directory and sign-on): OpenLDAP installed (`slapd` and `slapadd`,
-  with the schemas in `/etc/openldap/schema`). The suites run their own throwaway `slapd` on
+  with the schemas in `/etc/openldap/schema` or, on Debian/Ubuntu, `/etc/ldap/schema`). The suites run their own throwaway `slapd` on
   127.0.0.1:3893 (configuration and database in the output folder, removed afterwards) and a
   mock OpenID Connect provider on 9477/9478. Start the server with
   `PUBLIC_URL=http://localhost:8080` so the sign-on callback comes back to it, and with

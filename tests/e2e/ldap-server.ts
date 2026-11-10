@@ -12,13 +12,15 @@ export const LDAP_PORT = 3893;
 export const BASE_DN = 'dc=acme,dc=test';
 export const SERVICE_DN = `cn=svc,${BASE_DN}`;
 export const SERVICE_PASSWORD = 'service-pass-1';
-const SCHEMA = '/etc/openldap/schema';
-
 export interface Person { uid: string; given: string; sn: string; email: string; password: string; title?: string; phone?: string; department?: string }
 
 const find = (names: string[]) => names.find((p) => existsSync(p));
 const SLAPD = find(['/usr/sbin/slapd', '/usr/bin/slapd', '/usr/lib/openldap/slapd']);
 const SLAPADD = find(['/usr/sbin/slapadd', '/usr/bin/slapadd']);
+// Arch and Fedora keep the schemas in /etc/openldap, Debian and Ubuntu in /etc/ldap.
+const SCHEMA = find(['/etc/openldap/schema', '/etc/ldap/schema']) ?? '/etc/openldap/schema';
+// Debian and Ubuntu build the mdb backend as a module; elsewhere it is part of slapd.
+const MDB_MODULE_DIR = ['/usr/lib/ldap', '/usr/lib/openldap', '/usr/lib64/openldap'].find((d) => existsSync(join(d, 'back_mdb.so')));
 
 /** Writes the configuration and entries and starts slapd; returns a function that stops it
  *  and removes its files. */
@@ -27,7 +29,9 @@ export function startLdap(name: string, people: Person[]): () => void {
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(join(dir, 'db'), { recursive: true });
   const conf = join(dir, 'slapd.conf');
-  writeFileSync(conf, `
+  writeFileSync(conf, `${MDB_MODULE_DIR ? `
+modulepath ${MDB_MODULE_DIR}
+moduleload back_mdb` : ''}
 include ${SCHEMA}/core.schema
 include ${SCHEMA}/cosine.schema
 include ${SCHEMA}/inetorgperson.schema
