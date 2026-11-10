@@ -217,22 +217,22 @@
 							<div>
 								<label class="label capitalize" for="f-{kind}">{kind}</label>
 								<select id="f-{kind}" class="input" value={(t as unknown as Record<string, string | null>)[field] ?? ''} onchange={(e) => change({ [field]: e.currentTarget.value || null })}>
-									<option value="">—</option>
-									{#each of(kind) as o (o.id)}<option value={o.id}>{o.name}</option>{/each}
+									<option value="" selected={!(t as unknown as Record<string, string | null>)[field]}>—</option>
+									{#each of(kind) as o (o.id)}<option value={o.id} selected={o.id === (t as unknown as Record<string, string | null>)[field]}>{o.name}</option>{/each}
 								</select>
 							</div>
 						{/each}
 						<div>
 							<label class="label" for="f-resp">Responsible</label>
 							<select id="f-resp" class="input" value={t.responsible_id ?? ''} onchange={(e) => change({ responsible_id: e.currentTarget.value || null })}>
-								<option value="">Nobody</option>
-								{#each team as u (u.id)}<option value={u.id}>{u.name}</option>{/each}
+								<option value="" selected={!t.responsible_id}>Nobody</option>
+								{#each team as u (u.id)}<option value={u.id} selected={u.id === t.responsible_id}>{u.name}</option>{/each}
 							</select>
 						</div>
 						<div>
 							<label class="label" for="f-sla">SLA</label>
 							<select id="f-sla" class="input" value={t.sla_id ?? ''} onchange={(e) => e.currentTarget.value && change({ sla_id: e.currentTarget.value })}>
-								{#each slas as s (s.id)}<option value={s.id}>{s.name} ({duration(s.response_minutes)})</option>{/each}
+								{#each slas as s (s.id)}<option value={s.id} selected={s.id === t.sla_id}>{s.name} ({duration(s.response_minutes)})</option>{/each}
 							</select>
 						</div>
 						<label class="flex items-center gap-2"><input type="checkbox" checked={t.on_hold} onchange={(e) => change({ on_hold: e.currentTarget.checked })} />On hold (the clock stops)</label>

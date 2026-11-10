@@ -221,8 +221,8 @@
 								<input class="input flex-1" aria-label="Name" value={en.name} onchange={(e) => updateEntry(en.id, { name: e.currentTarget.value })} />
 								{#if kind === 'category'}
 									<select class="input w-36" aria-label="Goes to" value={en.responsible_id ?? ''} onchange={(e) => updateEntry(en.id, { responsible_id: e.currentTarget.value || null })}>
-										<option value="">Nobody</option>
-										{#each team as u (u.id)}<option value={u.id}>{u.name}</option>{/each}
+										<option value="" selected={!en.responsible_id}>Nobody</option>
+										{#each team as u (u.id)}<option value={u.id} selected={u.id === en.responsible_id}>{u.name}</option>{/each}
 									</select>
 								{/if}
 								{#if !['mark', 'difficulty'].includes(kind)}

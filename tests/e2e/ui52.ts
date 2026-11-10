@@ -108,8 +108,8 @@ try {
     await row.locator('[data-due]', { hasText: /due in [34] h/ }).waitFor();
     await row.locator('a').click();
     await sue.locator('[data-deadline]', { hasText: /Reply due in [34] h/ }).waitFor();
-    if (await sue.locator('#f-sla').inputValue() === '') throw new Error('no SLA');
-    if (!(await sue.locator('#f-sla option:checked').textContent())?.includes(`Hardware SLA ${s}`)) throw new Error('wrong SLA');
+    // The SLA list loads after the ticket: wait until it shows the ticket's agreement.
+    await sue.waitForFunction((name) => (document.querySelector('#f-sla') as HTMLSelectElement | null)?.selectedOptions[0]?.textContent?.includes(name), `Hardware SLA ${s}`);
   });
 
   await step('a note for support only', async () => {
