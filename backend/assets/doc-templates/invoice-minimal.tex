@@ -1,0 +1,85 @@
+% NERP example invoice "Minimal" (LuaLaTeX): monochrome, hairlines, amount due up front.
+% \crm{path} prints a value, \crmrows{list}{…\crmrow{field}…} repeats rows,
+% \crmif{path}{…} prints only when the value is set. Values are always printed literally.
+\documentclass[9pt]{extarticle}
+\usepackage[a4paper,margin=22mm]{geometry}
+\usepackage{fontspec}
+\usepackage[english,bidi=basic]{babel}
+\babelprovide[import,onchar=ids fonts]{arabic}
+\babelprovide[import,onchar=ids fonts]{hebrew}
+\babelfont[arabic]{rm}[RawFeature={mode=harf}]{Noto Sans Arabic}
+\babelfont[hebrew]{rm}[RawFeature={mode=harf}]{Noto Sans Hebrew}
+\directlua{luaotfload.add_fallback("nerpfallback", {
+  "Noto Sans Devanagari:mode=harf;", "Noto Sans Bengali:mode=harf;", "Noto Sans Arabic:mode=harf;",
+  "Noto Sans Hebrew:mode=harf;", "Noto Sans CJK SC:mode=harf;", "Noto Sans Thai:mode=harf;"})}
+\setmainfont{Noto Sans}[RawFeature={fallback=nerpfallback}]
+\usepackage[table]{xcolor}
+\usepackage{longtable,array,lastpage,fancyhdr,booktabs}
+\usepackage{nerp}
+\definecolor{muted}{gray}{0.47}
+\definecolor{hair}{gray}{0.78}
+\setlength\parindent{0pt}
+\newcommand\lbl[1]{{\fontsize{6.5}{8}\selectfont\color{muted}\addfontfeatures{LetterSpace=8}\MakeUppercase{#1}}}
+\pagestyle{fancy}\fancyhf{}\renewcommand\headrulewidth{0pt}
+\fancyfoot[L]{\scriptsize\color{muted}\crm{seller.legal_name}\crmif{seller.tax_id}{\ · \crm{seller.tax_id}}}
+\fancyfoot[R]{\scriptsize\color{muted}\thepage/\pageref{LastPage}}
+
+\begin{document}
+{\large\bfseries\crm{seller.name}}\hfill\lbl{\crm{doc.title} \crm{doc.number}}
+
+\vspace{16mm}
+\lbl{Amount due}\par\vspace{2mm}
+{\fontsize{32}{38}\selectfont\crm{totals.total}\par}
+
+\vspace{12mm}
+\begin{minipage}[t]{0.31\textwidth}\raggedright
+  \lbl{Billed to}\par\smallskip
+  \textbf{\crm{client.name}}\par
+  \crmif{client.contact_person}{\crm{client.contact_person}\par}
+  \crmif{client.address}{\crm{client.address}\par}
+  \crmif{client.tax_line}{{\color{muted}\crm{client.tax_line}}\par}
+  \crmif{client.email}{{\color{muted}\crm{client.email}}\par}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.31\textwidth}\raggedright
+  \lbl{Details}\par\smallskip
+  \crm{doc.number}\par
+  Issued \crm{doc.date}\par
+  {\color{muted}\crm{record.title}}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.31\textwidth}\raggedright
+  \lbl{From}\par\smallskip
+  \textbf{\crm{seller.name}}\par
+  \crm{seller.address}\par
+  \crmif{seller.email}{{\color{muted}\crm{seller.email}}\par}
+\end{minipage}
+
+\vspace{14mm}
+\renewcommand\arraystretch{1.9}
+\setlength\tabcolsep{0pt}
+\setlength\aboverulesep{0pt}\setlength\belowrulesep{0pt}
+\arrayrulecolor{hair}
+\setlength\LTleft{0pt}\setlength\LTright{0pt}
+\begin{longtable}{@{}>{\raggedright\arraybackslash}p{0.46\textwidth}@{\extracolsep{\fill}}rrrr@{}}
+\leavevmode\lbl{Description} & \lbl{Qty} & \lbl{Price} & \lbl{Tax} & \lbl{Amount}\\\specialrule{0.35pt}{0pt}{0pt}
+\endhead
+\crmrows{products}{\crmrow{name} & \crmrow{quantity} \crmrow{unit} & \crmrow{price} & \crmrow{tax_rate} & \crmrow{total}\\\specialrule{0.35pt}{0pt}{0pt}}
+\crmifnot{has_products}{\crm{record.title} & & & & \crm{totals.total}\\\specialrule{0.35pt}{0pt}{0pt}}
+\end{longtable}
+
+\renewcommand\arraystretch{1.4}
+\hfill\begin{tabular*}{70mm}{@{}l@{\extracolsep{\fill}}r@{}}
+{\color{muted}Subtotal} & \crm{totals.subtotal}\\
+\crmif{totals.has_discount}{{\color{muted}Discount} & −\crm{totals.discount}\\}
+\crmif{totals.has_tax}{{\color{muted}Tax} & \crm{totals.tax}\\}
+\arrayrulecolor{black}\specialrule{0.6pt}{0pt}{0pt}
+\textbf{Total} & \textbf{\crm{totals.total}}\\
+\end{tabular*}
+
+\vfill
+\begin{minipage}[t]{0.47\textwidth}\raggedright
+  \crmif{seller.bank_details}{\lbl{Payment}\par\smallskip\crm{seller.bank_details}}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.47\textwidth}\raggedright
+  \crmif{record.comments}{\lbl{Notes}\par\smallskip\crm{record.comments}}
+\end{minipage}
+\end{document}

@@ -1,0 +1,2692 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "NERP API",
+  "version": "1",
+  "description": "The REST API the NERP web app uses, open to other systems through API keys.\n\nCreate a key under **API & webhooks** and send it as `Authorization: Bearer nerp_…`. A key acts as the employee who made it, with their access rights, limited to its scopes, and is limited to 600 requests a minute. Errors come as `{\"error\": {\"code\", \"message\"}}` with a 4xx status.\n\nThis reference lists the main endpoints; everything under the same areas (`/crm`, `/tasks`, `/projects`, `/users`, `/departments`, `/files`) is reachable with the matching scope."
+ },
+ "servers": [
+  {
+   "url": "/api"
+  }
+ ],
+ "security": [
+  {
+   "apiKey": []
+  }
+ ],
+ "components": {
+  "securitySchemes": {
+   "apiKey": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "An API key: `nerp_…`"
+   }
+  }
+ },
+ "tags": [
+  {
+   "name": "CRM"
+  },
+  {
+   "name": "Tasks"
+  },
+  {
+   "name": "Employees"
+  },
+  {
+   "name": "Files"
+  }
+ ],
+ "paths": {
+  "/crm/config": {
+   "get": {
+    "summary": "CRM configuration",
+    "description": "Record types with their pipelines, stages, built-in and custom fields, your access rights, currencies and option lists.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    }
+   }
+  },
+  "/crm/{type}/items": {
+   "get": {
+    "summary": "List records",
+    "description": "Records you may see, newest change first. Returns `{items, total, limit, offset}`.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "type",
+      "in": "path",
+      "description": "Record type code: `lead`, `deal`, `contact`, `company`, `quote`, `invoice`, or a smart process's code",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "q",
+      "in": "query",
+      "description": "Search name, phone, email or #number (3+ characters)",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "category_id",
+      "in": "query",
+      "description": "Pipeline",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "stage_id",
+      "in": "query",
+      "description": "Comma-separated stage ids",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "semantics",
+      "in": "query",
+      "description": "Comma-separated: process (open), success, failure",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "assigned_to",
+      "in": "query",
+      "description": "Comma-separated employee ids, or `me`",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "company_id",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "contact_id",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "created_from",
+      "in": "query",
+      "description": "YYYY-MM-DD",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "created_to",
+      "in": "query",
+      "description": "YYYY-MM-DD",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "updated_from",
+      "in": "query",
+      "description": "YYYY-MM-DD",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "updated_to",
+      "in": "query",
+      "description": "YYYY-MM-DD",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "close_from",
+      "in": "query",
+      "description": "YYYY-MM-DD",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "close_to",
+      "in": "query",
+      "description": "YYYY-MM-DD",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "amount_min",
+      "in": "query",
+      "description": "In the base currency",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "amount_max",
+      "in": "query",
+      "description": "In the base currency",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "activity",
+      "in": "query",
+      "description": "overdue | today | planned | none",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "uf",
+      "in": "query",
+      "description": "JSON object of custom-field equality filters",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "description": "updated | created | title | amount | close_date | number | activity",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "dir",
+      "in": "query",
+      "description": "asc | desc",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "Up to 200 (default 50)",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ]
+   },
+   "post": {
+    "summary": "Create a record",
+    "description": "Unknown fields are rejected. Robots of the starting stage run as usual.\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "type",
+      "in": "path",
+      "description": "Record type code: `lead`, `deal`, `contact`, `company`, `quote`, `invoice`, or a smart process's code",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "title": {
+          "type": "string",
+          "description": "Leads, deals, quotes, invoices, smart processes"
+         },
+         "first_name": {
+          "type": "string",
+          "description": "Leads and contacts"
+         },
+         "last_name": {
+          "type": "string"
+         },
+         "company_name": {
+          "type": "string",
+          "description": "Leads and companies"
+         },
+         "opportunity": {
+          "type": "string",
+          "description": "Amount, as a decimal string"
+         },
+         "currency": {
+          "type": "string",
+          "description": "ISO code, e.g. EUR"
+         },
+         "category_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "stage_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "assigned_to": {
+          "type": "string",
+          "description": "Responsible employee",
+          "format": "uuid"
+         },
+         "company_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "contact_ids": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "format": "uuid"
+          }
+         },
+         "close_date": {
+          "type": "string",
+          "description": "Expected close date / valid until / due date",
+          "format": "date"
+         },
+         "probability": {
+          "type": "integer"
+         },
+         "source": {
+          "type": "string",
+          "description": "e.g. website, call, email"
+         },
+         "source_details": {
+          "type": "string"
+         },
+         "comments": {
+          "type": "string"
+         },
+         "multifields": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "properties": {
+            "kind": {
+             "type": "string",
+             "description": "phone, email, web, im"
+            },
+            "value_type": {
+             "type": "string",
+             "description": "work, mobile, …"
+            },
+            "value": {
+             "type": "string"
+            }
+           }
+          }
+         },
+         "address": {
+          "type": "object",
+          "properties": {
+           "line1": {
+            "type": "string"
+           },
+           "line2": {
+            "type": "string"
+           },
+           "city": {
+            "type": "string"
+           },
+           "region": {
+            "type": "string"
+           },
+           "postal_code": {
+            "type": "string"
+           },
+           "country": {
+            "type": "string",
+            "description": "ISO 3166 alpha-2"
+           }
+          }
+         },
+         "uf": {
+          "type": "object",
+          "description": "Custom fields by code, e.g. {\"uf_region\": \"north\"}"
+         }
+        }
+       },
+       "example": {
+        "title": "50 licences for Globex",
+        "opportunity": "12500",
+        "currency": "EUR",
+        "company_id": "…",
+        "contact_ids": [
+         "…"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/crm/{type}/items/{id}": {
+   "get": {
+    "summary": "Get a record",
+    "description": "With contact details, linked contacts, related records, quotes and invoices made from it, and observers.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "type",
+      "in": "path",
+      "description": "Record type code: `lead`, `deal`, `contact`, `company`, `quote`, `invoice`, or a smart process's code",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   },
+   "patch": {
+    "summary": "Change a record",
+    "description": "Send only the fields to change. Moving `stage_id` runs that stage's robots; each save is kept in the record's history.\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "type",
+      "in": "path",
+      "description": "Record type code: `lead`, `deal`, `contact`, `company`, `quote`, `invoice`, or a smart process's code",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "title": {
+          "type": "string",
+          "description": "Leads, deals, quotes, invoices, smart processes"
+         },
+         "first_name": {
+          "type": "string",
+          "description": "Leads and contacts"
+         },
+         "last_name": {
+          "type": "string"
+         },
+         "company_name": {
+          "type": "string",
+          "description": "Leads and companies"
+         },
+         "opportunity": {
+          "type": "string",
+          "description": "Amount, as a decimal string"
+         },
+         "currency": {
+          "type": "string",
+          "description": "ISO code, e.g. EUR"
+         },
+         "category_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "stage_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "assigned_to": {
+          "type": "string",
+          "description": "Responsible employee",
+          "format": "uuid"
+         },
+         "company_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "contact_ids": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "format": "uuid"
+          }
+         },
+         "close_date": {
+          "type": "string",
+          "description": "Expected close date / valid until / due date",
+          "format": "date"
+         },
+         "probability": {
+          "type": "integer"
+         },
+         "source": {
+          "type": "string",
+          "description": "e.g. website, call, email"
+         },
+         "source_details": {
+          "type": "string"
+         },
+         "comments": {
+          "type": "string"
+         },
+         "multifields": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "properties": {
+            "kind": {
+             "type": "string",
+             "description": "phone, email, web, im"
+            },
+            "value_type": {
+             "type": "string",
+             "description": "work, mobile, …"
+            },
+            "value": {
+             "type": "string"
+            }
+           }
+          }
+         },
+         "address": {
+          "type": "object",
+          "properties": {
+           "line1": {
+            "type": "string"
+           },
+           "line2": {
+            "type": "string"
+           },
+           "city": {
+            "type": "string"
+           },
+           "region": {
+            "type": "string"
+           },
+           "postal_code": {
+            "type": "string"
+           },
+           "country": {
+            "type": "string",
+            "description": "ISO 3166 alpha-2"
+           }
+          }
+         },
+         "uf": {
+          "type": "object",
+          "description": "Custom fields by code, e.g. {\"uf_region\": \"north\"}"
+         }
+        }
+       },
+       "example": {
+        "stage_id": "…",
+        "opportunity": "14000"
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete a record",
+    "description": "Moves it to the recycle bin.\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "type",
+      "in": "path",
+      "description": "Record type code: `lead`, `deal`, `contact`, `company`, `quote`, `invoice`, or a smart process's code",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   }
+  },
+  "/crm/{type}/kanban": {
+   "get": {
+    "summary": "Board",
+    "description": "Columns per stage with counts, totals and the first records.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "type",
+      "in": "path",
+      "description": "Record type code: `lead`, `deal`, `contact`, `company`, `quote`, `invoice`, or a smart process's code",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "category_id",
+      "in": "query",
+      "description": "Pipeline",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "per_column",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ]
+   }
+  },
+  "/crm/{type}/items/from/{source}": {
+   "post": {
+    "summary": "Make a quote or invoice",
+    "description": "`type` is `quote` (from a deal) or `invoice` (from a deal or quote); copies client, amount and products.\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "type",
+      "in": "path",
+      "description": "quote or invoice",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "source",
+      "in": "path",
+      "description": "Deal or quote id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   }
+  },
+  "/crm/lookup": {
+   "get": {
+    "summary": "Quick search",
+    "description": "Records of the given types by name, number, phone or email.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "types",
+      "in": "query",
+      "description": "Comma-separated type codes",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "q",
+      "in": "query",
+      "description": "Search text",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  },
+  "/crm/items/{id}/products": {
+   "get": {
+    "summary": "Product rows",
+    "description": "Rows with line totals and the record's totals.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   },
+   "put": {
+    "summary": "Replace product rows",
+    "description": "The record's amount follows the rows unless it was set by hand.\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "rows": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "properties": {
+            "product_id": {
+             "type": "string",
+             "format": "uuid"
+            },
+            "name": {
+             "type": "string"
+            },
+            "price": {
+             "type": "string"
+            },
+            "quantity": {
+             "type": "string"
+            },
+            "unit": {
+             "type": "string"
+            },
+            "discount_kind": {
+             "type": "string",
+             "description": "percent | amount"
+            },
+            "discount_value": {
+             "type": "string"
+            },
+            "tax_rate": {
+             "type": "string"
+            },
+            "tax_included": {
+             "type": "boolean"
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/crm/items/{id}/timeline": {
+   "get": {
+    "summary": "Timeline",
+    "description": "Comments, changes, activities, emails and automation, newest first (50 at a time; `before` pages).\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "before",
+      "in": "query",
+      "description": "Entries older than this time",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "format": "date-time"
+      }
+     }
+    ]
+   },
+   "post": {
+    "summary": "Add a comment",
+    "description": "\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "body": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "body"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/crm/activities": {
+   "get": {
+    "summary": "Activities",
+    "description": "Activities of a record (`item_id`), or yours. `state`: open | completed | overdue | today | all. Returns `{items, total, limit, offset}`.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "item_id",
+      "in": "query",
+      "required": false,
+      "description": "",
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "state",
+      "in": "query",
+      "required": false,
+      "description": "open | completed | overdue | today | all",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "description": "",
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "required": false,
+      "description": "",
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ]
+   },
+   "post": {
+    "summary": "Plan an activity",
+    "description": "\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "item_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "kind": {
+          "type": "string",
+          "description": "todo | call | meeting | email"
+         },
+         "subject": {
+          "type": "string"
+         },
+         "description": {
+          "type": "string"
+         },
+         "deadline": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "starts_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "ends_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "responsible_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "direction": {
+          "type": "string",
+          "description": "incoming | outgoing"
+         }
+        },
+        "required": [
+         "item_id",
+         "subject"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/crm/activities/{id}/complete": {
+   "post": {
+    "summary": "Complete an activity",
+    "description": "\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Activity id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "result": {
+          "type": "string",
+          "description": "Outcome"
+         },
+         "reopen": {
+          "type": "boolean",
+          "description": "Re-open instead of completing"
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/crm/items/{id}/documents": {
+   "get": {
+    "summary": "Documents of a record",
+    "description": "\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   },
+   "post": {
+    "summary": "Generate a document",
+    "description": "Typst documents are ready at once; LaTeX and Word ones are rendered in the background (poll `GET /crm/documents/{id}` until `status` is `ready`).\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "template_id": {
+          "type": "string",
+          "format": "uuid"
+         }
+        },
+        "required": [
+         "template_id"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/crm/documents/{id}": {
+   "get": {
+    "summary": "A document",
+    "description": "`pdf_file_id` downloads with `GET /files/{id}/content`.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Document id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   }
+  },
+  "/crm/items/{id}/observers": {
+   "put": {
+    "summary": "Set observers",
+    "description": "Replaces the record's observers.\n\nAPI key scope: `crm`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "user_ids": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "format": "uuid"
+          }
+         }
+        },
+        "required": [
+         "user_ids"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/crm/items/{id}/tasks": {
+   "get": {
+    "summary": "Tasks of a record",
+    "description": "Tasks linked to the record that you may see.\n\nAPI key scope: `crm:read`.",
+    "tags": [
+     "CRM"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Record id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   }
+  },
+  "/tasks": {
+   "get": {
+    "summary": "List tasks",
+    "description": "Returns `{items, total, limit, offset}`.\n\nAPI key scope: `tasks:read`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "view",
+      "in": "query",
+      "description": "my | created | assisting | watching | all",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "status",
+      "in": "query",
+      "description": "Comma-separated: new, in_progress, review, done, deferred",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "project_id",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "responsible_id",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     },
+     {
+      "name": "q",
+      "in": "query",
+      "description": "Search",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "overdue",
+      "in": "query",
+      "description": "true to show only overdue",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "sort",
+      "in": "query",
+      "description": "deadline | created | activity | priority | position",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ]
+   },
+   "post": {
+    "summary": "Create a task",
+    "description": "\n\nAPI key scope: `tasks`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "title": {
+          "type": "string"
+         },
+         "description": {
+          "type": "string"
+         },
+         "responsible_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "assistant_ids": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "format": "uuid"
+          }
+         },
+         "watcher_ids": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "format": "uuid"
+          }
+         },
+         "deadline": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "start_date": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "priority": {
+          "type": "string",
+          "description": "low | normal | high"
+         },
+         "project_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "parent_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "requires_review": {
+          "type": "boolean"
+         },
+         "checklist": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "crm_item_ids": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "format": "uuid"
+          },
+          "description": "CRM records the task is about"
+         }
+        },
+        "required": [
+         "title"
+        ]
+       },
+       "example": {
+        "title": "Call back about the offer",
+        "deadline": "2027-01-15T10:00:00Z",
+        "crm_item_ids": [
+         "…"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/tasks/{id}": {
+   "get": {
+    "summary": "Get a task",
+    "description": "With people, checklist, files, subtasks, dependencies and linked CRM records.\n\nAPI key scope: `tasks:read`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Task id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   },
+   "patch": {
+    "summary": "Change a task",
+    "description": "Send only what changes; null clears a date or project.\n\nAPI key scope: `tasks`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Task id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "title": {
+          "type": "string"
+         },
+         "description": {
+          "type": "string"
+         },
+         "responsible_id": {
+          "type": "string",
+          "format": "uuid"
+         },
+         "deadline": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "priority": {
+          "type": "string"
+         },
+         "project_id": {
+          "type": "string",
+          "format": "uuid"
+         }
+        }
+       }
+      }
+     }
+    }
+   },
+   "delete": {
+    "summary": "Delete a task",
+    "description": "\n\nAPI key scope: `tasks`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Task id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   }
+  },
+  "/tasks/{id}/status": {
+   "post": {
+    "summary": "Change a task's status",
+    "description": "Moves through new → in_progress → (review) → done; `deferred` puts it aside.\n\nAPI key scope: `tasks`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Task id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "status": {
+          "type": "string",
+          "description": "new | in_progress | review | done | deferred"
+         }
+        },
+        "required": [
+         "status"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/tasks/{id}/crm": {
+   "put": {
+    "summary": "Link a task to CRM records",
+    "description": "Replaces the links you can see.\n\nAPI key scope: `tasks`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Task id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "item_ids": {
+          "type": "array",
+          "items": {
+           "type": "string",
+           "format": "uuid"
+          }
+         }
+        },
+        "required": [
+         "item_ids"
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  "/projects": {
+   "get": {
+    "summary": "Projects",
+    "description": "Projects you may see.\n\nAPI key scope: `tasks:read`.",
+    "tags": [
+     "Tasks"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    }
+   }
+  },
+  "/users": {
+   "get": {
+    "summary": "Employees",
+    "description": "Search with `q`; `limit`/`offset` page.\n\nAPI key scope: `users:read`.",
+    "tags": [
+     "Employees"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "q",
+      "in": "query",
+      "description": "Name or email",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "offset",
+      "in": "query",
+      "description": "",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ]
+   }
+  },
+  "/users/{id}": {
+   "get": {
+    "summary": "An employee",
+    "description": "\n\nAPI key scope: `users:read`.",
+    "tags": [
+     "Employees"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "Employee id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   }
+  },
+  "/departments": {
+   "get": {
+    "summary": "Company structure",
+    "description": "All departments; build the tree from `parent_id`.\n\nAPI key scope: `users:read`.",
+    "tags": [
+     "Employees"
+    ],
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    }
+   }
+  },
+  "/files": {
+   "post": {
+    "summary": "Upload a file",
+    "description": "multipart/form-data with a `file` part; returns its id (attach it to tasks or emails).\n\nAPI key scope: `files`.",
+    "tags": [
+     "Files"
+    ],
+    "requestBody": {
+     "content": {
+      "multipart/form-data": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "file": {
+          "type": "string",
+          "format": "binary"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK"
+     }
+    }
+   }
+  },
+  "/files/{id}/content": {
+   "get": {
+    "summary": "Download a file",
+    "description": "\n\nAPI key scope: `files`.",
+    "tags": [
+     "Files"
+    ],
+    "responses": {
+     "200": {
+      "description": "The file"
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "description": "File id",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "format": "uuid"
+      }
+     }
+    ]
+   }
+  }
+ },
+ "webhooks": {
+  "crm.item.created": {
+   "post": {
+    "summary": "A CRM record was created.",
+    "description": "A CRM record was created.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "description": "Record type code"
+           },
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "category_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage": {
+            "type": "string"
+           },
+           "stage_semantics": {
+            "type": "string",
+            "description": "process | success | failure"
+           },
+           "assigned_to": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "company_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "opportunity": {
+            "type": "string"
+           },
+           "currency": {
+            "type": "string"
+           },
+           "url": {
+            "type": "string"
+           },
+           "changes": {
+            "type": "array",
+            "description": "crm.item.updated only",
+            "items": {
+             "type": "object",
+             "properties": {
+              "field": {
+               "type": "string"
+              },
+              "from": {},
+              "to": {}
+             }
+            }
+           },
+           "previous_stage_id": {
+            "type": "string",
+            "description": "crm.item.stage_changed only"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "crm.item.updated": {
+   "post": {
+    "summary": "A record's fields changed; `changes` lists them.",
+    "description": "A record's fields changed; `changes` lists them.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "description": "Record type code"
+           },
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "category_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage": {
+            "type": "string"
+           },
+           "stage_semantics": {
+            "type": "string",
+            "description": "process | success | failure"
+           },
+           "assigned_to": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "company_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "opportunity": {
+            "type": "string"
+           },
+           "currency": {
+            "type": "string"
+           },
+           "url": {
+            "type": "string"
+           },
+           "changes": {
+            "type": "array",
+            "description": "crm.item.updated only",
+            "items": {
+             "type": "object",
+             "properties": {
+              "field": {
+               "type": "string"
+              },
+              "from": {},
+              "to": {}
+             }
+            }
+           },
+           "previous_stage_id": {
+            "type": "string",
+            "description": "crm.item.stage_changed only"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "crm.item.stage_changed": {
+   "post": {
+    "summary": "A record moved to another stage.",
+    "description": "A record moved to another stage.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "description": "Record type code"
+           },
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "category_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage": {
+            "type": "string"
+           },
+           "stage_semantics": {
+            "type": "string",
+            "description": "process | success | failure"
+           },
+           "assigned_to": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "company_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "opportunity": {
+            "type": "string"
+           },
+           "currency": {
+            "type": "string"
+           },
+           "url": {
+            "type": "string"
+           },
+           "changes": {
+            "type": "array",
+            "description": "crm.item.updated only",
+            "items": {
+             "type": "object",
+             "properties": {
+              "field": {
+               "type": "string"
+              },
+              "from": {},
+              "to": {}
+             }
+            }
+           },
+           "previous_stage_id": {
+            "type": "string",
+            "description": "crm.item.stage_changed only"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "crm.item.deleted": {
+   "post": {
+    "summary": "A record went to the recycle bin.",
+    "description": "A record went to the recycle bin.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "type": {
+            "type": "string",
+            "description": "Record type code"
+           },
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "category_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "stage": {
+            "type": "string"
+           },
+           "stage_semantics": {
+            "type": "string",
+            "description": "process | success | failure"
+           },
+           "assigned_to": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "company_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "opportunity": {
+            "type": "string"
+           },
+           "currency": {
+            "type": "string"
+           },
+           "url": {
+            "type": "string"
+           },
+           "changes": {
+            "type": "array",
+            "description": "crm.item.updated only",
+            "items": {
+             "type": "object",
+             "properties": {
+              "field": {
+               "type": "string"
+              },
+              "from": {},
+              "to": {}
+             }
+            }
+           },
+           "previous_stage_id": {
+            "type": "string",
+            "description": "crm.item.stage_changed only"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "crm.activity.created": {
+   "post": {
+    "summary": "An activity was planned.",
+    "description": "An activity was planned.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "item_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "kind": {
+            "type": "string"
+           },
+           "subject": {
+            "type": "string"
+           },
+           "deadline": {
+            "type": "string",
+            "format": "date-time"
+           },
+           "responsible_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "is_completed": {
+            "type": "boolean"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "crm.activity.completed": {
+   "post": {
+    "summary": "An activity was completed.",
+    "description": "An activity was completed.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "item_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "kind": {
+            "type": "string"
+           },
+           "subject": {
+            "type": "string"
+           },
+           "deadline": {
+            "type": "string",
+            "format": "date-time"
+           },
+           "responsible_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "is_completed": {
+            "type": "boolean"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "task.created": {
+   "post": {
+    "summary": "A task was created.",
+    "description": "A task was created.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "status": {
+            "type": "string"
+           },
+           "priority": {
+            "type": "string"
+           },
+           "deadline": {
+            "type": "string",
+            "format": "date-time"
+           },
+           "responsible_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "project_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "url": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "task.updated": {
+   "post": {
+    "summary": "A task changed.",
+    "description": "A task changed.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "status": {
+            "type": "string"
+           },
+           "priority": {
+            "type": "string"
+           },
+           "deadline": {
+            "type": "string",
+            "format": "date-time"
+           },
+           "responsible_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "project_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "url": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "task.completed": {
+   "post": {
+    "summary": "A task was completed.",
+    "description": "A task was completed.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "status": {
+            "type": "string"
+           },
+           "priority": {
+            "type": "string"
+           },
+           "deadline": {
+            "type": "string",
+            "format": "date-time"
+           },
+           "responsible_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "project_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "url": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "task.deleted": {
+   "post": {
+    "summary": "A task was deleted (id, number, title, project_id).",
+    "description": "A task was deleted (id, number, title, project_id).\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "number": {
+            "type": "integer"
+           },
+           "title": {
+            "type": "string"
+           },
+           "status": {
+            "type": "string"
+           },
+           "priority": {
+            "type": "string"
+           },
+           "deadline": {
+            "type": "string",
+            "format": "date-time"
+           },
+           "responsible_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "project_id": {
+            "type": "string",
+            "format": "uuid"
+           },
+           "url": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  },
+  "ping": {
+   "post": {
+    "summary": "Sent by “Send test”.",
+    "description": "Sent by “Send test”.\n\nHeaders: `X-NERP-Event`, `X-NERP-Delivery` and `X-NERP-Signature: sha256=<HMAC-SHA256 of the raw body with the webhook's secret>`. Answer with any 2xx; network errors, 5xx and 429 are retried after 1, 5, 30, 120 and 360 minutes.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string",
+          "description": "Delivery id",
+          "format": "uuid"
+         },
+         "event": {
+          "type": "string"
+         },
+         "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+         },
+         "data": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string"
+           },
+           "webhook": {
+            "type": "string"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Received"
+     }
+    }
+   }
+  }
+ }
+}

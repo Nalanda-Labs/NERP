@@ -1,0 +1,18 @@
+{
+  // Type checking only (`npm run check`); Node runs the .ts files directly by stripping types.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    // The individual checks work with loosely shaped API responses.
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["e2e/**/*.ts", "db/**/*.ts"]
+}

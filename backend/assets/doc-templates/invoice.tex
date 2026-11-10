@@ -1,0 +1,67 @@
+% NERP built-in invoice (LuaLaTeX).
+% \crm{path} prints a value, \crmrows{list}{…\crmrow{field}…} repeats rows,
+% \crmif{path}{…} prints only when the value is set. Values are always printed literally.
+\documentclass[10pt]{article}
+\usepackage[a4paper,margin=18mm,bottom=22mm]{geometry}
+\usepackage{fontspec}
+% Right-to-left scripts (Arabic, Hebrew) are detected per character and laid out RTL.
+\usepackage[english,bidi=basic]{babel}
+\babelprovide[import,onchar=ids fonts]{arabic}
+\babelprovide[import,onchar=ids fonts]{hebrew}
+\babelfont[arabic]{rm}[RawFeature={mode=harf}]{Noto Sans Arabic}
+\babelfont[hebrew]{rm}[RawFeature={mode=harf}]{Noto Sans Hebrew}
+% Fallback fonts so names in any script render (LuaHBTeX shaping via mode=harf).
+\directlua{luaotfload.add_fallback("nerpfallback", {
+  "Noto Sans Devanagari:mode=harf;", "Noto Sans Bengali:mode=harf;", "Noto Sans Arabic:mode=harf;",
+  "Noto Sans Hebrew:mode=harf;", "Noto Sans CJK SC:mode=harf;", "Noto Sans Thai:mode=harf;"})}
+\setmainfont{Noto Sans}[RawFeature={fallback=nerpfallback}]
+\usepackage[table]{xcolor}
+\usepackage{longtable,array,lastpage,fancyhdr}
+\usepackage{nerp}
+\definecolor{accent}{HTML}{0B57D0}
+\definecolor{muted}{gray}{0.45}
+\setlength\parindent{0pt}
+\pagestyle{fancy}\fancyhf{}\renewcommand\headrulewidth{0pt}
+\fancyfoot[L]{\footnotesize\color{muted}\crm{seller.legal_name}\crmif{seller.tax_id}{\ · Tax ID \crm{seller.tax_id}}}
+\fancyfoot[R]{\footnotesize\color{muted}\thepage\ / \pageref{LastPage}}
+
+\begin{document}
+\begin{minipage}[t]{0.6\textwidth}
+  {\Large\bfseries\crm{seller.name}}\par\smallskip
+  {\color{muted}\crm{seller.address}\par\crm{seller.phone}\crmif{seller.email}{\ · \crm{seller.email}}}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.35\textwidth}\raggedleft
+  {\huge\bfseries\color{accent}\MakeUppercase{\crm{doc.title}}}\par\smallskip
+  {\color{muted}No.}~\textbf{\crm{doc.number}}\par
+  {\color{muted}Date}~\crm{doc.date}
+\end{minipage}
+
+\vspace{10mm}
+{\scriptsize\bfseries\color{muted}BILL TO}\par
+{\large\bfseries\crm{client.name}}\par
+\crmif{client.contact_person}{\crm{client.contact_person}\par}
+\crmif{client.address}{\crm{client.address}\par}
+\crmif{client.tax_line}{\crm{client.tax_line}\par}
+{\color{muted}\crm{client.email}\crmif{client.phone}{\ · \crm{client.phone}}}
+
+\vspace{8mm}
+\renewcommand\arraystretch{1.4}
+\begin{longtable}{@{}r p{0.36\textwidth} r r r r r@{}}
+\arrayrulecolor{accent}\hline
+\scriptsize\bfseries\# & \scriptsize\bfseries Item & \scriptsize\bfseries Qty & \scriptsize\bfseries Price & \scriptsize\bfseries Discount & \scriptsize\bfseries Tax & \scriptsize\bfseries Amount\\\hline
+\endhead
+\crmrows{products}{\crmrow{n} & \crmrow{name} & \crmrow{quantity} \crmrow{unit} & \crmrow{price} & \crmrow{discount} & \crmrow{tax_rate} & \crmrow{total}\\}
+\crmifnot{has_products}{ & \crm{record.title} & & & & & \crm{totals.total}\\}
+\end{longtable}
+
+\hfill\begin{tabular}{@{}l r@{}}
+{\color{muted}Subtotal} & \crm{totals.subtotal}\\
+\crmif{totals.has_discount}{{\color{muted}Discount} & −\crm{totals.discount}\\}
+\crmif{totals.has_tax}{{\color{muted}Tax} & \crm{totals.tax}\\}
+\arrayrulecolor{accent}\hline
+\large\bfseries Total & \large\bfseries\crm{totals.total}\\
+\end{tabular}
+
+\crmif{seller.bank_details}{\vspace{8mm}{\scriptsize\bfseries\color{muted}PAYMENT DETAILS}\par\crm{seller.bank_details}\par}
+\crmif{record.comments}{\vspace{5mm}{\scriptsize\bfseries\color{muted}NOTES}\par\crm{record.comments}\par}
+\end{document}

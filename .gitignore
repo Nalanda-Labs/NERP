@@ -1,0 +1,33 @@
+# NERP: files that are built, downloaded, local or secret.
+# (backend/, frontend/ and tests/ also have their own .gitignore files.)
+
+# Secrets and local configuration: commit only the examples
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Backend (Rust): build output and uploaded files
+/backend/target/
+/backend/data/
+
+# Frontend (SvelteKit): dependencies, generated files and the built site
+node_modules/
+/frontend/.svelte-kit/
+/frontend/build/
+/frontend/.output/
+vite.config.*.timestamp-*
+
+# Tests: screenshots of failed steps, written where a suite runs
+/tests/e2e/fail*.png
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editors and OS
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

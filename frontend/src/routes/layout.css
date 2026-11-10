@@ -1,0 +1,140 @@
+@import 'tailwindcss';
+@plugin '@tailwindcss/forms';
+
+/* Chart roles, shared by every chart and meter (reference palette, light mode; NERP has no
+   dark theme). Categorical series in this fixed order. */
+:root {
+	--series-1: #2a78d6;
+	--series-2: #eb6834;
+	--series-3: #1baf7a;
+	--grid: #eef0f2;
+	--axis: #c9cdd2;
+	--text-muted: #6b7280;
+}
+
+@theme {
+	--font-sans: 'Roboto', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+	/* Google Blue, Material 3 tones */
+	--color-brand-50: #e8f0fe;
+	--color-brand-100: #d3e3fd;
+	--color-brand-200: #a8c7fa;
+	--color-brand-400: #4c8df6;
+	--color-brand-500: #1a73e8;
+	--color-brand-600: #0b57d0;
+	--color-brand-700: #0842a0;
+	--color-brand-900: #041e49;
+	/* App surfaces */
+	--color-surface: #f8fafd;
+	--color-surface-hover: #e9eef6;
+	/* Tinted container (board columns, info panels) */
+	--color-surface-container: #f0f4f9;
+	/* Google elevation shadows */
+	--shadow-g1: 0 1px 2px 0 rgb(60 64 67 / 0.3), 0 1px 3px 1px rgb(60 64 67 / 0.15);
+	--shadow-g2: 0 1px 2px 0 rgb(60 64 67 / 0.3), 0 2px 6px 2px rgb(60 64 67 / 0.15);
+}
+
+@layer base {
+	body {
+		@apply bg-surface text-slate-800 antialiased;
+	}
+}
+
+@layer components {
+	.btn {
+		@apply inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition
+			focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500
+			disabled:cursor-not-allowed disabled:opacity-50;
+	}
+	/* Google "filled" button */
+	.btn-primary {
+		@apply bg-brand-600 text-white hover:bg-brand-700 hover:shadow-g1;
+	}
+	/* Google "outlined" button */
+	.btn-secondary {
+		@apply border border-slate-300 bg-transparent text-brand-600 hover:bg-brand-50;
+	}
+	.btn-danger {
+		@apply bg-red-600 text-white hover:bg-red-700 hover:shadow-g1;
+	}
+	.btn-ghost {
+		@apply text-slate-600 hover:bg-slate-100 hover:text-slate-900;
+	}
+	.input {
+		@apply block w-full rounded-lg border-slate-300 text-sm shadow-sm placeholder:text-slate-400
+			focus:border-brand-500 focus:ring-brand-500 disabled:bg-slate-100;
+	}
+	.label {
+		@apply mb-1 block text-sm font-medium text-slate-700;
+	}
+	/* Material 3 style: white surface, large radius, no outline. */
+	.card {
+		@apply rounded-2xl bg-white;
+	}
+	/* Clickable cards lift on hover. */
+	a.card,
+	button.card {
+		@apply transition-shadow hover:shadow-g1;
+	}
+	.badge {
+		@apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+	}
+}
+
+/* Rendered Markdown (knowledge base pages). */
+@layer components {
+	.prose-kb {
+		@apply leading-relaxed text-slate-800;
+	}
+	.prose-kb > * + * {
+		@apply mt-4;
+	}
+	.prose-kb h1 {
+		@apply mt-8 text-2xl font-semibold text-slate-900;
+	}
+	.prose-kb h2 {
+		@apply mt-8 border-b border-slate-100 pb-1 text-xl font-semibold text-slate-900;
+	}
+	.prose-kb h3 {
+		@apply mt-6 text-lg font-semibold text-slate-900;
+	}
+	.prose-kb a {
+		@apply text-brand-600 underline underline-offset-2 hover:text-brand-700;
+	}
+	.prose-kb ul {
+		@apply list-disc pl-6;
+	}
+	.prose-kb ol {
+		@apply list-decimal pl-6;
+	}
+	.prose-kb li + li {
+		@apply mt-1;
+	}
+	.prose-kb blockquote {
+		@apply border-l-4 border-slate-200 pl-4 text-slate-600;
+	}
+	.prose-kb code {
+		@apply rounded bg-slate-100 px-1 py-0.5 font-mono text-[0.9em];
+	}
+	.prose-kb pre {
+		@apply overflow-x-auto rounded-xl bg-slate-900 p-4 text-sm text-slate-100;
+	}
+	.prose-kb pre code {
+		@apply bg-transparent p-0 text-inherit;
+	}
+	.prose-kb table {
+		@apply w-full border-collapse text-sm;
+	}
+	.prose-kb th,
+	.prose-kb td {
+		@apply border border-slate-200 px-3 py-1.5 text-left;
+	}
+	.prose-kb th {
+		@apply bg-slate-50 font-medium;
+	}
+	.prose-kb img {
+		@apply max-w-full rounded-lg;
+	}
+	.prose-kb hr {
+		@apply border-slate-200;
+	}
+}

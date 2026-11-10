@@ -1,0 +1,544 @@
+//! Marketing: segments (saved audiences of CRM records), email campaigns sent to them with
+//! open and click tracking, and the opt-out list every campaign honours.
+//!
+//! Everything here needs the "Run marketing" permission. Segments use the same filters as
+//! the CRM lists and see every record (a campaign speaks for the company, not for one
+//! employee's share of the CRM).
+
+mod send;
+mod track;
+
+use axum::{
+    extract::{Path, Query, State},
+    routing::{delete, get, post},
+    Json, Router,
+};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sqlx::{FromRow, Postgres, QueryBuilder};
+use uuid::Uuid;
+
+use crate::{
+    auth::{permissions as perm, AuthUser},
+    crm::{entity_type_by_id, items::{push_filter, Filter}, EntityType},
+    error::{AppError, AppResult},
+    routes::required,
+    state::AppState,
+};
+
+pub use send::{run_due, run_job, DUE_JOB, JOB};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/marketing/segments", get(list_segments).post(create_segment))
+        .route("/marketing/segments/preview", post(preview_segment))
+        .route("/marketing/segments/{id}", get(get_segment).patch(update_segment).delete(delete_segment))
+        .route("/marketing/campaigns", get(list_campaigns).post(create_campaign))
+        .route("/marketing/campaigns/{id}", get(get_campaign).patch(update_campaign).delete(delete_campaign))
+        .route("/marketing/campaigns/{id}/test", post(send::test_send))
+        .route("/marketing/campaigns/{id}/send", post(send::schedule))
+        .route("/marketing/campaigns/{id}/cancel", post(send::cancel))
+        .route("/marketing/campaigns/{id}/stats", get(stats))
+        .route("/marketing/campaigns/{id}/recipients", get(recipients))
+        .route("/marketing/optouts", get(list_optouts).post(add_optout))
+        .route("/marketing/optouts/{email}", delete(remove_optout))
+        .merge(track::router())
+}
+
+fn require(auth: &AuthUser) -> AppResult<()> {
+    auth.require(perm::MARKETING)
+}
+
+/// Types a segment can be made of: those with an email address.
+const SEGMENT_TYPES: &[i16] = &[crate::crm::LEAD, crate::crm::CONTACT, crate::crm::COMPANY];
+
+// ---------------------------------------------------------------------------
+// Segments
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, FromRow)]
+struct Segment {
+    id: Uuid,
+    name: String,
+    entity_type: i16,
+    filter: Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+const SEGMENT_COLUMNS: &str = "id, name, entity_type, filter, created_at, updated_at";
+
+async fn load_segment(state: &AppState, id: Uuid) -> AppResult<Segment> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SEGMENT_COLUMNS} FROM mkt_segments WHERE id = $1")))
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound("segment"))
+}
+
+fn parse_filter(v: &Value) -> AppResult<Filter> {
+    let f: Filter = serde_json::from_value(v.clone()).map_err(|e| AppError::bad(format!("invalid filter: {e}")))?;
+    // "Mine" means nothing for a company-wide audience.
+    if f.assigned_to.as_deref().is_some_and(|a| a.split(',').any(|x| x.trim() == "me")) {
+        return Err(AppError::bad("choose people by name, not \"me\", for a segment"));
+    }
+    Ok(f)
+}
+
+async fn segment_type(state: &AppState, et: i16) -> AppResult<EntityType> {
+    if !SEGMENT_TYPES.contains(&et) {
+        return Err(AppError::bad("segments are made of leads, contacts or companies"));
+    }
+    entity_type_by_id(state, et).await
+}
+
+/// Records of a segment with their first email address (none: no address). Visibility is
+/// company-wide; the filter's own conditions apply.
+pub(crate) async fn members(state: &AppState, t: &EntityType, filter: &Filter, limit: i64) -> AppResult<Vec<(Uuid, String, Option<String>)>> {
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT i.id, i.title, (SELECT m.value FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'email' ORDER BY m.sort LIMIT 1) AS email FROM crm_items i WHERE TRUE",
+    );
+    push_filter(&mut qb, t, filter, Uuid::nil())?;
+    qb.push(" ORDER BY i.created_at LIMIT ").push_bind(limit);
+    Ok(qb.build_query_as().fetch_all(&state.db).await?)
+}
+
+async fn count_members(state: &AppState, t: &EntityType, filter: &Filter) -> AppResult<(i64, i64, i64)> {
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT COUNT(*)::int8,
+                COUNT(*) FILTER (WHERE e.email IS NOT NULL)::int8,
+                COUNT(*) FILTER (WHERE e.email IS NOT NULL AND EXISTS (SELECT 1 FROM mkt_optouts o WHERE o.email = lower(e.email)))::int8
+         FROM crm_items i
+         LEFT JOIN LATERAL (SELECT m.value AS email FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'email' ORDER BY m.sort LIMIT 1) e ON TRUE
+         WHERE TRUE",
+    );
+    push_filter(&mut qb, t, filter, Uuid::nil())?;
+    Ok(qb.build_query_as().fetch_one(&state.db).await?)
+}
+
+async fn describe_segment(state: &AppState, s: &Segment) -> AppResult<Value> {
+    let t = entity_type_by_id(state, s.entity_type).await?;
+    let (total, with_email, opted_out) = count_members(state, &t, &parse_filter(&s.filter)?).await?;
+    Ok(json!({
+        "id": s.id, "name": s.name, "entity_type": s.entity_type, "type_code": t.code, "filter": s.filter,
+        "created_at": s.created_at, "updated_at": s.updated_at,
+        "count": total, "with_email": with_email, "opted_out": opted_out, "reachable": with_email - opted_out,
+    }))
+}
+
+async fn list_segments(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let rows: Vec<Segment> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SEGMENT_COLUMNS} FROM mkt_segments ORDER BY lower(name)"))).fetch_all(&state.db).await?;
+    let mut items = Vec::new();
+    for s in &rows {
+        items.push(describe_segment(&state, s).await?);
+    }
+    Ok(Json(json!({ "items": items })))
+}
+
+async fn get_segment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    Ok(Json(describe_segment(&state, &load_segment(&state, id).await?).await?))
+}
+
+#[derive(Deserialize)]
+struct SegmentBody {
+    name: Option<String>,
+    entity_type: Option<i16>,
+    filter: Option<Value>,
+}
+
+/// Counts and the first records of a segment that is not saved yet.
+async fn preview_segment(State(state): State<AppState>, auth: AuthUser, Json(b): Json<SegmentBody>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let t = segment_type(&state, b.entity_type.unwrap_or(crate::crm::CONTACT)).await?;
+    let f = parse_filter(&b.filter.unwrap_or_else(|| json!({})))?;
+    let (total, with_email, opted_out) = count_members(&state, &t, &f).await?;
+    let sample: Vec<Value> = members(&state, &t, &f, 20).await?.into_iter().map(|(id, title, email)| json!({ "id": id, "title": title, "email": email })).collect();
+    Ok(Json(json!({ "count": total, "with_email": with_email, "opted_out": opted_out, "reachable": with_email - opted_out, "sample": sample, "type_code": t.code })))
+}
+
+async fn create_segment(State(state): State<AppState>, auth: AuthUser, Json(b): Json<SegmentBody>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let et = b.entity_type.unwrap_or(crate::crm::CONTACT);
+    segment_type(&state, et).await?;
+    let filter = b.filter.unwrap_or_else(|| json!({}));
+    parse_filter(&filter)?;
+    let id: Uuid = sqlx::query_scalar("INSERT INTO mkt_segments (name, entity_type, filter, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
+        .bind(required("name", b.name.as_deref().unwrap_or(""), 120)?)
+        .bind(et)
+        .bind(&filter)
+        .bind(auth.id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(describe_segment(&state, &load_segment(&state, id).await?).await?))
+}
+
+async fn update_segment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<SegmentBody>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let cur = load_segment(&state, id).await?;
+    let et = b.entity_type.unwrap_or(cur.entity_type);
+    segment_type(&state, et).await?;
+    let filter = b.filter.unwrap_or(cur.filter);
+    parse_filter(&filter)?;
+    sqlx::query("UPDATE mkt_segments SET name = $2, entity_type = $3, filter = $4, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(match &b.name { Some(n) => required("name", n, 120)?, None => cur.name })
+        .bind(et)
+        .bind(&filter)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(describe_segment(&state, &load_segment(&state, id).await?).await?))
+}
+
+async fn delete_segment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mkt_campaigns WHERE $1 = ANY(segment_ids) AND status IN ('draft', 'scheduled', 'sending'))")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    if used {
+        return Err(AppError::bad("a campaign that has not been sent yet uses this segment"));
+    }
+    let n = sqlx::query("DELETE FROM mkt_segments WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    if n == 0 {
+        return Err(AppError::NotFound("segment"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// Campaigns
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, FromRow, Clone)]
+pub(crate) struct Campaign {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub status: String,
+    pub segment_ids: Vec<Uuid>,
+    pub subject: String,
+    pub body: String,
+    pub from_name: Option<String>,
+    pub reply_to: Option<String>,
+    pub send_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub skipped: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub(crate) const CAMPAIGN_COLUMNS: &str =
+    "id, name, slug, status, segment_ids, subject, body, from_name, reply_to, send_at, started_at, finished_at, skipped, created_at, updated_at";
+
+pub(crate) async fn load_campaign(state: &AppState, id: Uuid) -> AppResult<Campaign> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {CAMPAIGN_COLUMNS} FROM mkt_campaigns WHERE id = $1")))
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound("campaign"))
+}
+
+/// Recipient counts by state, for lists and results.
+async fn counts(state: &AppState, id: Uuid) -> AppResult<Value> {
+    let (total, sent, failed, pending, opened, clicked, unsubscribed): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*)::int8,
+                COUNT(*) FILTER (WHERE status = 'sent')::int8,
+                COUNT(*) FILTER (WHERE status = 'failed')::int8,
+                COUNT(*) FILTER (WHERE status = 'pending')::int8,
+                COUNT(*) FILTER (WHERE opened_at IS NOT NULL)::int8,
+                COUNT(*) FILTER (WHERE clicked_at IS NOT NULL)::int8,
+                COUNT(*) FILTER (WHERE unsubscribed_at IS NOT NULL)::int8
+         FROM mkt_recipients WHERE campaign_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(json!({ "recipients": total, "sent": sent, "failed": failed, "pending": pending, "opened": opened, "clicked": clicked, "unsubscribed": unsubscribed }))
+}
+
+async fn describe(state: &AppState, c: &Campaign) -> AppResult<Value> {
+    let mut v = serde_json::to_value(c).unwrap_or_default();
+    v["counts"] = counts(state, c.id).await?;
+    Ok(v)
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    status: Option<String>,
+}
+
+async fn list_campaigns(State(state): State<AppState>, auth: AuthUser, Query(q): Query<ListQuery>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let rows: Vec<Campaign> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {CAMPAIGN_COLUMNS} FROM mkt_campaigns WHERE ($1::text IS NULL OR status = $1) ORDER BY created_at DESC LIMIT 500"
+    )))
+    .bind(q.status.filter(|s| !s.is_empty()))
+    .fetch_all(&state.db)
+    .await?;
+    let mut items = Vec::new();
+    for c in &rows {
+        items.push(describe(&state, c).await?);
+    }
+    Ok(Json(json!({ "items": items })))
+}
+
+async fn get_campaign(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))
+}
+
+#[derive(Deserialize)]
+struct CampaignBody {
+    name: Option<String>,
+    segment_ids: Option<Vec<Uuid>>,
+    subject: Option<String>,
+    body: Option<String>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    from_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    reply_to: Option<Option<String>>,
+}
+
+fn slugify(name: &str) -> String {
+    crate::routes::slugify(name, "campaign")
+}
+
+async fn unique_slug(state: &AppState, name: &str) -> AppResult<String> {
+    let base = slugify(name);
+    for i in 1..1000 {
+        let s = if i == 1 { base.clone() } else { format!("{base}-{i}") };
+        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mkt_campaigns WHERE slug = $1)").bind(&s).fetch_one(&state.db).await?;
+        if !taken {
+            return Ok(s);
+        }
+    }
+    Ok(format!("{base}-{}", Uuid::new_v4().simple()))
+}
+
+async fn check_segments(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<Uuid>> {
+    let mut v = ids.to_vec();
+    v.sort();
+    v.dedup();
+    if v.len() > 20 {
+        return Err(AppError::bad("at most 20 segments"));
+    }
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mkt_segments WHERE id = ANY($1)").bind(&v).fetch_one(&state.db).await?;
+    if n != v.len() as i64 {
+        return Err(AppError::bad("unknown segment"));
+    }
+    Ok(v)
+}
+
+fn check_reply_to(r: Option<String>) -> AppResult<Option<String>> {
+    let r = r.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(a) = &r
+        && (a.len() > 200 || a.parse::<lettre::Address>().is_err()) {
+            return Err(AppError::bad("the reply-to address is not valid"));
+        }
+    Ok(r)
+}
+
+fn text(v: Option<&str>, label: &str, max: usize) -> AppResult<String> {
+    let s = v.unwrap_or("").to_string();
+    if s.chars().count() > max {
+        return Err(AppError::bad(format!("{label} is too long")));
+    }
+    Ok(s)
+}
+
+async fn create_campaign(State(state): State<AppState>, auth: AuthUser, Json(b): Json<CampaignBody>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let name = required("name", b.name.as_deref().unwrap_or(""), 120)?;
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO mkt_campaigns (name, slug, segment_ids, subject, body, from_name, reply_to, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+    )
+    .bind(&name)
+    .bind(unique_slug(&state, &name).await?)
+    .bind(check_segments(&state, &b.segment_ids.unwrap_or_default()).await?)
+    .bind(text(b.subject.as_deref(), "subject", 300)?)
+    .bind(text(b.body.as_deref(), "message", 100_000)?)
+    .bind(b.from_name.flatten().map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()))
+    .bind(check_reply_to(b.reply_to.flatten())?)
+    .bind(auth.id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))
+}
+
+async fn update_campaign(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<CampaignBody>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let cur = load_campaign(&state, id).await?;
+    if cur.status != "draft" {
+        return Err(AppError::bad("only drafts can be changed; cancel a scheduled campaign first"));
+    }
+    sqlx::query("UPDATE mkt_campaigns SET name = $2, segment_ids = $3, subject = $4, body = $5, from_name = $6, reply_to = $7, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(match &b.name { Some(n) => required("name", n, 120)?, None => cur.name })
+        .bind(match &b.segment_ids { Some(s) => check_segments(&state, s).await?, None => cur.segment_ids })
+        .bind(match &b.subject { Some(s) => text(Some(s), "subject", 300)?, None => cur.subject })
+        .bind(match &b.body { Some(s) => text(Some(s), "message", 100_000)?, None => cur.body })
+        .bind(match b.from_name { Some(f) => f.map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), None => cur.from_name })
+        .bind(match b.reply_to { Some(r) => check_reply_to(r)?, None => cur.reply_to })
+        .execute(&state.db)
+        .await?;
+    Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))
+}
+
+async fn delete_campaign(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let c = load_campaign(&state, id).await?;
+    if c.status == "sending" {
+        return Err(AppError::bad("the campaign is being sent; cancel it first"));
+    }
+    sqlx::query("DELETE FROM mkt_campaigns WHERE id = $1").bind(id).execute(&state.db).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Results: counts and rates, opens and clicks over time, clicks per link, and what the
+/// campaign brought in (leads and deals carrying its utm_campaign).
+async fn stats(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let c = load_campaign(&state, id).await?;
+    let counts = counts(&state, id).await?;
+    let links: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT k.url, COUNT(*)::int8, COUNT(DISTINCT k.recipient_id)::int8 FROM mkt_clicks k JOIN mkt_recipients r ON r.id = k.recipient_id
+         WHERE r.campaign_id = $1 GROUP BY k.url ORDER BY 2 DESC LIMIT 50",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    // First opens and clicks per hour since sending started (up to a week).
+    let activity: Vec<(DateTime<Utc>, i64, i64)> = sqlx::query_as(
+        "SELECT h, SUM(o)::int8, SUM(c)::int8 FROM (
+             SELECT date_trunc('hour', opened_at) AS h, 1 AS o, 0 AS c FROM mkt_recipients WHERE campaign_id = $1 AND opened_at IS NOT NULL
+             UNION ALL
+             SELECT date_trunc('hour', clicked_at), 0, 1 FROM mkt_recipients WHERE campaign_id = $1 AND clicked_at IS NOT NULL
+         ) x GROUP BY h ORDER BY h LIMIT 168",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    let brought: Vec<(String, i64, Option<rust_decimal::Decimal>)> = sqlx::query_as(
+        "SELECT t.code, COUNT(*)::int8, SUM(i.opportunity_base) FILTER (WHERE i.stage_semantics = 'success')
+         FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
+         WHERE i.deleted_at IS NULL AND i.utm->>'campaign' = $1 GROUP BY t.code",
+    )
+    .bind(&c.slug)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "counts": counts,
+        "skipped": c.skipped,
+        "links": links.into_iter().map(|(url, clicks, people)| json!({ "url": url, "clicks": clicks, "people": people })).collect::<Vec<_>>(),
+        "activity": activity.into_iter().map(|(h, o, k)| json!({ "hour": h, "opens": o, "clicks": k })).collect::<Vec<_>>(),
+        "brought": brought.into_iter().map(|(code, n, won)| json!({ "type": code, "count": n, "won_amount": won })).collect::<Vec<_>>(),
+        "utm_campaign": c.slug,
+    })))
+}
+
+#[derive(Deserialize)]
+struct RecipientsQuery {
+    /// sent | failed | pending | opened | clicked | unsubscribed
+    status: Option<String>,
+    q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn recipients(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Query(q): Query<RecipientsQuery>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    load_campaign(&state, id).await?;
+    let cond = match q.status.as_deref().unwrap_or("") {
+        "sent" | "failed" | "pending" => "r.status = $2",
+        "opened" => "r.opened_at IS NOT NULL",
+        "clicked" => "r.clicked_at IS NOT NULL",
+        "unsubscribed" => "r.unsubscribed_at IS NOT NULL",
+        "" => "TRUE",
+        _ => return Err(AppError::bad("unknown status")),
+    };
+    let like = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| format!("%{}%", s.replace('%', "\\%").replace('_', "\\_")));
+    let rows: Vec<(Uuid, Option<Uuid>, Option<String>, Option<String>, String, String, Option<String>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, i32, Option<DateTime<Utc>>, i32, Option<DateTime<Utc>>)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT r.id, r.item_id, i.title, t.code, r.email, r.status, r.error, r.sent_at, r.opened_at, r.open_count, r.clicked_at, r.click_count, r.unsubscribed_at
+             FROM mkt_recipients r LEFT JOIN crm_items i ON i.id = r.item_id LEFT JOIN crm_entity_types t ON t.id = i.entity_type
+             WHERE r.campaign_id = $1 AND {cond} AND ($3::text IS NULL OR r.email ILIKE $3 OR i.title ILIKE $3)
+             ORDER BY r.email LIMIT $4 OFFSET $5"
+        )))
+        .bind(id)
+        .bind(q.status.as_deref().unwrap_or(""))
+        .bind(like)
+        .bind(q.limit.unwrap_or(50).clamp(1, 200))
+        .bind(q.offset.unwrap_or(0).max(0))
+        .fetch_all(&state.db)
+        .await?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|(rid, item, title, code, email, status, error, sent, opened, opens, clicked, clicks, unsub)| {
+            json!({ "id": rid, "item_id": item, "title": title, "type_code": code, "email": email, "status": status, "error": error, "sent_at": sent,
+                    "opened_at": opened, "open_count": opens, "clicked_at": clicked, "click_count": clicks, "unsubscribed_at": unsub })
+        })
+        .collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+// ---------------------------------------------------------------------------
+// Opt-outs
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct OptoutQuery {
+    q: Option<String>,
+}
+
+async fn list_optouts(State(state): State<AppState>, auth: AuthUser, Query(q): Query<OptoutQuery>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let like = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| format!("%{}%", s.to_lowercase()));
+    let rows: Vec<(String, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT o.email, o.source, c.name, o.created_at FROM mkt_optouts o LEFT JOIN mkt_campaigns c ON c.id = o.campaign_id
+         WHERE ($1::text IS NULL OR o.email LIKE $1) ORDER BY o.created_at DESC LIMIT 500",
+    )
+    .bind(like)
+    .fetch_all(&state.db)
+    .await?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mkt_optouts").fetch_one(&state.db).await?;
+    Ok(Json(json!({ "items": rows.into_iter().map(|(email, source, campaign, at)| json!({ "email": email, "source": source, "campaign": campaign, "created_at": at })).collect::<Vec<_>>(), "total": total })))
+}
+
+#[derive(Deserialize)]
+struct OptoutBody {
+    email: String,
+}
+
+async fn add_optout(State(state): State<AppState>, auth: AuthUser, Json(b): Json<OptoutBody>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let email = b.email.trim().to_lowercase();
+    if email.parse::<lettre::Address>().is_err() {
+        return Err(AppError::bad("enter a valid email address"));
+    }
+    sqlx::query("INSERT INTO mkt_optouts (email, source, created_by) VALUES ($1, 'added', $2) ON CONFLICT DO NOTHING").bind(&email).bind(auth.id).execute(&state.db).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Takes an address off the list (it was added by mistake, or the person asked again).
+async fn remove_optout(State(state): State<AppState>, auth: AuthUser, Path(email): Path<String>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let n = sqlx::query("DELETE FROM mkt_optouts WHERE email = $1").bind(email.trim().to_lowercase()).execute(&state.db).await?.rows_affected();
+    if n == 0 {
+        return Err(AppError::NotFound("address"));
+    }
+    crate::audit::record(&state.db, Some(auth.id), "marketing.optout.remove", "optout", Some(email), json!({}), None).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn slugs() {
+        assert_eq!(super::slugify("Spring Sale 2027!"), "spring-sale-2027");
+        assert_eq!(super::slugify("  ---  "), "campaign");
+    }
+}
