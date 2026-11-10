@@ -46,6 +46,7 @@ const RECURRING: &[(&str, u64)] = &[
     (crate::im::MAINTENANCE_JOB, 300),
     (crate::tasks::depth::TRASH_PURGE_JOB, 24 * 3600),
     (crate::booking::REMIND_JOB, 300),
+    (crate::training::REMIND_JOB, 3600),
 ];
 
 /// Adds a job to the queue. Pass a transaction to enqueue atomically with other writes.
@@ -201,6 +202,7 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
         crate::tasks::automation::JOB => crate::tasks::automation::run_job(state, payload).await,
         crate::tasks::depth::TRASH_PURGE_JOB => crate::tasks::depth::run_trash_purge(state).await,
         crate::booking::REMIND_JOB => crate::booking::run_reminders(state).await,
+        crate::training::REMIND_JOB => crate::training::run_reminders(state).await,
         crate::crm::automation::SCHEDULE_JOB => crate::crm::automation::schedules_due(state).await,
         crate::crm::automation::sla::JOB => crate::crm::automation::sla::run_job(state, payload).await,
         crate::crm::email::POLL_JOB => crate::crm::email::run_poll(state).await,

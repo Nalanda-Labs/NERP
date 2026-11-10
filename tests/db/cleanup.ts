@@ -156,6 +156,12 @@ export async function cleanup({ yes = true, stamp = null } = {}) {
     }
   }
   {
+    // Training courses made by tests (their lessons, tests, attempts and certificates go with them).
+    const courses = (await rows(`SELECT id, title FROM training_courses`)).filter((c) => stamped(c.title));
+    report.push(`${String(courses.length).padStart(5)}  training courses`);
+    if (yes && courses.length) await db.query('DELETE FROM training_courses WHERE id = ANY($1)', [courses.map((c) => c.id)]);
+  }
+  {
     // Deleted tasks wait in the recycle bin: empty it of the tests' ones.
     const binned = (await rows(`SELECT id, title, created_by = ANY($1) OR responsible_id = ANY($1) OR deleted_by = ANY($1) OR project_id = ANY($2) AS theirs FROM task_trash`, [userIds, projectIds])).filter((t) => t.theirs || stamped(t.title));
     report.push(`${String(binned.length).padStart(5)}  tasks in the recycle bin`);

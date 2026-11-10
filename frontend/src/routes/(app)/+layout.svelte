@@ -129,6 +129,7 @@
 				{ href: '/structure', label: 'Company structure', icon: 'structure' },
 				{ href: '/drive', label: 'Drive', icon: 'folder' },
 				{ href: '/kb', label: 'Knowledge base', icon: 'file' },
+				{ href: '/training', label: 'Training', icon: 'graduation' },
 				{ href: '/lists', label: 'Lists', icon: 'list' },
 				{ href: '/approvals', label: 'Approvals', icon: 'check', badge: () => (approvalsWaiting ? { n: approvalsWaiting, alert: true } : null) },
 				{ href: '/files', label: 'My uploads', icon: 'paperclip' }

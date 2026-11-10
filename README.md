@@ -1080,6 +1080,44 @@ Handbooks, how-tos and policies, under Knowledge base in the sidebar.
   you were editing, your save is refused instead of overwriting theirs.
 - **Search** covers the titles and text of every page you can read, with a snippet.
 
+## Training
+
+Courses with lessons and tests, under Training in the sidebar. People with "Manage training"
+make courses, assign them, grade written answers and see everyone's results. Everyone else
+enrols in the courses open to them and works through them.
+
+- **Courses** start as drafts and are published when ready. A course is open to everyone, or
+  to chosen people and departments (a department includes its sub-departments). It has a
+  description and an optional cover picture.
+- **Lessons** are grouped into chapters. Each lesson has Markdown text, files, and an optional
+  video (YouTube and Vimeo links play in the page). A lesson can open a number of days after
+  the person enrolled, to pace a course. People mark lessons done as they go. Lesson files
+  open only for people enrolled in the course.
+- **Questions:** one answer, several answers, putting items in order, or a written answer
+  graded by a person. Each question has points and an explanation shown when it is answered
+  wrongly. It can be marked "must be right": the test isn't passed without it, whatever the
+  score. **Self-check** questions appear inside their lesson for practice and don't count.
+- **Tests** draw questions from the whole course or one lesson: all of them, or a random
+  number. Question and answer order can be shuffled. Each test sets:
+  - how people move through it: one by one in turn; may skip but answers are final; or go
+    anywhere and change answers;
+  - when the right answers are shown: after each answer, at the end, or never;
+  - a pass percentage, marks by score ("Excellent" from 90 %…), an attempt limit, a wait
+    between attempts, a time limit (enforced by the server), and an earlier test that must be
+    passed first with a minimum score.
+- **Scoring:** a question earns its points only when fully right (all the right choices, every
+  item in place). Unanswered questions count as wrong. Attempts with written answers wait in
+  **Grading**; whoever grades sets the points and can leave a note, and the person is told
+  their result. Nobody grades their own answers.
+- **Completing** a course means passing every test, or, for a course without tests, finishing
+  every lesson. It issues a numbered **certificate**, ready to print, showing the best scores.
+  A manager can revoke a certificate issued by mistake.
+- **Assigning:** a course can be given to people or departments with an optional due date.
+  They are notified, reminded two days before it's due, and can't leave it themselves.
+  Overdue training is flagged.
+- **Gradebook** for each course: everyone enrolled, their progress, each test's best score and
+  attempts (managers can allow extra attempts), due dates and certificates.
+
 ## News feed
 
 Company news, under News feed in the sidebar.

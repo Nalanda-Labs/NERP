@@ -27,6 +27,7 @@ pub const SITES: &str = "sites.manage";
 pub const LISTS: &str = "lists.manage";
 pub const DRIVE: &str = "drive.manage";
 pub const BOOKING: &str = "booking.manage";
+pub const TRAINING: &str = "training.manage";
 pub const ACCOUNTING_VIEW: &str = "accounting.view";
 pub const ACCOUNTING_POST: &str = "accounting.post";
 pub const ACCOUNTING_ADMIN: &str = "accounting.admin";
@@ -57,6 +58,7 @@ pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: WEBHOOKS_MANAGE, group: "Integrations", name: "Manage webhooks", description: "Send events (new deals, completed tasks…) to other systems' URLs" },
     PermissionInfo { code: HR, group: "Company", name: "Manage HR", description: "Approve everyone's time off, see and correct everyone's working time, and set working days, holidays and vacation allowances" },
     PermissionInfo { code: BOOKING, group: "Company", name: "Manage booking", description: "Set up what can be booked (people, rooms, equipment), its hours, services and self-booking forms" },
+    PermissionInfo { code: TRAINING, group: "Company", name: "Manage training", description: "Create courses, lessons and tests, assign training, grade written answers and see everyone's results" },
     PermissionInfo { code: DRIVE, group: "Company", name: "Manage the company drive", description: "Rename, move and delete anything in the company drive" },
     PermissionInfo { code: ACCOUNTING_VIEW, group: "Accounting", name: "View the books", description: "See accounts, entries, invoices and bills in the books, payments, bank statements and reports" },
     PermissionInfo { code: ACCOUNTING_POST, group: "Accounting", name: "Record transactions", description: "Post invoices, enter bills, record payments and journal entries, reconcile bank statements, void them" },

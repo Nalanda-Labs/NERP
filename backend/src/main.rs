@@ -32,6 +32,7 @@ mod realtime;
 mod routes;
 mod state;
 mod tasks;
+mod training;
 
 use anyhow::{Context, Result};
 use axum::{

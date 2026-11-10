@@ -128,6 +128,7 @@ export const PERM = {
 	KB: 'kb.manage',
 	HR: 'hr.manage',
 	BOOKING: 'booking.manage',
+	TRAINING: 'training.manage',
 	SITES: 'sites.manage',
 	LISTS: 'lists.manage',
 	DRIVE: 'drive.manage',
