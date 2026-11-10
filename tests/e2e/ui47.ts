@@ -84,7 +84,11 @@ try {
     await p.goto(B + '/tasks?layout=planner');
     const card = p.locator(`[data-card]:has-text("Due today ${s}")`);
     await card.waitFor();
-    await card.dragTo(p.locator('[data-column]').nth(2));
+    // Wait for the move to be saved: reloading at once would cancel the request.
+    await Promise.all([
+      p.waitForResponse((r) => /\/api\/tasks\/[0-9a-f-]+\/planner$/.test(r.url()) && r.request().method() === 'POST' && r.ok()),
+      card.dragTo(p.locator('[data-column]').nth(2)),
+    ]);
     await p.reload();
     await p.locator('[data-column]').nth(2).locator(`[data-card]:has-text("Due today ${s}")`).waitFor();
   });
