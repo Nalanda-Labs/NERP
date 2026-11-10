@@ -14,5 +14,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["e2e/**/*.ts", "db/**/*.ts"]
+  "include": ["e2e/**/*.ts", "db/**/*.ts", "security/**/*.ts"]
 }

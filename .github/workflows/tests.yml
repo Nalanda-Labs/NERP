@@ -51,7 +51,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            dovecot-imapd postgresql-client poppler-utils \
+            dovecot-imapd postgresql-client poppler-utils redis-tools \
             slapd ldap-utils coturn \
             texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
             fonts-noto-core fonts-noto-cjk fonts-texgyre fonts-liberation fonts-dejavu-core \
@@ -152,6 +152,7 @@ jobs:
           set_env SMTP_SECURITY starttls
           set_env SMTP_ACCEPT_INVALID_CERTS true
           set_env CRM_WEBHOOK_ALLOW_PRIVATE true
+          set_env MAIL_ALLOW_PRIVATE true
           # mock OAuth provider that api11/ui11 start on 127.0.0.1:8099
           for p in GOOGLE MICROSOFT; do
             lower=$(echo "$p" | tr A-Z a-z)
@@ -189,6 +190,11 @@ jobs:
             echo '::error::Some suites skipped themselves (see the "skip" lines above)'
             exit 1
           fi
+
+      - name: Run the security suites (tests/security)
+        if: success() || failure()
+        working-directory: tests
+        run: node security/run.ts
 
       - name: Upload server log and failure screenshots
         if: failure()
