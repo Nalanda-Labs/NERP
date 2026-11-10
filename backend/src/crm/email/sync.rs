@@ -57,6 +57,10 @@ pub enum Ingested {
 
 /// Parses and files one raw message. `sent` is true for messages from the sent folder.
 pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -> AppResult<Ingested> {
+    // The help-desk inbox: its mail becomes tickets, not CRM email.
+    if crate::support::mail::is_inbox(state, mb.id).await? {
+        return Ok(if crate::support::mail::ingest(state, mb, sent, raw).await? { Ingested::Filed } else { Ingested::NotCrm });
+    }
     let Some(msg) = MessageParser::default().parse(raw) else { return Ok(Ingested::NotCrm) };
     let message_id = match msg.message_id() {
         Some(id) if !id.is_empty() => id.to_string(),

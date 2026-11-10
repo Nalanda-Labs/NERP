@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(crate::drive::router())
         .merge(crate::booking::router())
         .merge(crate::training::router())
+        .merge(crate::support::router())
 }
 
 async fn health(State(state): State<AppState>) -> AppResult<Json<Value>> {

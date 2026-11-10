@@ -28,6 +28,8 @@ pub const LISTS: &str = "lists.manage";
 pub const DRIVE: &str = "drive.manage";
 pub const BOOKING: &str = "booking.manage";
 pub const TRAINING: &str = "training.manage";
+pub const SUPPORT_WORK: &str = "support.work";
+pub const SUPPORT_MANAGE: &str = "support.manage";
 pub const ACCOUNTING_VIEW: &str = "accounting.view";
 pub const ACCOUNTING_POST: &str = "accounting.post";
 pub const ACCOUNTING_ADMIN: &str = "accounting.admin";
@@ -59,6 +61,8 @@ pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: HR, group: "Company", name: "Manage HR", description: "Approve everyone's time off, see and correct everyone's working time, and set working days, holidays and vacation allowances" },
     PermissionInfo { code: BOOKING, group: "Company", name: "Manage booking", description: "Set up what can be booked (people, rooms, equipment), its hours, services and self-booking forms" },
     PermissionInfo { code: TRAINING, group: "Company", name: "Manage training", description: "Create courses, lessons and tests, assign training, grade written answers and see everyone's results" },
+    PermissionInfo { code: SUPPORT_WORK, group: "Help desk", name: "Work on the help desk", description: "See every ticket, answer customers and colleagues, write notes, change status, category and who handles it" },
+    PermissionInfo { code: SUPPORT_MANAGE, group: "Help desk", name: "Manage the help desk", description: "Everything on the help desk, plus its settings: inbox, public page, categories and other lists, SLAs, frequently used answers; delete tickets" },
     PermissionInfo { code: DRIVE, group: "Company", name: "Manage the company drive", description: "Rename, move and delete anything in the company drive" },
     PermissionInfo { code: ACCOUNTING_VIEW, group: "Accounting", name: "View the books", description: "See accounts, entries, invoices and bills in the books, payments, bank statements and reports" },
     PermissionInfo { code: ACCOUNTING_POST, group: "Accounting", name: "Record transactions", description: "Post invoices, enter bills, record payments and journal entries, reconcile bank statements, void them" },

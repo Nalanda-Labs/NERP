@@ -162,6 +162,23 @@ export async function cleanup({ yes = true, stamp = null } = {}) {
     if (yes && courses.length) await db.query('DELETE FROM training_courses WHERE id = ANY($1)', [courses.map((c) => c.id)]);
   }
   {
+    // Help desk: tests' tickets (stamped titles or customer addresses, or asked by test
+    // employees; their messages go with them), then stamped lists, SLAs and answers.
+    const tickets = (await rows(`SELECT id, title, requester_email, requester_id = ANY($1) AS theirs FROM support_tickets`, [userIds]))
+      .filter((t) => t.theirs || stamped(t.title) || stamped(t.requester_email));
+    report.push(`${String(tickets.length).padStart(5)}  help-desk tickets`);
+    if (yes && tickets.length) await db.query('DELETE FROM support_tickets WHERE id = ANY($1)', [tickets.map((t) => t.id)]);
+    const entries = (await rows(`SELECT id, name FROM support_dictionary`)).filter((e) => stamped(e.name));
+    const slas = (await rows(`SELECT id, name FROM support_slas WHERE NOT is_default`)).filter((s) => stamped(s.name));
+    const answers = (await rows(`SELECT id, title FROM support_answers`)).filter((a) => stamped(a.title));
+    report.push(`${String(entries.length + slas.length + answers.length).padStart(5)}  help-desk lists, SLAs and answers`);
+    if (yes) {
+      if (slas.length) await db.query('DELETE FROM support_slas WHERE id = ANY($1)', [slas.map((s) => s.id)]);
+      if (entries.length) await db.query('DELETE FROM support_dictionary WHERE id = ANY($1)', [entries.map((e) => e.id)]);
+      if (answers.length) await db.query('DELETE FROM support_answers WHERE id = ANY($1)', [answers.map((a) => a.id)]);
+    }
+  }
+  {
     // Deleted tasks wait in the recycle bin: empty it of the tests' ones.
     const binned = (await rows(`SELECT id, title, created_by = ANY($1) OR responsible_id = ANY($1) OR deleted_by = ANY($1) OR project_id = ANY($2) AS theirs FROM task_trash`, [userIds, projectIds])).filter((t) => t.theirs || stamped(t.title));
     report.push(`${String(binned.length).padStart(5)}  tasks in the recycle bin`);

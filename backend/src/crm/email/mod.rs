@@ -124,23 +124,23 @@ impl MailboxRow {
         self.auth_kind != "password"
     }
     /// What to sign in with: the password, or a fresh OAuth access token.
-    async fn credential(&self, state: &AppState) -> Result<String, String> {
+    pub(crate) async fn credential(&self, state: &AppState) -> Result<String, String> {
         if self.is_oauth() {
             oauth::access_token(state, self).await
         } else {
             self.password(state).ok_or_else(|| "the stored password cannot be read; enter it again".to_string())
         }
     }
-    fn smtp(&self, secret: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
+    pub(crate) fn smtp(&self, secret: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
         let auth = (self.smtp_auth || self.is_oauth()).then_some((self.username.as_str(), secret));
         smtp_transport(&self.smtp_host, self.smtp_port as u16, &self.smtp_security, auth, self.allow_invalid_certs, self.is_oauth())
     }
-    fn can_send(&self, user: Uuid) -> bool {
+    pub(crate) fn can_send(&self, user: Uuid) -> bool {
         self.owner_id == user || self.shared_with.contains(&user)
     }
 }
 
-async fn load_mailbox(state: &AppState, id: Uuid) -> AppResult<MailboxRow> {
+pub(crate) async fn load_mailbox(state: &AppState, id: Uuid) -> AppResult<MailboxRow> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {MAILBOX_COLUMNS} FROM crm_mailboxes WHERE id = $1")))
         .bind(id)
         .fetch_optional(&state.db)

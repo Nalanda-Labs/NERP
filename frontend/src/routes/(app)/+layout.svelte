@@ -131,6 +131,7 @@
 				{ href: '/kb', label: 'Knowledge base', icon: 'file' },
 				{ href: '/training', label: 'Training', icon: 'graduation' },
 				{ href: '/lists', label: 'Lists', icon: 'list' },
+				{ href: '/support', label: 'Help desk', icon: 'lifebuoy' },
 				{ href: '/approvals', label: 'Approvals', icon: 'check', badge: () => (approvalsWaiting ? { n: approvalsWaiting, alert: true } : null) },
 				{ href: '/files', label: 'My uploads', icon: 'paperclip' }
 			]

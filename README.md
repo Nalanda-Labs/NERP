@@ -1121,6 +1121,53 @@ enrols in the courses open to them and works through them.
 - **Gradebook** for each course: everyone enrolled, their progress, each test's best score and
   attempts (managers can allow extra attempts), due dates and certificates.
 
+## Help desk
+
+Requests for help (tickets), under Help desk in the sidebar. Everyone can ask for help and
+sees their own requests. People with "Work on the help desk" see and answer every ticket;
+"Manage the help desk" also sets it up and can delete tickets.
+
+- **Where tickets come from:**
+  - **Employees** ask in the app. Support can also take a request for a colleague, or for a
+    customer on the phone.
+  - **Customers** use the public page at `/help` (it can be switched off). Each gets an email
+    with a private link to their request page, where they read the answers, write again,
+    close the request and rate the answer. Robots are kept out by a hidden field and limits
+    per address.
+  - **Email:** choose one of the CRM mailboxes as the help-desk inbox. Its mail then becomes
+    tickets instead of CRM email. A message that answers one of our emails, or has `[#123]` in
+    the subject and comes from that ticket's requester, joins that ticket; anything else
+    opens a new one. The quoted earlier conversation is cut off, attachments are kept, and
+    out-of-office replies and bounces are ignored. Employees who write in are recognised by
+    their address.
+- **Answering:** replies go to the requester (by email through the inbox, threaded so they can
+  just reply, or as a notice with their link when there is no inbox). **Notes** are seen by
+  support only. Each answer can log the time spent, set a status, or close the ticket.
+  **Frequently used answers** can be put into a reply.
+- **Details:** category, criticality, status and difficulty come from lists the managers edit
+  (each with a default). A category can name the person its tickets go to. Every change to a
+  ticket is kept in its history, which only support sees. Tickets from known customers link
+  to their CRM contact.
+- **SLAs** set how soon support must reply, counted in working hours: per weekday, up to two
+  spans a day (for a lunch break), in the help desk's time zone, skipping company holidays
+  from HR. Each SLA covers chosen categories, criticalities and employees or customers; a
+  ticket gets the matching one with the highest priority, else the default.
+  - The clock starts when the customer writes and support has nothing pending. Support's reply
+    stops it (notes don't). Putting a ticket on hold stops it; taking it off hold starts it
+    again from then. A new category or criticality can mean a different SLA, and the deadline
+    is counted again.
+  - A warning goes to the responsible person before the deadline. When it passes, the ticket
+    is flagged overdue, and the responsible person and the SLA's person are told. A reply after
+    the deadline is marked late.
+- **Closing:** a ticket waiting for the customer closes itself after a number of days (set in
+  the settings), and the customer is told. The requester is asked to rate the answer.
+  Writing to a closed ticket reopens it (for customers, only if the settings allow it).
+- **Lists** for support: open, assigned to me, unassigned, overdue, closed, the requester's own
+  requests and spam, ordered by deadline, with search by title, number or email.
+- **Statistics** for a period: tickets created and closed, open, overdue and unassigned now,
+  average first reply and resolution times, late replies, time spent, ratings, tickets by
+  category, status, criticality and person, and a daily chart.
+
 ## News feed
 
 Company news, under News feed in the sidebar.
