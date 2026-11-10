@@ -9,6 +9,7 @@ mod error;
 mod jobs;
 mod migrate;
 mod mail;
+mod meetings;
 mod marketing;
 mod shop;
 mod inventory;

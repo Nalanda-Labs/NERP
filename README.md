@@ -1177,6 +1177,32 @@ sees their own requests. People with "Work on the help desk" see and answer ever
   average first reply and resolution times, late replies, time spent, ratings, tickets by
   category, status, criticality and person, and a daily chart.
 
+## Meetings
+
+Planning, holding and following up meetings, under Meetings in the sidebar. Everyone can
+organise one.
+
+- **People:** the organiser runs the meeting, a keeper writes the minutes, members take part.
+  A meeting can belong to a workgroup, whose members can then read it. The meeting is an
+  event on everyone's calendar, kept in step when its time, place or people change, and its
+  chat (from the calendar event) is where the video call happens.
+- **Preparing:** the agenda has topics and sub-points, each with who presents it and how
+  long it takes. Members propose topics; whoever proposed one may reword or withdraw it while
+  the meeting is being prepared. Presenters are asked to write a report on their topic, and
+  people running the meeting set the order.
+- **Holding it:** once started, the owner or keeper marks who is present, records the decision
+  on each topic, marks topics settled, and makes a task from a topic (with the decision and a
+  link back; in the meeting's workgroup when the person making it works there). Notes for
+  the minutes can be added at any time.
+- **Closing:** closing sends everyone the minutes: attendance, each topic with its reports,
+  decision and task, and the notes, on a page ready to print. A closed meeting stays as it was
+  (only the notes can be corrected); its owner can reopen it.
+- **Series:** "plan the next meeting" copies the people, place and workgroup, and moves every
+  topic that was not settled to the new agenda, marking it "carried" in the first. A topic
+  keeps its history across the series: what was reported and decided each time.
+- **Notifications:** invitations, being asked to present a topic, a meeting moved or cancelled,
+  and the minutes.
+
 ## News feed
 
 Company news, under News feed in the sidebar.

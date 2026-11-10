@@ -493,6 +493,17 @@ pub async fn create_event(state: &AppState, auth: &AuthUser, input: Value) -> Ap
     create(State(state.clone()), auth.clone(), Json(b)).await.map(|j| j.0)
 }
 
+/// Changes an event from the same JSON the API takes (for other modules, e.g. meetings).
+pub async fn update_event(state: &AppState, auth: &AuthUser, id: Uuid, input: Value) -> AppResult<Value> {
+    let b: EventInput = serde_json::from_value(input).map_err(|e| AppError::bad(format!("event: {e}")))?;
+    update(State(state.clone()), auth.clone(), Path(id), Json(b)).await.map(|j| j.0)
+}
+
+/// Removes an event (all its occurrences), for other modules.
+pub async fn delete_event(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<()> {
+    remove(State(state.clone()), auth.clone(), Path(id), Query(RemoveQuery { occurrence: None })).await.map(|_| ())
+}
+
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<EventInput>) -> AppResult<Json<Value>> {
     let title = required("title", b.title.as_deref().unwrap_or(""), 300)?;
     let all_day = b.all_day.unwrap_or(false);

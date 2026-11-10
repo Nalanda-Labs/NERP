@@ -99,6 +99,9 @@ async fn can_read(state: &AppState, file: &FileMeta, auth: &AuthUser) -> AppResu
     if crate::support::can_view_file(state, auth, file.id).await? {
         return Ok(true);
     }
+    if crate::meetings::can_view_file(state, auth, file.id).await? {
+        return Ok(true);
+    }
     crate::drive::can_view_file(state, auth, file.id).await
 }
 

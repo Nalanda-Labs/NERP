@@ -162,6 +162,17 @@ export async function cleanup({ yes = true, stamp = null } = {}) {
     if (yes && courses.length) await db.query('DELETE FROM training_courses WHERE id = ANY($1)', [courses.map((c) => c.id)]);
   }
   {
+    // Meetings: stamped titles or organised by test employees (their agendas, people and
+    // reports go with them), then topics left on no agenda.
+    const meetings = (await rows(`SELECT id, title, created_by = ANY($1) AS theirs FROM meetings`, [userIds])).filter((m) => m.theirs || stamped(m.title));
+    report.push(`${String(meetings.length).padStart(5)}  meetings`);
+    if (yes && meetings.length) {
+      await db.query('UPDATE meetings SET parent_id = NULL WHERE parent_id = ANY($1)', [meetings.map((m) => m.id)]);
+      await db.query('DELETE FROM meetings WHERE id = ANY($1)', [meetings.map((m) => m.id)]);
+      await db.query('DELETE FROM meeting_topics t WHERE NOT EXISTS (SELECT 1 FROM meeting_agenda a WHERE a.topic_id = t.id)');
+    }
+  }
+  {
     // Help desk: tests' tickets (stamped titles or customer addresses, or asked by test
     // employees; their messages go with them), then stamped lists, SLAs and answers.
     const tickets = (await rows(`SELECT id, title, requester_email, requester_id = ANY($1) AS theirs FROM support_tickets`, [userIds]))

@@ -52,6 +52,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(crate::booking::router())
         .merge(crate::training::router())
         .merge(crate::support::router())
+        .merge(crate::meetings::router())
         // An unknown API path is a JSON 404, not the app's HTML page (which would look like
         // success to an API client).
         .fallback(|| async { crate::error::AppError::NotFound("API endpoint") })

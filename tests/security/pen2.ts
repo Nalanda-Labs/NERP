@@ -1,5 +1,6 @@
 // Permissions: an employee cannot raise their own rights or reach admin-only actions, and
-// cannot see or change another employee's private things through ANY route (every route
+// cannot see or change another employee's private things (task, file, drive file, chat,
+// event, ticket, meeting and its agenda) through ANY route (every route
 // with an id is tried with each of the other person's ids and every method). Every route
 // also gets odd input from an employee without the server failing (no 500s).
 import { routes, fill, type Method } from './routes.ts';
@@ -48,7 +49,10 @@ await ann.post(`/im/chats/${chat.id}/messages`, { body: 'just between us' });
 const start = new Date(Date.now() + 86400000);
 const event = (await ann.post('/calendar/events', { title: 'Ann private event', timezone: 'UTC', start: start.toISOString(), end: new Date(+start + 3600000).toISOString(), is_private: true })).data;
 const ticket = (await ann.post('/support/tickets', { title: 'Ann private ticket', body: 'help' })).data;
-const ids: Record<string, string | undefined> = { file: file?.id, task: task?.id, drive: node?.id ?? node?.node?.id, chat: chat?.id, event: event?.id, ticket: ticket?.id };
+const meeting = (await ann.post('/meetings', { title: 'Ann private meeting', starts_at: start.toISOString(), duration_minutes: 30, timezone: 'UTC', members: [{ user_id: cat.id }] })).data;
+const topic = (await ann.post(`/meetings/${meeting?.id}/agenda`, { title: 'Ann private topic', responsible_ids: [cat.id] })).data?.agenda?.[0];
+const ids: Record<string, string | undefined> = { file: file?.id, task: task?.id, drive: node?.id ?? node?.node?.id, chat: chat?.id, event: event?.id, ticket: ticket?.id,
+  meeting: meeting?.id, agenda: topic?.id, topic: topic?.topic_id };
 ok('Ann has private things to protect', Object.values(ids).every(Boolean), ids);
 
 // ---- Bob tries every route with each of Ann's ids ----
@@ -73,6 +77,7 @@ ok('her task is untouched', (await ann.get(`/tasks/${ids.task}`)).data?.title ==
 ok('her file is still hers', (await ann.req('GET', `/files/${ids.file}/content`, undefined, true) as Response).status === 200);
 ok('her chat has no Bob', !(await ann.get(`/im/chats/${ids.chat}`)).data?.members?.some?.((x: any) => (x.id ?? x.user_id) === bob.id));
 ok('her event is untouched', (await ann.get(`/calendar/events/${ids.event}`)).data?.title === 'Ann private event');
+ok('her meeting is untouched', (await ann.get(`/meetings/${ids.meeting}`)).data?.title === 'Ann private meeting' && (await ann.get(`/meetings/${ids.meeting}`)).data?.agenda?.[0]?.title === 'Ann private topic');
 
 // ---- odd input on every route: no server errors ----
 const errors: string[] = [];

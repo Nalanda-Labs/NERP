@@ -51,6 +51,7 @@
 		gantt: 'M3 5h8M7 12h10M11 19h10',
 		columns: 'M4 4h5v16H4zM15 4h5v16h-5z',
 		calendar: 'M3 6h18v15H3zM16 3v6M8 3v6M3 11h18',
+		meeting: 'M3 5h18v11H8l-5 4zM8 9h8M8 12h5',
 		funnel: 'M3 4h18l-7 9v6l-4 2v-8z',
 		building: 'M3 21h18M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2',
 		cart: 'M3 4h2l2.4 11.2a1 1 0 0 0 1 .8h9.2a1 1 0 0 0 1-.8L20 8H6.2M9 20.5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1zM17 20.5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1z',

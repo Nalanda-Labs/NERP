@@ -123,6 +123,7 @@
 				},
 				{ href: '/messenger', label: 'Messenger', icon: 'message', badge: () => (imUnread ? { n: imUnread, alert: false } : null) },
 				{ href: '/calendar', label: 'Calendar', icon: 'calendar' },
+				{ href: '/meetings', label: 'Meetings', icon: 'meeting' },
 				{ href: '/booking', label: 'Booking', icon: 'clock' },
 				{ href: '/projects', label: 'Workgroups', icon: 'briefcase' },
 				{ href: '/employees', label: 'Employees', icon: 'users', perm: PERM.USERS_VIEW },
@@ -260,7 +261,7 @@
 	<div class="flex min-h-screen">
 		<!-- Sidebar -->
 		<aside
-			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-200 bg-surface text-slate-700 transition-transform lg:translate-x-0
+			class="fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-200 bg-surface text-slate-700 transition-transform lg:translate-x-0 print:hidden
 				{mobileNav ? 'translate-x-0' : '-translate-x-full'}"
 		>
 			<div class="flex h-16 items-center gap-2.5 px-5">
@@ -317,8 +318,8 @@
 		{/if}
 
 		<!-- Main -->
-		<div class="flex min-w-0 flex-1 flex-col lg:pl-64">
-			<header class="sticky top-0 z-20 flex h-16 items-center gap-3 bg-surface/95 px-4 backdrop-blur sm:px-6">
+		<div class="flex min-w-0 flex-1 flex-col lg:pl-64 print:pl-0">
+			<header class="sticky top-0 z-20 flex h-16 items-center gap-3 bg-surface/95 px-4 backdrop-blur sm:px-6 print:hidden">
 				<button class="btn btn-ghost p-2 lg:hidden" aria-label="Open menu" onclick={() => (mobileNav = true)}>
 					<Icon name="menu" />
 				</button>
