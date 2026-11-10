@@ -73,7 +73,7 @@ pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: FILES_MANAGE, group: "Administration", name: "Manage all files", description: "Download and delete files uploaded by anyone" },
     PermissionInfo { code: SETTINGS_MANAGE, group: "Administration", name: "Manage settings", description: "Change company-wide settings" },
     PermissionInfo { code: AUDIT_VIEW, group: "Administration", name: "View audit log", description: "See the history of security-relevant actions" },
-    PermissionInfo { code: SYSTEM_MANAGE, group: "Administration", name: "Manage system", description: "Monitor background jobs and test outgoing email" },
+    PermissionInfo { code: SYSTEM_MANAGE, group: "Administration", name: "Manage system", description: "Monitor background jobs, test outgoing email, and add or change LaTeX document templates (they run code on the server)" },
 ];
 
 pub fn is_known(code: &str) -> bool {

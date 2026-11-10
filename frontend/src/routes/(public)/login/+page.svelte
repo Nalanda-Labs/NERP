@@ -40,7 +40,8 @@
 	function done(s: Session) {
 		session.apply(s);
 		const next = new URLSearchParams(location.search).get('next');
-		goto(next?.startsWith('/') && !next.startsWith('//') ? next : '/', { replace: true });
+		// Only paths on this site: not //host or /\host (browsers read both as another site).
+		goto(next && /^\/(?![/\\])/.test(next) ? next : '/', { replace: true });
 	}
 
 	async function startSetup(c: string) {

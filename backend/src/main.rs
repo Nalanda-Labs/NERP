@@ -30,6 +30,7 @@ mod notify;
 mod outbound;
 mod realtime;
 mod routes;
+mod security_headers;
 mod state;
 mod support;
 mod tasks;
@@ -64,6 +65,12 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `nerp render-typst <dir>`: render one Typst template in this child process (see
+    // crm::docs::typst_engine::render_isolated) and exit.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("render-typst") {
+        std::process::exit(crm::docs::typst_engine::child_main(std::path::Path::new(args.get(2).map(String::as_str).unwrap_or("."))));
+    }
     // A line .env cannot parse stops it there, silently dropping every later setting.
     let env_error = dotenvy::dotenv().err().filter(|e| !e.not_found());
     tracing_subscriber::fmt()
@@ -160,7 +167,12 @@ async fn main() -> Result<()> {
         tracing::info!("serving frontend from {}", dir.display());
     }
 
-    let app = app.with_state(state);
+    let policy = Arc::new(security_headers::Policy::new(
+        config.static_dir.as_deref(),
+        config.livekit.as_ref().map(|l| l.url.as_str()),
+        config.cookie_secure,
+    ));
+    let app = app.layer(axum::middleware::map_response_with_state(policy, security_headers::apply)).with_state(state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("binding {}", config.bind_addr))?;

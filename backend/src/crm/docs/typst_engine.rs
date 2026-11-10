@@ -1,8 +1,13 @@
-//! Typst rendering, in-process.
+//! Typst rendering.
 //!
 //! The `World` exposes exactly two virtual files: `main.typ` (the template) and
 //! `data.json` (the document data), plus optional `logo.*`. Templates cannot read the
 //! server's disk, reach the network or run commands, so they are safe to let CRM admins edit.
+//!
+//! A template can still compute for a very long time (a loop over a huge range), and a
+//! running Typst compilation cannot be stopped. So templates people write are rendered in a
+//! child process ([`render_isolated`]: `nerp render-typst <dir>`) that is killed at the
+//! render timeout and limited in memory; NERP's own fixed templates render in-process.
 
 use std::sync::OnceLock;
 use typst::{
@@ -15,6 +20,76 @@ use typst::{
 };
 use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
+
+/// Renders a template in a child process of this binary, killed after `timeout_secs`.
+/// Why an isolated render failed: the template (shown to its author) or the server.
+pub enum IsolatedError {
+    Template(String),
+    Server(String),
+}
+
+pub async fn render_isolated(template: &str, data: &serde_json::Value, logo: Option<(String, Vec<u8>)>, timeout_secs: u64) -> Result<Vec<u8>, IsolatedError> {
+    use base64::Engine;
+    let dir = std::env::temp_dir().join(format!("nerp-typst-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).map_err(|e| IsolatedError::Server(e.to_string()))?;
+    let server = |e: String| IsolatedError::Server(e);
+    let result = async {
+        let input = serde_json::json!({
+            "template": template,
+            "data": data,
+            "files": logo.iter().map(|(n, b)| serde_json::json!([n, base64::engine::general_purpose::STANDARD.encode(b)])).collect::<Vec<_>>(),
+        });
+        std::fs::write(dir.join("input.json"), serde_json::to_vec(&input).map_err(|e| server(e.to_string()))?).map_err(|e| server(e.to_string()))?;
+        let exe = std::env::current_exe().map_err(|e| server(e.to_string()))?;
+        let dir_arg = dir.to_string_lossy().to_string();
+        match super::process::run(&exe.to_string_lossy(), &["render-typst", &dir_arg], &dir, &[], timeout_secs).await {
+            Ok(_) => std::fs::read(dir.join("out.pdf")).map_err(|e| server(e.to_string())),
+            // A template error is printed by the child; anything else (it ran out of memory or
+            // CPU time and was stopped) gets a plain explanation, not a panic message.
+            Err(super::process::RunError::Failed(msg)) if msg.contains("memory allocation") || msg.contains("RUST_BACKTRACE") || msg.trim().is_empty() => {
+                Err(IsolatedError::Template("the template used too much memory or time and was stopped; check it for loops".into()))
+            }
+            Err(super::process::RunError::Failed(msg)) => Err(IsolatedError::Template(msg.trim().to_string())),
+            Err(super::process::RunError::Timeout) => Err(IsolatedError::Template(format!("the template took longer than {timeout_secs} seconds; check it for loops"))),
+            Err(super::process::RunError::Spawn(e)) => Err(server(format!("could not start the renderer: {e}"))),
+        }
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// The child process (`nerp render-typst <dir>`): renders `<dir>/input.json` to
+/// `<dir>/out.pdf`. Returns the exit code.
+pub fn child_main(dir: &std::path::Path) -> i32 {
+    use base64::Engine;
+    // A runaway template is also stopped here: memory and CPU time of this process.
+    // SAFETY: setrlimit on our own process with valid structures.
+    unsafe {
+        let mem = libc::rlimit { rlim_cur: 4 << 30, rlim_max: 4 << 30 };
+        libc::setrlimit(libc::RLIMIT_AS, &mem);
+        let cpu = libc::rlimit { rlim_cur: 600, rlim_max: 600 };
+        libc::setrlimit(libc::RLIMIT_CPU, &cpu);
+    }
+    let run = || -> Result<(), String> {
+        let input: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("input.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let files = input["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| Some((f[0].as_str()?.to_string(), base64::engine::general_purpose::STANDARD.decode(f[1].as_str()?).ok()?)))
+            .collect();
+        let pdf = render_with(input["template"].as_str().unwrap_or_default(), &input["data"], files)?;
+        std::fs::write(dir.join("out.pdf"), pdf).map_err(|e| e.to_string())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprint!("{e}");
+            2
+        }
+    }
+}
 
 /// Fonts are scanned once: system fonts (fontconfig dirs) plus Typst's embedded defaults.
 fn fonts() -> &'static FontStore {
@@ -83,6 +158,7 @@ impl World for DocWorld {
 
 /// Renders a Typst template with `data` (JSON). Returns the PDF, or the compiler's
 /// error messages with line numbers.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render(template: &str, data: &serde_json::Value, logo: Option<(String, Vec<u8>)>) -> Result<Vec<u8>, String> {
     render_with(template, data, logo.into_iter().collect())
 }

@@ -258,6 +258,10 @@ fn is_text_part(name: &str) -> bool {
     name == "word/document.xml" || (name.starts_with("word/header") || name.starts_with("word/footer")) && name.ends_with(".xml")
 }
 
+/// The most a .docx may unpack to: a real template is a few MB; a "zip bomb" of a few MB
+/// could otherwise unpack to gigabytes in memory.
+const MAX_UNPACKED: u64 = 100 * 1024 * 1024;
+
 /// Fills a .docx template with data.
 pub fn fill_docx(template: &[u8], data: &Value) -> Result<Vec<u8>, String> {
     let mut zin = zip::ZipArchive::new(Cursor::new(template)).map_err(|_| "the template is not a valid .docx file".to_string())?;
@@ -265,11 +269,17 @@ pub fn fill_docx(template: &[u8], data: &Value) -> Result<Vec<u8>, String> {
     {
         let mut zout = zip::ZipWriter::new(&mut buf);
         let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut unpacked: u64 = 0;
         for i in 0..zin.len() {
-            let mut f = zin.by_index(i).map_err(|e| e.to_string())?;
+            let f = zin.by_index(i).map_err(|e| e.to_string())?;
             let name = f.name().map_err(|e| e.to_string())?.to_string();
             let mut bytes = Vec::new();
-            f.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            // Counted on what is actually read, not the size the archive claims.
+            f.take(MAX_UNPACKED - unpacked + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            unpacked += bytes.len() as u64;
+            if unpacked > MAX_UNPACKED {
+                return Err("the template unpacks to more than 100 MB; it is not a normal .docx file".into());
+            }
             if is_text_part(&name) {
                 let xml = String::from_utf8(bytes).map_err(|_| format!("{name} is not UTF-8"))?;
                 bytes = fill_xml(&xml, data).into_bytes();

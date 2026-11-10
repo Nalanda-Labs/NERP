@@ -181,6 +181,7 @@ pub async fn run_send(state: &AppState, payload: &Value) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn send_through(state: &AppState, mb: &MailboxRow, t: &tickets::TicketRow, to: &str, subject: &str, paragraphs: &[String], link: Option<&str>, own_id: Option<String>) -> Result<(), String> {
+    mb.guard(state).await?;
     let password = mb.credential(state).await?;
     // Threading: answer the customer's latest email, and list the conversation so far.
     let ids: Vec<(String, bool)> = sqlx::query_as(

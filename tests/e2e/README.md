@@ -17,7 +17,8 @@ on `../db/cleanup.ts`). Leftovers from interrupted runs: `node ../db/cleanup-tes
 
 - The backend running on `http://localhost:8080`, serving the built frontend
   (`STATIC_DIR=../frontend/build`), with `CRM_WEBHOOK_ALLOW_PRIVATE=true` (the automation
-  tests call a webhook receiver on localhost).
+  tests call a webhook receiver on localhost) and `MAIL_ALLOW_PRIVATE=true` (the mail suites
+  use Dovecot and Mailpit on localhost).
 - The admin account `admin@acme.test` / `supersecret1`.
 - For the email suites: Dovecot on 127.0.0.1:143 (users `sales@nerp.test` and
   `support@nerp.test`, password `nerptest`) and Mailpit (SMTP 1025, web/API 8026).

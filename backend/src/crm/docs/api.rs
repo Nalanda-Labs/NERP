@@ -130,10 +130,10 @@ pub async fn render(state: &AppState, engine: &str, source: Option<&str>, file_i
             let data = data.clone();
             // Typst finds the image format from the bytes; the file is always "logo".
             let logo = logo.map(|(_, b)| ("logo".to_string(), b));
-            let pdf = tokio::task::spawn_blocking(move || typst_engine::render(&src, &data, logo))
-                .await
-                .map_err(|e| RenderError::Server(e.to_string()))?
-                .map_err(RenderError::Template)?;
+            let pdf = typst_engine::render_isolated(&src, &data, logo, c.timeout_secs).await.map_err(|e| match e {
+                typst_engine::IsolatedError::Template(m) => RenderError::Template(m),
+                typst_engine::IsolatedError::Server(m) => RenderError::Server(m),
+            })?;
             Ok(Rendered { pdf, docx: None })
         }
         "latex" => {
@@ -255,6 +255,16 @@ fn require_admin(auth: &AuthUser) -> AppResult<()> {
     if is_crm_admin(auth) { Ok(()) } else { Err(AppError::Forbidden) }
 }
 
+/// A LaTeX template is code the server runs: LuaTeX's Lua can read and write any file the
+/// server can (shell commands stay off). So writing one takes "Manage system", the trust of
+/// running the server; Typst and Word templates cannot reach files and stay with CRM admins.
+fn require_code(auth: &AuthUser, engine: &str) -> AppResult<()> {
+    if engine == "latex" && !auth.can(crate::auth::permissions::SYSTEM_MANAGE) {
+        return Err(AppError::bad("LaTeX templates run code on the server: adding or changing one needs the \"Manage system\" permission"));
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct TemplateBody {
     name: Option<String>,
@@ -316,7 +326,7 @@ async fn office_template_file(state: &AppState, auth: &AuthUser, id: Uuid) -> Ap
     }
     let is_odt = {
         let mut m = String::new();
-        zip.by_name("mimetype").ok().and_then(|mut f| std::io::Read::read_to_string(&mut f, &mut m).ok()).is_some()
+        zip.by_name("mimetype").ok().and_then(|f| std::io::Read::read_to_string(&mut std::io::Read::take(f, 200), &mut m).ok()).is_some()
             && m.trim() == "application/vnd.oasis.opendocument.text"
     };
     if !is_odt {
@@ -339,6 +349,7 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Json(b):
     if !["typst", "latex", "office"].contains(&engine.as_str()) {
         return Err(AppError::bad("engine must be typst, latex or office"));
     }
+    require_code(&auth, &engine)?;
     let types = type_ids(&state, &b.entity_types.unwrap_or_else(|| vec!["deal".into()])).await?;
     let source = if engine == "office" { None } else { Some(b.source.unwrap_or_default()) };
     if let Some(s) = &source {
@@ -372,6 +383,9 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
     let cur = load_template(&state, id).await?;
     if b.engine.as_deref().is_some_and(|e| e != cur.engine) {
         return Err(AppError::bad("the engine of a template cannot change; create a new template"));
+    }
+    if b.source.is_some() {
+        require_code(&auth, &cur.engine)?;
     }
     let types = match &b.entity_types {
         Some(c) => type_ids(&state, c).await?,
@@ -447,6 +461,7 @@ async fn default_locale(state: &AppState) -> String {
 async fn preview(State(state): State<AppState>, auth: AuthUser, Json(b): Json<PreviewBody>) -> AppResult<Response> {
     require_admin(&auth)?;
     if let Some(s) = &b.source {
+        require_code(&auth, &b.engine)?;
         check_source(s)?;
     }
     let locale = match b.locale.as_deref().map(check_locale).transpose()? {

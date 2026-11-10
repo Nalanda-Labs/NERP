@@ -33,6 +33,10 @@ pub struct Config {
     /// Let automation webhooks call addresses in private networks (loopback, LAN). Off by
     /// default so a robot cannot be used to probe the server's own network.
     pub webhook_allow_private: bool,
+    /// Let mailboxes use mail servers on private networks (loopback, LAN). Off by default so
+    /// connecting a mailbox cannot be used to probe the server's own network; turn it on for
+    /// a mail server inside the company network.
+    pub mail_allow_private: bool,
     /// ICE servers for video calls, as the browser's RTCIceServer list in JSON, e.g.
     /// `[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]`. Empty: calls
     /// connect directly, which works within one network.
@@ -193,6 +197,7 @@ impl Config {
             worker_concurrency: parse("WORKER_CONCURRENCY", "4")?,
             data_key,
             webhook_allow_private: parse("CRM_WEBHOOK_ALLOW_PRIVATE", "false")?,
+            mail_allow_private: parse("MAIL_ALLOW_PRIVATE", "false")?,
             ldap_enabled: parse("LDAP_ENABLED", "false")?,
             livekit: livekit_config()?,
             webrtc_ice_servers: {

@@ -30,6 +30,22 @@ pub fn is_internal(ip: IpAddr) -> bool {
 }
 
 /// `sha256=<hex>`: HMAC-SHA256 of the body with the shared secret.
+/// Refuses a host that resolves to an internal address (mail servers and other services
+/// users name themselves), unless `allow_private`.
+pub async fn refuse_internal(host: &str, port: u16, allow_private: bool) -> Result<(), String> {
+    if allow_private {
+        return Ok(());
+    }
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port)).await.map_err(|_| format!("{host} could not be found"))?.collect();
+    if addrs.is_empty() {
+        return Err(format!("{host} could not be found"));
+    }
+    if addrs.iter().any(|a| is_internal(a.ip())) {
+        return Err(format!("{host} is on an internal network; mail servers there need MAIL_ALLOW_PRIVATE=true on the NERP server"));
+    }
+    Ok(())
+}
+
 pub fn sign(secret: &str, body: &[u8]) -> String {
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key length");
     mac.update(body);
@@ -129,6 +145,13 @@ pub async fn send(state: &AppState, r: Request<'_>) -> Result<Response, Failure>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mail_hosts_on_internal_networks_are_refused_unless_allowed() {
+        assert!(refuse_internal("localhost", 993, false).await.unwrap_err().contains("MAIL_ALLOW_PRIVATE"));
+        assert!(refuse_internal("127.0.0.1", 25, false).await.is_err());
+        assert!(refuse_internal("127.0.0.1", 25, true).await.is_ok());
+    }
 
     #[test]
     fn internal_addresses() {

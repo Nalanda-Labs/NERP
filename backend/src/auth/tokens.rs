@@ -63,6 +63,16 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// A refresh token that was already exchanged: remembered so that seeing it again (a copy
+/// was stolen and one side used it first) ends the session for everyone holding it.
+fn rt_used_key(hash: &str) -> String {
+    format!("auth:rt_used:{hash}")
+}
+
+/// Two tabs of the same browser may refresh at the same moment; a token reused this soon
+/// after it was exchanged is refused but not treated as theft.
+const REUSE_GRACE_SECS: i64 = 30;
+
 fn rt_key(hash: &str) -> String {
     format!("auth:rt:{hash}")
 }
@@ -136,10 +146,34 @@ pub async fn rotate_refresh_token(
     meta: &ClientMeta,
 ) -> AppResult<Option<(Uuid, Uuid, String)>> {
     let mut redis = state.redis.clone();
-    let sid: Option<String> = redis.get_del(rt_key(&hash_token(token))).await?;
+    let hash = hash_token(token);
+    let sid: Option<String> = redis.get_del(rt_key(&hash)).await?;
     let Some(sid) = sid.and_then(|s| Uuid::parse_str(&s).ok()) else {
+        // An exchanged token presented again: past the grace period, assume it was stolen.
+        let used: Option<String> = redis.get(rt_used_key(&hash)).await?;
+        if let Some((sid, at)) = used.as_deref().and_then(|u| u.split_once('|')) {
+            let at: i64 = at.parse().unwrap_or(0);
+            if let Ok(sid) = Uuid::parse_str(sid)
+                && Utc::now().timestamp() - at > REUSE_GRACE_SECS {
+                    let user = get_session(state, sid).await?.map(|d| d.user_id);
+                    revoke_session(state, sid).await?;
+                    crate::audit::record(&state.db, user, "auth.refresh_reuse", "session", Some(sid.to_string()), serde_json::json!({}), meta.ip.as_deref()).await;
+                    if let Some(u) = user {
+                        crate::notify::notify(state, &[u], crate::notify::NewNotification {
+                            kind: "security.session_ended",
+                            title: "A sign-in on one of your devices was ended for safety".into(),
+                            body: Some("An old sign-in token was used again, which can mean it was copied. Sign in again on that device; change your password if this wasn't you.".into()),
+                            link: Some("/profile#security".into()),
+                            actor: None,
+                        })
+                        .await;
+                    }
+                }
+        }
         return Ok(None);
     };
+    let ttl = state.config.refresh_token_ttl_secs as u64;
+    let _: () = redis.set_ex(rt_used_key(&hash), format!("{sid}|{}", Utc::now().timestamp()), ttl).await?;
     let Some(mut data) = get_session(state, sid).await? else {
         return Ok(None);
     };

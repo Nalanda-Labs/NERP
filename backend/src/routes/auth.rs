@@ -41,6 +41,9 @@ pub fn router() -> Router<AppState> {
 }
 
 const MAX_FAILED_LOGINS: i64 = 10;
+/// Failed sign-ins from one address (any accounts) before it waits: stops trying one
+/// password on many accounts ("password spraying"), which the per-account limit cannot see.
+const MAX_FAILED_LOGINS_PER_IP: i64 = 100;
 const FAILED_LOGIN_WINDOW_SECS: i64 = 15 * 60;
 const TWO_FACTOR_CHALLENGE_SECS: u64 = 5 * 60;
 const TWO_FACTOR_MAX_ATTEMPTS: i64 = 5;
@@ -125,6 +128,11 @@ async fn login(
     if failures.unwrap_or(0) >= MAX_FAILED_LOGINS {
         return Err(AppError::TooManyRequests("too many failed attempts; try again in 15 minutes".into()));
     }
+    let ip_key = format!("auth:failip:{}", ip.unwrap_or("unknown"));
+    let ip_failures: Option<i64> = redis.get(&ip_key).await?;
+    if ip_failures.unwrap_or(0) >= MAX_FAILED_LOGINS_PER_IP {
+        return Err(AppError::TooManyRequests("too many failed sign-ins from your network; try again in 15 minutes".into()));
+    }
 
     let db = &state.db;
     let find = |email: String| async move {
@@ -167,6 +175,10 @@ async fn login(
                 .incr(&fail_key, 1)
                 .ignore()
                 .expire(&fail_key, FAILED_LOGIN_WINDOW_SECS)
+                .ignore()
+                .incr(&ip_key, 1)
+                .ignore()
+                .expire(&ip_key, FAILED_LOGIN_WINDOW_SECS)
                 .ignore()
                 .query_async(&mut redis)
                 .await?;

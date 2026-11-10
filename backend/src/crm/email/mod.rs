@@ -131,6 +131,13 @@ impl MailboxRow {
             self.password(state).ok_or_else(|| "the stored password cannot be read; enter it again".to_string())
         }
     }
+    /// Refuses servers on internal networks (unless MAIL_ALLOW_PRIVATE), checked before every
+    /// connection, as a host's address can change after it was saved.
+    pub(crate) async fn guard(&self, state: &AppState) -> Result<(), String> {
+        let allow = state.config.mail_allow_private;
+        crate::outbound::refuse_internal(&self.imap_host, self.imap_port as u16, allow).await?;
+        crate::outbound::refuse_internal(&self.smtp_host, self.smtp_port as u16, allow).await
+    }
     pub(crate) fn smtp(&self, secret: &str) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
         let auth = (self.smtp_auth || self.is_oauth()).then_some((self.username.as_str(), secret));
         smtp_transport(&self.smtp_host, self.smtp_port as u16, &self.smtp_security, auth, self.allow_invalid_certs, self.is_oauth())
@@ -256,7 +263,13 @@ fn settings(b: MailboxBody, cur: Option<(&MailboxRow, String)>) -> AppResult<Set
 }
 
 /// Logs in to IMAP and opens an SMTP session; returns a message per side.
-async fn check(s: &Settings) -> (Result<(), String>, Result<(), String>) {
+async fn check(state: &AppState, s: &Settings) -> (Result<(), String>, Result<(), String>) {
+    let allow = state.config.mail_allow_private;
+    let imap_ok = crate::outbound::refuse_internal(&s.imap_host, s.imap_port as u16, allow).await;
+    let smtp_ok = crate::outbound::refuse_internal(&s.smtp_host, s.smtp_port as u16, allow).await;
+    if imap_ok.is_err() || smtp_ok.is_err() {
+        return (imap_ok, smtp_ok);
+    }
     let imap = async {
         let mut session = imap::connect(&imap::Settings {
             host: &s.imap_host,
@@ -291,10 +304,10 @@ fn check_json(r: &(Result<(), String>, Result<(), String>)) -> Value {
     })
 }
 
-async fn test_mailbox(auth: AuthUser, Json(b): Json<MailboxBody>) -> AppResult<Json<Value>> {
+async fn test_mailbox(State(state): State<AppState>, auth: AuthUser, Json(b): Json<MailboxBody>) -> AppResult<Json<Value>> {
     let _ = auth;
     let s = settings(b, None)?;
-    Ok(Json(check_json(&check(&s).await)))
+    Ok(Json(check_json(&check(&state, &s).await)))
 }
 
 async fn list_mailboxes(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
@@ -321,7 +334,7 @@ async fn create_mailbox(State(state): State<AppState>, auth: AuthUser, Json(b): 
     if n >= 10 {
         return Err(AppError::bad("at most 10 mailboxes per person"));
     }
-    let result = check(&s).await;
+    let result = check(&state, &s).await;
     if result.0.is_err() || result.1.is_err() {
         return Err(AppError::bad(format!(
             "could not connect: {}",
@@ -388,7 +401,7 @@ async fn update_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
     let old_password = cur.password(&state).unwrap_or_default();
     let s = settings(b, Some((&cur, old_password)))?;
     if connection_changed {
-        let r = check(&s).await;
+        let r = check(&state, &s).await;
         if r.0.is_err() || r.1.is_err() {
             return Err(AppError::bad(format!("could not connect: {}", [r.0.err().map(|e| format!("IMAP {e}")), r.1.err()].into_iter().flatten().collect::<Vec<_>>().join("; "))));
         }
@@ -893,6 +906,7 @@ pub async fn run_send(state: &AppState, payload: &Value) -> anyhow::Result<()> {
         }
         .map_err(|e| e.to_string())?;
         let raw = message.formatted();
+        mb.guard(state).await?;
         mb.smtp(&password)?
             .send(message)
             .await

@@ -270,6 +270,7 @@ pub struct Report {
 
 /// One sync run for a mailbox.
 pub async fn sync(state: &AppState, mb: &MailboxRow) -> Result<Report, String> {
+    mb.guard(state).await?;
     let password = mb.credential(state).await?;
     let mut session = imap::connect(&mb.imap(&password)).await?;
     let sent = match &mb.sent_folder {
