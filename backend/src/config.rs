@@ -29,6 +29,10 @@ pub struct Config {
     pub docs: DocsConfig,
     /// Key for secrets stored in the database (mailbox passwords).
     pub data_key: [u8; 32],
+    /// Encryption of stored files (FILE_ENCRYPTION_KEY, FILE_ENCRYPTION_OLD_KEYS).
+    pub file_keys: crate::blob::Keys,
+    /// How long removed files are kept aside, for point-in-time restores.
+    pub keep_deleted_days: i64,
     pub oauth: OAuthConfig,
     /// Let automation webhooks call addresses in private networks (loopback, LAN). Off by
     /// default so a robot cannot be used to probe the server's own network.
@@ -202,6 +206,8 @@ impl Config {
             worker_enabled: parse("WORKER_ENABLED", "true")?,
             worker_concurrency: parse("WORKER_CONCURRENCY", "4")?,
             data_key,
+            file_keys: crate::blob::Keys::from_env()?,
+            keep_deleted_days: parse("FILE_KEEP_DELETED_DAYS", "14")?,
             webhook_allow_private: parse("CRM_WEBHOOK_ALLOW_PRIVATE", "false")?,
             mail_allow_private: parse("MAIL_ALLOW_PRIVATE", "false")?,
             ldap_enabled: parse("LDAP_ENABLED", "false")?,

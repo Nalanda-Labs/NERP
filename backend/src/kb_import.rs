@@ -409,12 +409,12 @@ fn same_name(page: &str, folder: &str) -> bool {
 async fn import(State(state): State<AppState>, auth: AuthUser, Path(space): Path<Uuid>, Json(b): Json<ImportBody>) -> AppResult<Json<Value>> {
     crate::kb::editable(&state, &auth, space).await?;
     crate::kb::check_parent(&state, space, b.parent_id, None).await?;
-    let file: Option<(String, String, Option<Uuid>)> = sqlx::query_as("SELECT storage_path, original_name, owner_id FROM files WHERE id = $1").bind(b.file_id).fetch_optional(&state.db).await?;
-    let (path, name, owner) = file.ok_or(AppError::NotFound("file"))?;
-    if owner != Some(auth.id) {
+    let f = crate::routes::files::fetch(&state, b.file_id).await?;
+    if f.owner_id != Some(auth.id) {
         return Err(AppError::bad("upload the file first"));
     }
-    let bytes = tokio::fs::read(state.config.upload_dir.join(path)).await.map_err(|_| AppError::NotFound("file"))?;
+    let bytes = crate::routes::files::read_content(&state, &f).await?;
+    let name = f.original_name;
     let archive = if ext(&name) == "zip" || bytes.starts_with(b"PK\x03\x04") {
         read_zip(&bytes)?
     } else if is_page(&name) {

@@ -208,6 +208,7 @@
 				{ href: '/crm/mailboxes', label: 'Mailboxes', icon: 'mail' },
 				{ href: '/crm/webforms', label: 'Web forms', icon: 'list', perm: PERM.CRM_ADMIN },
 				{ href: '/sites', label: 'Websites', icon: 'globe', perm: PERM.SITES },
+				{ href: '/crm/migrate', label: 'Move from another CRM', icon: 'upload', perm: PERM.CRM_ADMIN },
 				{ href: '/crm/recycle-bin', label: 'Recycle bin', icon: 'trash' }
 			]
 		},

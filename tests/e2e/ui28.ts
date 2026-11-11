@@ -66,7 +66,8 @@ try {
 
   await step('subscription link', async () => {
     await page.click('button:has-text("Subscribe")');
-    await page.click('dialog[open] button:has-text("Make my link")');
+    // A link left over from an interrupted run is replaced ("Make a new link").
+    await page.click('dialog[open] button:has-text("Make my link"), dialog[open] button:has-text("Make a new link")');
     const url = await page.locator('[data-feed]').textContent();
     const ics = await (await fetch(url!.replace(/^https?:\/\/[^/]+/, B))).text();
     if (!ics.includes(`SUMMARY:Planning ${s}`)) throw new Error('feed missing the event');

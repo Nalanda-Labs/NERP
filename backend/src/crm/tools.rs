@@ -693,10 +693,9 @@ pub async fn run_import(state: &AppState, payload: &Value) -> Result<()> {
     let req: ImportRequest = serde_json::from_value(payload["request"].clone())?;
     let auth = acting_as(state, user).await?.ok_or_else(|| anyhow!("importing user is no longer active"))?;
     let t = entity_type(state, code).await?;
-    let path: String = sqlx::query_scalar("SELECT storage_path FROM files WHERE id = $1").bind(req.file_id).fetch_one(&state.db).await?;
-    let full = state.config.upload_dir.join(path);
+    let file = crate::routes::files::fetch(state, req.file_id).await?;
     // Exports from mail programs come as UTF-8, UTF-16 or Windows-1252.
-    let text = super::vcard::decode(&tokio::fs::read(&full).await?);
+    let text = super::vcard::decode(&crate::routes::files::read_content(state, &file).await?);
     let delimiter = req.delimiter.as_deref().and_then(|d| d.bytes().next()).unwrap_or(b',');
     let uf_codes: HashSet<String> = super::fields::visible_fields(state, &auth, t.id).await?.into_iter().map(|f| f.code).collect();
     let company_type = entity_type_by_id(state, COMPANY).await?;

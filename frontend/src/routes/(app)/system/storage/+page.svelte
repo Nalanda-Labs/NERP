@@ -22,6 +22,16 @@
 			created_at: string;
 			mime_type: string;
 		}[];
+		encryption: {
+			enabled: boolean;
+			key_id: string | null;
+			encrypted: number;
+			other_key: number;
+			not_encrypted: number;
+			converting: boolean;
+			keep_deleted_days: number;
+			deleted: { files: number; bytes: number };
+		};
 		cleanup: {
 			old_versions: { count: number; bytes: number };
 			drive_trash: { count: number; bytes: number };
@@ -135,6 +145,41 @@
 				</section>
 			{/each}
 		</div>
+
+		<section class="card space-y-2 p-4 text-sm" aria-label="Encryption">
+			<h2 class="font-semibold text-slate-900">Encryption at rest</h2>
+			{#if s.encryption.enabled}
+				<p data-encryption="on">
+					Files are stored encrypted (AES-256-GCM, key
+					<code class="text-xs">{s.encryption.key_id}</code>).
+					<span class="text-slate-500 tabular-nums"
+						>{s.encryption.encrypted.toLocaleString()} encrypted</span
+					>
+					{#if s.encryption.not_encrypted + s.encryption.other_key > 0}
+						<span class="text-amber-700" data-converting
+							>· {(s.encryption.not_encrypted + s.encryption.other_key).toLocaleString()} still being
+							encrypted{s.encryption.other_key ? ' (or moved to the new key)' : ''} in the background</span
+						>
+					{/if}
+				</p>
+			{:else}
+				<p data-encryption="off">
+					Files are not encrypted by NERP{s.encryption.other_key
+						? ` (${s.encryption.other_key.toLocaleString()} still being decrypted)`
+						: ''}. Set <code class="text-xs">FILE_ENCRYPTION_KEY</code> (at least 32 characters) in
+					the server's settings and restart: new files are encrypted, existing ones in the background.
+					Keep the key with the backups of <code class="text-xs">.env</code>: without it the files
+					can't be read.
+				</p>
+			{/if}
+			<p class="text-xs text-slate-500">
+				The database is encrypted by the disk it is on (e.g. LUKS); secrets in it (mailbox and
+				directory passwords, tokens) are encrypted by NERP. Removed files are kept aside for {s
+					.encryption.keep_deleted_days} days for point-in-time restores ({formatBytes(
+					s.encryption.deleted.bytes
+				)}).
+			</p>
+		</section>
 
 		<section class="card space-y-3 p-4 text-sm" aria-label="Clean up">
 			<h2 class="font-semibold text-slate-900">Clean up</h2>

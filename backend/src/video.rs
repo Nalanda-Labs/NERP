@@ -132,16 +132,33 @@ async fn convert(state: &AppState, id: Uuid) -> anyhow::Result<()> {
     if Command::new("ffprobe").arg("-version").output().await.is_err() {
         return set(state, id, "unavailable", Some("ffmpeg isn't installed".into())).await;
     }
-    let src = state.config.upload_dir.join(&f.storage_path);
+    // ffmpeg reads a path: an encrypted file is decrypted to a private temporary copy.
+    let tmp = std::env::temp_dir().join(format!("nerp-video-{id}"));
+    let src = if f.enc_key.is_some() {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&tmp)?;
+        let p = tmp.join("source");
+        if let Err(e) = crate::routes::files::copy_out(state, &f, &p).await {
+            let _ = tokio::fs::remove_dir_all(&tmp).await;
+            return set(state, id, "failed", Some(e.to_string())).await;
+        }
+        p
+    } else {
+        state.config.upload_dir.join(&f.storage_path)
+    };
     let (duration, width, height, vcodec, acodec, container) = match probe(&src).await {
         Ok(p) => p,
-        Err(e) => return set(state, id, "failed", Some(e.to_string())).await,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&tmp).await;
+            return set(state, id, "failed", Some(e.to_string())).await;
+        }
     };
     if duration > MAX_SECS {
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
         return set(state, id, "too_big", Some("longer than four hours".into())).await;
     }
     sqlx::query("UPDATE file_renditions SET duration_secs = $2, width = $3, height = $4 WHERE file_id = $1").bind(id).bind(duration as f32).bind(width as i32).bind(height as i32).execute(&state.db).await?;
-    let tmp = std::env::temp_dir().join(format!("nerp-video-{id}"));
     tokio::fs::create_dir_all(&tmp).await?;
     let result: anyhow::Result<()> = async {
         // Poster: a frame a second in (or from the middle of a short clip).

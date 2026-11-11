@@ -12,11 +12,8 @@ use axum::{
 use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
-use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use super::{Page, PageParams};
@@ -49,10 +46,12 @@ pub struct FileMeta {
     created_at: DateTime<Utc>,
     #[serde(skip)]
     pub(crate) storage_path: String,
+    #[serde(skip)]
+    pub(crate) enc_key: Option<String>,
 }
 
 const META_COLUMNS: &str =
-    "id, owner_id, original_name, mime_type, size_bytes, sha256, is_public, created_at, storage_path";
+    "id, owner_id, original_name, mime_type, size_bytes, sha256, is_public, created_at, storage_path, enc_key";
 
 pub(crate) async fn fetch(state: &AppState, id: Uuid) -> AppResult<FileMeta> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {META_COLUMNS} FROM files WHERE id = $1")))
@@ -118,19 +117,22 @@ pub async fn store_bytes(state: &AppState, owner: Option<Uuid>, name: &str, mime
         tokio::fs::create_dir_all(parent).await?;
     }
     let tmp = abs.with_extension("part");
-    tokio::fs::write(&tmp, bytes).await?;
+    let mut w = crate::blob::Writer::create(&state.config.file_keys, &tmp).await?;
+    w.write(bytes).await?;
+    let done = w.finish().await?;
     tokio::fs::rename(&tmp, &abs).await?;
     let insert = sqlx::query(
-        "INSERT INTO files (id, owner_id, original_name, mime_type, size_bytes, sha256, storage_path, is_public)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)",
+        "INSERT INTO files (id, owner_id, original_name, mime_type, size_bytes, sha256, storage_path, is_public, enc_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8)",
     )
     .bind(id)
     .bind(owner)
     .bind(sanitize_name(name))
     .bind(sanitize_mime(Some(mime)))
     .bind(bytes.len() as i64)
-    .bind(hex::encode(Sha256::digest(bytes)))
+    .bind(done.sha256)
     .bind(rel.to_string_lossy().as_ref())
+    .bind(done.key)
     .execute(&state.db)
     .await;
     if let Err(e) = insert {
@@ -143,7 +145,7 @@ pub async fn store_bytes(state: &AppState, owner: Option<Uuid>, name: &str, mime
 /// Stores a file from disk (e.g. a call recording) without reading it into memory at once.
 /// The source is left in place.
 pub async fn store_path(state: &AppState, owner: Option<Uuid>, name: &str, mime: &str, src: &std::path::Path) -> AppResult<Uuid> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
     let id = Uuid::new_v4();
     let now = Utc::now();
     let rel = PathBuf::from(format!("{:04}/{:02}/{id}", now.year(), now.month()));
@@ -153,33 +155,29 @@ pub async fn store_path(state: &AppState, owner: Option<Uuid>, name: &str, mime:
     }
     let tmp = abs.with_extension("part");
     let mut input = tokio::fs::File::open(src).await?;
-    let mut out = tokio::fs::File::create(&tmp).await?;
-    let mut hasher = Sha256::new();
+    let mut out = crate::blob::Writer::create(&state.config.file_keys, &tmp).await?;
     let mut buf = vec![0u8; 1 << 20];
-    let mut size: i64 = 0;
     loop {
         let n = input.read(&mut buf).await?;
         if n == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
-        out.write_all(&buf[..n]).await?;
-        size += n as i64;
+        out.write(&buf[..n]).await?;
     }
-    out.flush().await?;
-    drop(out);
+    let done = out.finish().await?;
     tokio::fs::rename(&tmp, &abs).await?;
     let insert = sqlx::query(
-        "INSERT INTO files (id, owner_id, original_name, mime_type, size_bytes, sha256, storage_path, is_public)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)",
+        "INSERT INTO files (id, owner_id, original_name, mime_type, size_bytes, sha256, storage_path, is_public, enc_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8)",
     )
     .bind(id)
     .bind(owner)
     .bind(sanitize_name(name))
     .bind(sanitize_mime(Some(mime)))
-    .bind(size)
-    .bind(hex::encode(hasher.finalize()))
+    .bind(done.size as i64)
+    .bind(done.sha256)
     .bind(rel.to_string_lossy().as_ref())
+    .bind(done.key)
     .execute(&state.db)
     .await;
     if let Err(e) = insert {
@@ -192,8 +190,21 @@ pub async fn store_path(state: &AppState, owner: Option<Uuid>, name: &str, mime:
 /// Reads a stored file: (original name, mime type, owner, bytes).
 pub async fn read_bytes(state: &AppState, id: Uuid) -> AppResult<(String, String, Option<Uuid>, Vec<u8>)> {
     let f = fetch(state, id).await?;
-    let bytes = tokio::fs::read(state.config.upload_dir.join(&f.storage_path)).await.map_err(|_| AppError::NotFound("file"))?;
+    let bytes = read_content(state, &f).await?;
     Ok((f.original_name, f.mime_type, f.owner_id, bytes))
+}
+
+/// A stored file's content (decrypted).
+pub async fn read_content(state: &AppState, f: &FileMeta) -> AppResult<Vec<u8>> {
+    crate::blob::read(state, &f.storage_path, f.enc_key.as_deref()).await.map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => AppError::NotFound("file"),
+        _ => AppError::Internal(e.into()),
+    })
+}
+
+/// A plain copy of a stored file at `dest`, for tools that need a path (ffmpeg).
+pub async fn copy_out(state: &AppState, f: &FileMeta, dest: &std::path::Path) -> std::io::Result<()> {
+    crate::blob::open(&state.config.file_keys, &state.config.upload_dir.join(&f.storage_path), f.enc_key.as_deref()).await?.copy_to(dest).await
 }
 
 /// Deletes a server-managed file (row and disk). Missing files are ignored.
@@ -205,7 +216,7 @@ pub async fn delete_stored(state: &AppState, id: Uuid) {
         .ok()
         .flatten();
     if let Some(p) = path {
-        let _ = tokio::fs::remove_file(state.config.upload_dir.join(p)).await;
+        crate::blob::discard(state, &p).await;
     }
 }
 
@@ -268,7 +279,7 @@ async fn upload(
     mut multipart: Multipart,
 ) -> AppResult<Json<FileMeta>> {
     let mut is_public = false;
-    let mut stored: Option<(Uuid, String, String, i64, String, PathBuf)> = None;
+    let mut stored: Option<(Uuid, String, String, i64, String, PathBuf, Option<String>)> = None;
 
     while let Some(mut field) = multipart.next_field().await.map_err(|e| multipart_error(&state, e))? {
         match field.name() {
@@ -288,10 +299,9 @@ async fn upload(
                 }
 
                 let tmp = abs.with_extension("part");
-                let mut out = tokio::fs::File::create(&tmp).await?;
-                let mut hasher = Sha256::new();
+                let mut out = crate::blob::Writer::create(&state.config.file_keys, &tmp).await?;
                 let mut size: usize = 0;
-                let result: AppResult<()> = async {
+                let result: AppResult<crate::blob::Written> = async {
                     while let Some(chunk) = field.chunk().await.map_err(|e| multipart_error(&state, e))? {
                         size += chunk.len();
                         if size > state.config.max_upload_bytes {
@@ -300,30 +310,30 @@ async fn upload(
                                 state.config.max_upload_bytes / (1024 * 1024)
                             )));
                         }
-                        hasher.update(&chunk);
-                        out.write_all(&chunk).await?;
+                        out.write(&chunk).await?;
                     }
-                    out.flush().await?;
-                    Ok(())
+                    Ok(out.finish().await?)
                 }
                 .await;
-                if let Err(e) = result {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return Err(e);
-                }
+                let done = match result {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                        return Err(e);
+                    }
+                };
                 tokio::fs::rename(&tmp, &abs).await?;
-                let digest = hex::encode(hasher.finalize());
-                stored = Some((id, name, mime, size as i64, digest, rel));
+                stored = Some((id, name, mime, size as i64, done.sha256, rel, done.key));
             }
             _ => {}
         }
     }
 
-    let (id, name, mime, size, digest, rel) =
+    let (id, name, mime, size, digest, rel, enc_key) =
         stored.ok_or_else(|| AppError::bad("no file was uploaded (expected a 'file' field)"))?;
     let insert = sqlx::query(
-        "INSERT INTO files (id, owner_id, original_name, mime_type, size_bytes, sha256, storage_path, is_public)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO files (id, owner_id, original_name, mime_type, size_bytes, sha256, storage_path, is_public, enc_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(id)
     .bind(auth.id)
@@ -333,6 +343,7 @@ async fn upload(
     .bind(&digest)
     .bind(rel.to_string_lossy().as_ref())
     .bind(is_public)
+    .bind(&enc_key)
     .execute(&state.db)
     .await;
     if let Err(e) = insert {
@@ -449,18 +460,21 @@ fn range(headers: &HeaderMap, size: u64) -> Result<Option<(u64, u64)>, ()> {
 /// Sends a stored file from disk as it is read (never all in memory), with byte ranges so
 /// videos can be played and seeked, and the download headers.
 pub async fn stream(state: &AppState, file: &FileMeta, name: &str, headers: &HeaderMap) -> AppResult<Response> {
-    send_file(&state.config.upload_dir.join(&file.storage_path), &file.mime_type, file.is_public, name, headers).await
+    let blob = crate::blob::open(&state.config.file_keys, &state.config.upload_dir.join(&file.storage_path), file.enc_key.as_deref()).await.map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => AppError::NotFound("file"),
+        _ => AppError::Internal(e.into()),
+    })?;
+    send_blob(blob, &file.mime_type, file.is_public, name, headers)
 }
 
 /// The same for a file elsewhere on disk (a backup), always as a private download.
 pub async fn stream_disk(path: &std::path::Path, name: &str, mime: &str, headers: &HeaderMap) -> AppResult<Response> {
-    send_file(path, mime, false, name, headers).await
+    let blob = crate::blob::open(&crate::blob::Keys::default(), path, None).await.map_err(|_| AppError::NotFound("file"))?;
+    send_blob(blob, mime, false, name, headers)
 }
 
-async fn send_file(path: &std::path::Path, mime: &str, public: bool, name: &str, headers: &HeaderMap) -> AppResult<Response> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let mut handle = tokio::fs::File::open(path).await.map_err(|_| AppError::NotFound("file"))?;
-    let size = handle.metadata().await.map(|m| m.len()).map_err(|_| AppError::NotFound("file"))?;
+fn send_blob(blob: crate::blob::Blob, mime: &str, public: bool, name: &str, headers: &HeaderMap) -> AppResult<Response> {
+    let size = blob.size;
 
     // Raster images, PDFs, audio and video may show in the page; everything else downloads.
     // SVG/HTML never render inline because they can carry scripts.
@@ -480,19 +494,16 @@ async fn send_file(path: &std::path::Path, mime: &str, public: bool, name: &str,
         percent_encode(name)
     );
 
-    let (status, len, content_range) = match range(headers, size) {
-        Ok(None) => (StatusCode::OK, size, None),
-        Ok(Some((start, end))) => {
-            handle.seek(std::io::SeekFrom::Start(start)).await?;
-            (StatusCode::PARTIAL_CONTENT, end - start + 1, Some(format!("bytes {start}-{end}/{size}")))
-        }
+    let (status, start, len, content_range) = match range(headers, size) {
+        Ok(None) => (StatusCode::OK, 0, size, None),
+        Ok(Some((start, end))) => (StatusCode::PARTIAL_CONTENT, start, end - start + 1, Some(format!("bytes {start}-{end}/{size}"))),
         Err(()) => {
             let mut res = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
             res.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{size}")).unwrap());
             return Ok(res);
         }
     };
-    let mut res = Body::from_stream(ReaderStream::with_capacity(handle.take(len), 64 * 1024)).into_response();
+    let mut res = Body::from_stream(blob.stream(start, len)).into_response();
     *res.status_mut() = status;
     let h = res.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_str(mime).unwrap_or(HeaderValue::from_static("application/octet-stream")));
@@ -543,9 +554,7 @@ async fn remove(
         auth.require(perm::FILES_MANAGE)?;
     }
     sqlx::query("DELETE FROM files WHERE id = $1").bind(id).execute(&state.db).await?;
-    if let Err(e) = tokio::fs::remove_file(state.config.upload_dir.join(&file.storage_path)).await {
-        tracing::warn!(error = ?e, file = %id, "file row deleted but removing it from disk failed");
-    }
+    crate::blob::discard(&state, &file.storage_path).await;
     audit::record(&state.db, Some(auth.id), "file.delete", "file", Some(id.to_string()), json!({ "name": file.original_name }), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))
 }
