@@ -46,6 +46,8 @@ const RECURRING: &[(&str, u64)] = &[
     (crate::calls::CLEANUP_JOB, 60),
     (crate::calls::RECORDINGS_JOB, 20),
     (crate::drive::PURGE_JOB, 24 * 3600),
+    (crate::blob::PURGE_JOB, 24 * 3600),
+    (crate::blob::CONVERT_JOB, 3600),
     (crate::tracking::CLEANUP_JOB, 24 * 3600),
     (crate::directory::SYNC_JOB, 3600),
     (crate::im::MAINTENANCE_JOB, 300),
@@ -212,6 +214,8 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
         crate::calls::RECORDINGS_JOB => crate::calls::run_recordings(state).await,
         crate::workflows::RESUME_JOB => crate::workflows::resume(state, payload).await,
         crate::drive::PURGE_JOB => crate::drive::run_purge(state).await,
+        crate::blob::PURGE_JOB => crate::blob::purge_deleted(state).await,
+        crate::blob::CONVERT_JOB => crate::blob::convert(state).await,
         crate::directory::SYNC_JOB => crate::directory::ldap::run_sync(state).await,
         crate::im::MAINTENANCE_JOB => crate::im::run_maintenance(state).await,
         crate::tasks::automation::JOB => crate::tasks::automation::run_job(state, payload).await,
@@ -227,6 +231,7 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
         crate::crm::email::SEND_JOB => crate::crm::email::run_send(state, payload).await,
         crate::crm::docs::JOB => crate::crm::docs::run_job(state, payload).await,
         crate::crm::IMPORT_JOB => crate::crm::run_import(state, payload).await,
+        crate::crm::migrate::JOB => crate::crm::migrate::run_job(state, payload).await,
         other => bail!("no handler for job kind {other:?}"),
     }
 }

@@ -190,6 +190,21 @@ The safeguards always keep at least one active administrator, and nobody can dea
     Windows-1252; country names and unknown birthday formats are left out instead of failing
     the row), and vCard files (2.1, 3.0, 4.0) import contacts with their company, phones,
     emails, messengers, address, birthday and notes
+  - **Move from another CRM** (CRM → Move from another CRM, CRM administrators): upload the
+    export of HubSpot, Salesforce (its data export ZIP), Pipedrive or Zoho CRM, or any CSV
+    files. Each file's kind (companies, contacts, leads, deals, activities, notes, users) and
+    each column are recognised from the system's own column names; the page shows what it
+    found to check and change: the column mapping, deal pipelines (an existing one, or a new
+    one made with the stages the export uses), stages and lead statuses, and whose records
+    are whose (matched to employees by email or name, or through Salesforce's users file).
+    It runs in the background — companies, contacts, leads, deals, then activities and
+    notes — keeping the links between them (contacts to companies, deals to their company
+    and contacts, notes and tasks to their record), original creation dates, amounts,
+    close dates and probabilities, and notes' HTML as text. Nothing is sent and no robots,
+    business processes, webhooks or notifications run. Every record's id in the old system is
+    remembered, so a second run of the same (or a newer) export updates what came over before
+    instead of duplicating it; people and companies already in NERP are matched by email,
+    phone or name. A migration can be undone: what it made goes to the recycle bin
   - a **Booking link** on each record: one of your calendar slot links made out for the
     record's client. What they book is a meeting on the record (and on your calendar, once);
     if they cancel, the meeting is closed as cancelled
@@ -799,6 +814,7 @@ All settings are environment variables (see `backend/.env.example`):
 | Variable | Default | Notes |
 |---|---|---|
 | `DATABASE_URL` | — | `postgres://user:pass@host:5433/nerp` |
+| `DATABASE_MAX_CONNECTIONS` | `20` | connections in the pool |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | |
 | `JWT_SECRET` | — | at least 32 characters |
 | `BIND_ADDR` | `127.0.0.1:8080` | |
@@ -822,9 +838,17 @@ All settings are environment variables (see `backend/.env.example`):
 | `COLLABORA_URL` | unset | Collabora Online for editing office files in the browser, e.g. `http://127.0.0.1:9980`. Run the official `collabora/code` image (see `tests/e2e/tools/collabora-up.sh`) with NERP's address in its `aliasgroup1`; without it files still get previews through LibreOffice |
 | `MAIL_ALLOW_PRIVATE` | `false` | let mailboxes use mail servers on private networks (loopback, LAN), e.g. a company mail server |
 | `DATA_ENCRYPTION_KEY` | derived from `JWT_SECRET` | key for secrets stored in the database (mailbox passwords); 32+ characters |
+| `FILE_ENCRYPTION_KEY` | unset | encrypts uploaded files at rest (AES-256-GCM); 32+ characters. Existing files are encrypted in the background; keep the key with `.env`'s backup — without it the files can't be read. The server refuses to start when files are under a key it wasn't given |
+| `FILE_ENCRYPTION_OLD_KEYS` | empty | earlier file keys (comma-separated) while files move to a new `FILE_ENCRYPTION_KEY`; with no current key, files are decrypted back |
+| `FILE_KEEP_DELETED_DAYS` | `14` | removed files are kept aside in `UPLOAD_DIR/.deleted` this long, for point-in-time restores (`0`: removed at once) |
+| `WAL_ARCHIVE_DIR` | `<BACKUP_DIR>/wal` | where `nerp-wal-archive.sh` archives PostgreSQL's WAL, for the backup and restore scripts |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | enables "Connect Gmail" (see Email → OAuth) |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | — / — / `common` | enables "Connect Microsoft 365" |
 | `PDF_FONT_DIR` | — | extra fonts for Typst, besides the system fonts |
+| `VIDEO_CONVERT_MAX_MB` | `2048` | larger videos aren't converted into a copy every browser plays |
+| `PG_BIN` | the usual places | PostgreSQL's server programs (`pg_basebackup`, `pg_ctl`) for the backup and point-in-time restore scripts |
+| `GOOGLE_OAUTH_AUTH_URL` / `GOOGLE_OAUTH_TOKEN_URL`, `MICROSOFT_OAUTH_AUTH_URL` / `MICROSOFT_OAUTH_TOKEN_URL` | the providers' own | tests or proxies only: other addresses for the OAuth endpoints |
+| `GOOGLE_CALDAV_URL` / `MICROSOFT_GRAPH_URL` | the providers' own | tests or proxies only: other addresses for calendar sync |
 | `LDAP_ENABLED` | `false` | `true` offers LDAP directory sign-in and sync (set up under Directory & sign-on) |
 | `LIVEKIT_URL` | empty | a LiveKit media server for calls (`ws://`/`wss://`, what browsers reach); empty: direct calls |
 | `LIVEKIT_API_URL` | from `LIVEKIT_URL` | where NERP reaches LiveKit's API (`http://`/`https://`) |
@@ -1710,6 +1734,9 @@ POST /notifications/{id}/read    POST /notifications/read-all
 POST /realtime/ticket            GET /realtime/ws?ticket=…   (WebSocket)
 GET  /admin/system               GET /admin/jobs             POST /admin/jobs/{id}/retry
 POST /admin/email/test
+GET  /admin/storage              POST /admin/storage/cleanup   (files, encryption status)
+GET|POST /admin/backups          POST /admin/backups/verify    POST /admin/backups/{name}/restore
+POST /admin/backups/restore-to-moment                          GET /admin/backups/{name}/database.dump
 ```
 
 Tasks & Projects:
@@ -1775,6 +1802,8 @@ POST /marketing/generators/{id}/run  GET /marketing/generators/{id}/preview
 POST /marketing/design/preview   GET /public/m/i/{file}/{sig}
 POST /calendar/slot-links/{id}/for-record
 POST /crm/{type}/import          GET /crm/imports/{job}       GET /crm/{type}/export
+POST /crm/migrations/analyze     GET|POST /crm/migrations      GET /crm/migrations/{id}
+POST /crm/migrations/{id}/undo
 GET /crm/recycle-bin             POST /crm/recycle-bin/{id}/restore  DELETE /crm/recycle-bin/{id}
 GET|POST /crm/{type}/filters     DELETE /crm/filters/{id}
 ```

@@ -11,7 +11,9 @@ const STRICT = 'http://127.0.0.1:8091';
 const backend = new URL('../../backend/', import.meta.url).pathname;
 const server = spawn('./target/debug/nerp', [], {
   cwd: backend,
-  env: { ...process.env, BIND_ADDR: '127.0.0.1:8091', PUBLIC_URL: STRICT, CRM_WEBHOOK_ALLOW_PRIVATE: 'false', MAIL_ALLOW_PRIVATE: 'false', COOKIE_SECURE: 'true', TRUST_PROXY: 'false', WORKER_ENABLED: 'false', STATIC_DIR: '', LIVEKIT_URL: '', COLLABORA_URL: '' },
+  env: { ...process.env, BIND_ADDR: '127.0.0.1:8091', PUBLIC_URL: STRICT, CRM_WEBHOOK_ALLOW_PRIVATE: 'false', MAIL_ALLOW_PRIVATE: 'false', COOKIE_SECURE: 'true', TRUST_PROXY: 'false', WORKER_ENABLED: 'false', STATIC_DIR: '',
+    // The stored files' key (as tests/e2e/tools/restart-server.sh sets it): without it the server rightly refuses to start.
+    FILE_ENCRYPTION_KEY: process.env.FILE_ENCRYPTION_KEY ?? 'nerp-test-file-key-0123456789abcdef', LIVEKIT_URL: '', COLLABORA_URL: '' },
   stdio: 'ignore',
 });
 let up = false;

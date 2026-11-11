@@ -2,6 +2,7 @@ mod api;
 mod audit;
 mod auth;
 mod bi;
+mod blob;
 mod boards;
 mod booking;
 mod config;
@@ -134,6 +135,7 @@ async fn main() -> Result<()> {
         config: Arc::new(config.clone()),
     };
 
+    blob::check_at_start(&state).await?;
     crm::docs::detect(&state).await;
     crm::docs::seed(&state).await.context("adding built-in document templates")?;
 

@@ -1154,6 +1154,66 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
     Ok(id)
 }
 
+/// Creates or updates a record brought over from another system, quietly: no robots,
+/// business processes, webhooks or notifications (a migration would otherwise set off
+/// thousands of them). `created_at` keeps the record's original date when given.
+pub async fn import_item(
+    state: &AppState,
+    auth: &AuthUser,
+    t: &EntityType,
+    existing: Option<Uuid>,
+    mut body: Map<String, Value>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    note: Value,
+) -> AppResult<Uuid> {
+    let hidden = hidden_codes(state, auth, t.id).await?;
+    if let Some(id) = existing {
+        let current = load_row(state, id, false).await?;
+        if current.entity_type != t.id {
+            return Err(AppError::NotFound("record"));
+        }
+        require(state, auth, t.id, "write", current.assigned_to).await?;
+        if crate::accounting::invoices::locked(state, id).await? {
+            locked_invoice_check(state, &current, &body).await?;
+        }
+        let mut tx = state.db.begin().await?;
+        apply(state, &mut tx, t, id, Some(&current), &body, auth.id, &hidden).await?;
+        refresh_derived(state, &mut tx, t, id).await?;
+        tx.commit().await?;
+        return Ok(id);
+    }
+    access::require_any(state, auth, t.id, "add").await?;
+    if !body.contains_key("assigned_to") {
+        body.insert("assigned_to".into(), json!(auth.id));
+    }
+    let (cat, stg) = default_placement(state, t).await?;
+    if t.has_stages && !body.contains_key("stage_id") && !body.contains_key("category_id")
+        && let Some(s) = stg {
+            body.insert("stage_id".into(), json!(s));
+        }
+    if t.has_amount && !body.contains_key("currency") {
+        body.insert("currency".into(), json!(base_currency(state).await?));
+    }
+    let mut tx = state.db.begin().await?;
+    let number = next_number(&mut tx, t.id).await?;
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO crm_items (entity_type, number, title, category_id, created_by, position, created_at)
+         VALUES ($1, $2, '', $3, $4, (-extract(epoch from COALESCE($5, now())))::float8, COALESCE($5, now())) RETURNING id",
+    )
+    .bind(t.id)
+    .bind(number)
+    .bind(cat)
+    .bind(auth.id)
+    .bind(created_at)
+    .fetch_one(&mut *tx)
+    .await?;
+    apply(state, &mut tx, t, id, None, &body, auth.id, &hidden).await?;
+    refresh_derived(state, &mut tx, t, id).await?;
+    timeline(&mut *tx, id, "created", Some(auth.id), None, note).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
 async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(body): Json<Map<String, Value>>) -> AppResult<Json<Detail>> {
     let t = entity_type(&state, &code).await?;
     refuse_hidden(&body, &hidden_codes(&state, &auth, t.id).await?)?;

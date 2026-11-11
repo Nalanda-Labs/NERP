@@ -102,6 +102,22 @@ paths (939 endpoints).
   public forms); a line break in a name adds no recipients. **Public forms** ignore fields
   they don't have; one live-chat visitor can't read another's conversation.
 
+## Encryption at rest
+
+- **Uploaded files** are encrypted by NERP when `FILE_ENCRYPTION_KEY` is set: AES-256-GCM in
+  64 KiB chunks, a key per file derived from the master key and a random salt, each chunk's
+  nonce its number with a flag on the last one (so a changed, reordered or shortened file
+  fails to read rather than serving altered content). Downloads and byte ranges decrypt only
+  the chunks they need; tools that need a path (ffmpeg) get a private temporary copy that is
+  removed afterwards. Files from before are encrypted by a background job (one run at a time,
+  under a database lock); a key can be replaced (`FILE_ENCRYPTION_OLD_KEYS`) the same way. The
+  server refuses to start if files are under a key it wasn't given, instead of serving errors.
+- **Secrets in the database** (mailbox, directory, calendar and data-source passwords, OAuth
+  tokens) are encrypted with `DATA_ENCRYPTION_KEY`.
+- **The database itself** is not encrypted by NERP (PostgreSQL has no built-in encryption of
+  its files): put PostgreSQL's data folder, the backup folder and the WAL archive on encrypted
+  disks (LUKS), and encrypt copies that leave the server (restic, pgBackRest's cipher).
+
 ## Risks that remain
 
 - **LaTeX templates are code.** People with "Manage system" can still write a template that

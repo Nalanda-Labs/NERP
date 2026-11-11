@@ -10,6 +10,11 @@
 //! transaction for the database), the database is brought up to this version's schema, and
 //! the app carries on. Only this server instance pauses; run one instance while restoring.
 //!
+//! Point-in-time restore: when PostgreSQL archives its WAL (nerp-wal-archive.sh), backups
+//! carry a base backup and the database can be put back as it was at any moment since the
+//! oldest of them (`nerp-pitr-restore.sh`); the page shows the archive's state and the
+//! command, and, when restoring from the app is allowed, does it the same way as a restore.
+//!
 //! BACKUP_DIR (default /var/backups/nerp) is where backups live; BACKUP_SCRIPTS (default
 //! ../deploy/backup, from where the server runs) holds the scripts.
 
@@ -37,6 +42,7 @@ pub fn router() -> Router<AppState> {
         .route("/admin/backups/verify", post(verify))
         .route("/admin/backups/{name}/database.dump", get(download))
         .route("/admin/backups/{name}/restore", post(restore))
+        .route("/admin/backups/restore-to-moment", post(restore_to_moment))
 }
 
 /// While a restore runs, the API answers 503 (see `maintenance`).
@@ -108,6 +114,12 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
     let mut redis = state.redis.clone();
     let running: Option<String> = redis.get("backup:running").await?;
     let newest = items.first().and_then(|b| b["name"].as_str().map(String::from));
+    let earliest = items.iter().rev().find(|b| b["manifest"]["base_backup"] == json!(1)).and_then(|b| b["name"].as_str().map(String::from));
+    let archiver: (String, Option<String>, Option<chrono::DateTime<chrono::Utc>>, i64, Option<chrono::DateTime<chrono::Utc>>, String) = sqlx::query_as(
+        "SELECT current_setting('archive_mode'), last_archived_wal, last_archived_time, failed_count, last_failed_time, current_setting('archive_timeout') FROM pg_stat_archiver",
+    )
+    .fetch_one(&state.db)
+    .await?;
     Ok(Json(json!({
         "dir": d,
         "dir_exists": d.is_dir(),
@@ -119,7 +131,21 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
         "restore_command": newest.map(|n| format!("sudo systemctl stop nerp && {}/nerp-restore.sh {}/{n} --yes && sudo systemctl start nerp", s.display(), d.display())),
         "restore_from_app": restore_allowed(),
         "last_restore": last(&state, "backup_restore_last").await?,
+        "pitr": {
+            "archiving": archiver.0 == "on" || archiver.0 == "always",
+            "last_archived_at": archiver.2,
+            "failed_count": archiver.3,
+            "last_failed_at": archiver.4,
+            "archive_timeout": archiver.5,
+            "earliest": earliest.as_deref().and_then(backup_time),
+            "command": format!("sudo systemctl stop nerp && {}/nerp-pitr-restore.sh --dest {} --to \"YYYY-MM-DD HH:MM:SS+00\" --into-live --yes && sudo systemctl start nerp", s.display(), d.display()),
+        },
     })))
+}
+
+/// A backup folder's name as a time: 2026-11-10T020000Z → 2026-11-10T02:00:00Z.
+fn backup_time(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::NaiveDateTime::parse_from_str(name, "%Y-%m-%dT%H%M%SZ").ok().map(|t| t.and_utc())
 }
 
 /// Runs a script in the background; its outcome is kept under `key` in the settings.
@@ -190,7 +216,59 @@ async fn restore(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
     if !crate::routes::auth::verify_user_password(&state, auth.id, b.password).await? {
         return Err(AppError::bad("password is incorrect"));
     }
-    let script = scripts().join("nerp-restore.sh");
+    let args = vec![dir().join(&name).display().to_string(), "--yes".into()];
+    restore_with(&state, &auth, ip.as_deref(), "nerp-restore.sh", args, name, "system.backup_restore").await
+}
+
+#[derive(serde::Deserialize)]
+struct MomentInput {
+    /// The moment, e.g. 2026-11-12T10:30:00+01:00.
+    to: chrono::DateTime<chrono::FixedOffset>,
+    password: String,
+    /// "restore", typed.
+    confirm: String,
+}
+
+/// Puts the database back as it was at a moment (see the module notes).
+async fn restore_to_moment(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Json(b): Json<MomentInput>) -> AppResult<Json<Value>> {
+    auth.require(perm::SYSTEM_MANAGE)?;
+    if !restore_allowed() {
+        return Err(AppError::bad("restoring from the app is off on this server (BACKUP_RESTORE); use the command shown"));
+    }
+    let to = b.to.with_timezone(&chrono::Utc);
+    if to >= chrono::Utc::now() {
+        return Err(AppError::bad("choose a moment in the past"));
+    }
+    let earliest = std::fs::read_dir(dir())
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter_map(|e| e.file_name().to_str().map(String::from))
+                .filter(|n| valid_name(n) && manifest(&dir().join(n)).get("base_backup") == Some(&json!(1)))
+                .filter_map(|n| backup_time(&n))
+                .min()
+        })
+        .ok()
+        .flatten();
+    match earliest {
+        None => return Err(AppError::bad("there are no base backups yet: turn on WAL archiving and make a backup")),
+        Some(e) if to < e => return Err(AppError::bad(format!("the earliest moment that can be restored is {}", e.to_rfc3339()))),
+        _ => {}
+    }
+    if b.confirm.trim() != "restore" {
+        return Err(AppError::bad("type \"restore\" to confirm"));
+    }
+    if !crate::routes::auth::verify_user_password(&state, auth.id, b.password).await? {
+        return Err(AppError::bad("password is incorrect"));
+    }
+    let when = to.format("%Y-%m-%d %H:%M:%S+00").to_string();
+    let args = vec!["--to".into(), when.clone(), "--dest".into(), dir().display().to_string(), "--into-live".into(), "--yes".into()];
+    restore_with(&state, &auth, ip.as_deref(), "nerp-pitr-restore.sh", args, when, "system.backup_restore_to_moment").await
+}
+
+/// Pauses the app, runs a restore script over the live data, brings the schema up to date
+/// and carries on; the outcome is kept as `backup_restore_last`.
+async fn restore_with(state: &AppState, auth: &AuthUser, ip: Option<&str>, script: &str, args: Vec<String>, name: String, action: &str) -> AppResult<Json<Value>> {
+    let script = scripts().join(script);
     if !script.is_file() {
         return Err(AppError::bad(format!("{} was not found (set BACKUP_SCRIPTS)", script.display())));
     }
@@ -199,7 +277,7 @@ async fn restore(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
     if !free {
         return Err(AppError::Conflict("a backup or check is already running".into()));
     }
-    audit::record(&state.db, Some(auth.id), "system.backup_restore", "backup", Some(name.clone()), json!({}), ip.as_deref()).await;
+    audit::record(&state.db, Some(auth.id), action, "backup", Some(name.clone()), json!({}), ip).await;
     let state = state.clone();
     let started = chrono::Utc::now();
     tokio::spawn(async move {
@@ -207,7 +285,7 @@ async fn restore(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
         // Requests already inside finish; then every other connection to the database goes.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let _ = sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()").execute(&state.db).await;
-        let out = tokio::process::Command::new("bash").arg(&script).arg(dir().join(&name)).arg("--yes").kill_on_drop(false).output().await;
+        let out = tokio::process::Command::new("bash").arg(&script).args(&args).kill_on_drop(false).output().await;
         let (mut ok, mut text) = match out {
             Ok(o) => (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
             Err(e) => (false, e.to_string()),

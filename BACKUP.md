@@ -8,8 +8,9 @@ lost server.
 | What | Where | Backed up by |
 |------|-------|--------------|
 | The database (everything people enter) | PostgreSQL, `DATABASE_URL` | nightly dump + continuous WAL archive |
-| Uploaded files (attachments, documents, avatars, drive) | `UPLOAD_DIR` (`backend/data/uploads`) | nightly snapshot |
-| Secrets: `JWT_SECRET`, `DATA_ENCRYPTION_KEY`, SMTP and OAuth secrets | `backend/.env` | by hand, kept apart (see below) |
+| Uploaded files (attachments, documents, avatars, drive) | `UPLOAD_DIR` (`backend/data/uploads`), encrypted when `FILE_ENCRYPTION_KEY` is set | nightly snapshot |
+| Removed files, kept aside for point-in-time restores | `UPLOAD_DIR/.deleted/<day>/` (`FILE_KEEP_DELETED_DAYS`, 14) | in the nightly snapshot |
+| Secrets: `JWT_SECRET`, `DATA_ENCRYPTION_KEY`, `FILE_ENCRYPTION_KEY`, SMTP and OAuth secrets | `backend/.env` | by hand, kept apart (see below) |
 | Call recordings, if LiveKit recording is on | `LIVEKIT_RECORDINGS_DIR` | add it to the file snapshot |
 | Sessions, rate limits, caches | Redis / Valkey | not needed: people sign in again |
 
@@ -17,7 +18,8 @@ lost server.
 encrypted with `DATA_ENCRYPTION_KEY` (or a key derived from `JWT_SECRET`). A database restored
 without the same `.env` works, but every connected mailbox has to be connected again. Keep a
 copy of `backend/.env` in the company's password manager or a sealed vault, never next to the
-backups.
+backups. With `FILE_ENCRYPTION_KEY` set, the uploaded files (and so their backups) can't be read
+at all without it: losing that key loses the files.
 
 ## Goals
 
@@ -60,11 +62,46 @@ unit that sends mail, or watch `systemctl --failed` in your monitoring.
 
 ## Layer 2 — continuous archiving and point-in-time recovery (production)
 
-The nightly dump loses up to a day. For production, archive PostgreSQL's write-ahead log
-continuously with [pgBackRest](https://pgbackrest.org), so the database can be restored to
-any moment — for example to one minute before someone deleted the wrong records.
+The nightly dump loses up to a day. For production, have PostgreSQL archive its write-ahead
+log (WAL, its log of every change) continuously, so the database can be put back as it was at
+any moment — for example one minute before someone deleted the wrong records.
 
-`/etc/pgbackrest/pgbackrest.conf` (one local repository and one off-site, encrypted):
+### With NERP's scripts
+
+In `postgresql.conf` (then restart PostgreSQL):
+
+```ini
+wal_level = replica
+archive_mode = on
+archive_command = '/opt/nerp/deploy/backup/nerp-wal-archive.sh %p %f /var/backups/nerp/wal'
+archive_timeout = 300          # archive at least every 5 minutes, even when quiet
+```
+
+The archive folder must be writable by the `postgres` user (`sudo install -d -o postgres -g nerp
+-m 750 /var/backups/nerp/wal`), and the `nerp` database user needs the `REPLICATION` right
+(`ALTER ROLE nerp REPLICATION;`, plus a `host replication nerp 127.0.0.1/32 scram-sha-256` line
+in `pg_hba.conf`). From then on:
+
+- `nerp-wal-archive.sh` keeps every finished WAL segment, compressed, in the archive folder
+  (never overwriting a segment with different contents);
+- the nightly `nerp-backup.sh` notices that archiving is on and also takes a **base backup**
+  (`pg_basebackup`) into the dated folder, and removes archived WAL older than the oldest base
+  backup it keeps (`WAL_ARCHIVE_DIR`, default `<backup folder>/wal`);
+- System → Backups shows whether archiving works (the last segment archived, failures) and the
+  earliest moment that can be restored.
+
+Restore with `deploy/backup/nerp-pitr-restore.sh` (see Restoring below): it starts a temporary
+PostgreSQL server on a private socket from the newest base backup before the moment, replays
+the archive up to that moment, and copies the result into a copy database or over the live
+one. It needs PostgreSQL's server programs of the same version (`PG_BIN`, or the usual places).
+Removed uploaded files are kept aside for `FILE_KEEP_DELETED_DAYS` days, so a restore to an
+earlier moment puts back the files the database points to.
+
+### With pgBackRest
+
+For larger setups, [pgBackRest](https://pgbackrest.org) does the same with parallel, incremental
+backups and an off-site repository. `/etc/pgbackrest/pgbackrest.conf` (one local repository and
+one off-site, encrypted):
 
 ```ini
 [global]
@@ -87,7 +124,7 @@ pg1-path=/var/lib/postgresql/18/main
 ```
 
 (Put the S3 access keys in `repo2-s3-key` / `repo2-s3-key-secret`, readable only by
-`postgres`.) In `postgresql.conf`:
+`postgres`.) In `postgresql.conf`, instead of NERP's archive script:
 
 ```ini
 wal_level = replica
@@ -141,6 +178,27 @@ sudo -u nerp deploy/backup/nerp-restore.sh /var/backups/nerp/2026-11-10T023000Z 
 sudo systemctl start nerp
 ```
 
+**Back to a moment in time** (with NERP's scripts): into a copy first, to look —
+
+```sh
+psql "$ADMIN_URL" -c 'CREATE DATABASE nerp_copy'
+deploy/backup/nerp-pitr-restore.sh --to "2026-11-10 14:59:00+05:30" \
+  --target-db postgres://nerp:…@127.0.0.1:5432/nerp_copy
+```
+
+— then over the live data (removed files come back from `UPLOAD_DIR/.deleted`):
+
+```sh
+sudo systemctl stop nerp
+sudo -u nerp deploy/backup/nerp-pitr-restore.sh --to "2026-11-10 14:59:00+05:30" --into-live --yes
+sudo systemctl start nerp
+```
+
+With `BACKUP_RESTORE=true`, System → Backups → *Restore to a moment…* does the same from the
+browser (password and "restore" typed; NERP pauses meanwhile). Without `--target-db` or
+`--into-live` the script leaves the restored server running on its private socket and prints
+how to connect.
+
 **Back to a moment in time** (pgBackRest):
 
 ```sh
@@ -150,8 +208,9 @@ sudo -u postgres pgbackrest --stanza=nerp --delta --type=time \
 sudo systemctl start postgresql nerp
 ```
 
-Files uploaded after the nightly snapshot are not in it; restore the folder from the night
-before the moment you go back to, and expect files newer than that to be missing.
+With pgBackRest, keep the live upload folder: files removed since the moment are in
+`UPLOAD_DIR/.deleted/<day>/`; copy those days back (`rsync -a --ignore-existing
+UPLOAD_DIR/.deleted/<day>/ UPLOAD_DIR/`), as `nerp-pitr-restore.sh --into-live` does.
 
 **A new server after losing the old one:** set it up as in `SETUP.md` (same NERP version),
 put the saved `backend/.env` back, create the empty database, restore with `nerp-restore.sh

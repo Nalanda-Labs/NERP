@@ -7,6 +7,11 @@
 #   checksum and the list of applied migrations.
 # - Files: the upload folder, copied with rsync. Unchanged files are hard links to the
 #   previous backup, so every backup is complete but only new files take space.
+# - Point-in-time restores: when PostgreSQL archives its WAL (archive_mode = on, with
+#   nerp-wal-archive.sh), a base backup of the database server too (pg_basebackup), and
+#   archived WAL older than the oldest base backup kept is removed. Restore to any moment
+#   since the oldest base backup with nerp-pitr-restore.sh. WAL_ARCHIVE_DIR (default
+#   DEST/wal) is the archive folder; the database user needs the REPLICATION right.
 # - Backups older than --keep-days are removed.
 # - Settings come from backend/.env (DATABASE_URL, UPLOAD_DIR), like the server's.
 #
@@ -60,6 +65,26 @@ sha256sum "$WORK/database.dump" | sed "s|$WORK/||" > "$WORK/database.dump.sha256
 psql "$DATABASE_URL" -Atc "SELECT version, description FROM _sqlx_migrations ORDER BY version" > "$WORK/migrations.txt"
 psql "$DATABASE_URL" -Atc "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY relname" > "$WORK/table-sizes.txt"
 
+# PostgreSQL's own tools of the server's version (PG_BIN, else the usual places, else PATH).
+pg_tool() {
+  local major
+  major="$(psql "$DATABASE_URL" -Atc "SELECT current_setting('server_version_num')::int / 10000")"
+  for d in "$(setting PG_BIN)" "/usr/lib/postgresql/$major/bin" "/usr/pgsql-$major/bin" "$(pg_config --bindir 2>/dev/null || true)"; do
+    [ -n "$d" ] && [ -x "$d/$1" ] && { echo "$d/$1"; return; }
+  done
+  command -v "$1"
+}
+WAL_ARCHIVE_DIR="$(setting WAL_ARCHIVE_DIR)"
+WAL_ARCHIVE_DIR="${WAL_ARCHIVE_DIR:-$DEST/wal}"
+ARCHIVE_MODE="$(psql "$DATABASE_URL" -Atc "SHOW archive_mode")"
+BASE=0
+if [ "$ARCHIVE_MODE" = on ] || [ "$ARCHIVE_MODE" = always ]; then
+  echo "taking a base backup for point-in-time restores…"
+  "$(pg_tool pg_basebackup)" --dbname="$DATABASE_URL" --pgdata="$WORK/base" --format=tar --gzip --wal-method=stream --checkpoint=fast --no-password
+  BASE=1
+  BASE_WAL="$(tar -xzOf "$WORK/base/base.tar.gz" backup_label | sed -n 's/^START WAL LOCATION: .*(file \(.*\))$/\1/p')"
+fi
+
 echo "backing up uploaded files from $UPLOAD_DIR…"
 PREVIOUS="$(find "$DEST" -mindepth 1 -maxdepth 1 -type d -name '20*' | sort | tail -1)"
 mkdir -p "$WORK/uploads"
@@ -73,6 +98,10 @@ fi
   echo "database_bytes=$(stat -c %s "$WORK/database.dump")"
   echo "upload_files=$(find "$WORK/uploads" -type f | wc -l)"
   echo "last_migration=$(tail -1 "$WORK/migrations.txt" | cut -d'|' -f1)"
+  if [ "$BASE" = 1 ]; then
+    echo "base_backup=1"
+    echo "base_wal=$BASE_WAL"
+  fi
 } > "$WORK/manifest.txt"
 
 mv "$WORK" "$DEST/$STAMP"
@@ -84,3 +113,11 @@ find "$DEST" -mindepth 1 -maxdepth 1 -type d -name '20*' -mtime +"$KEEP_DAYS" | 
   echo "removing old backup $old"
   rm -rf -- "$old"
 done
+
+# Archived WAL from before the oldest base backup kept can't be used any more.
+OLDEST_WAL="$(find "$DEST" -mindepth 2 -maxdepth 2 -name manifest.txt -path "$DEST/20*" | sort | xargs -r grep -h '^base_wal=' | head -1 | cut -d= -f2 || true)"
+if [ -n "$OLDEST_WAL" ] && [ -d "$WAL_ARCHIVE_DIR" ]; then
+  if CLEANUP="$(pg_tool pg_archivecleanup)" && [ -n "$CLEANUP" ]; then
+    "$CLEANUP" -x .gz "$WAL_ARCHIVE_DIR" "$OLDEST_WAL"
+  fi
+fi

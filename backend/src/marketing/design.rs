@@ -240,13 +240,12 @@ pub async fn image(State(state): State<AppState>, Path((file, sig)): Path<(Uuid,
     if !want.ends_with(&format!("/{sig}")) {
         return Err(AppError::NotFound("image"));
     }
-    let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT storage_path, mime_type FROM files WHERE id = $1").bind(file).fetch_optional(&state.db).await?;
-    let (path, mime) = row.ok_or(AppError::NotFound("image"))?;
-    let mime = mime.unwrap_or_default();
+    let f = crate::routes::files::fetch(&state, file).await.map_err(|_| AppError::NotFound("image"))?;
+    let mime = f.mime_type.clone();
     if !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime.as_str()) {
         return Err(AppError::NotFound("image"));
     }
-    let bytes = tokio::fs::read(state.config.upload_dir.join(path)).await.map_err(|_| AppError::NotFound("image"))?;
+    let bytes = crate::routes::files::read_content(&state, &f).await.map_err(|_| AppError::NotFound("image"))?;
     let mut res = bytes.into_response();
     res.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_str(&mime).unwrap());
     res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));

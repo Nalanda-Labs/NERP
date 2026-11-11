@@ -53,9 +53,12 @@ jobs:
           # PostgreSQL's own repository, for a pg_dump as new as the server (backups, api70/api79).
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          # The server programs too (api100 runs a throwaway server for point-in-time restores),
+          # without the cluster the package would start on port 5432, the service's port.
+          echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            dovecot-imapd postgresql-client-18 poppler-utils redis-tools ffmpeg \
+            dovecot-imapd postgresql-client-18 postgresql-18 poppler-utils redis-tools ffmpeg \
             slapd ldap-utils coturn \
             texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
             fonts-noto-core fonts-noto-cjk fonts-texgyre fonts-liberation fonts-dejavu-core \

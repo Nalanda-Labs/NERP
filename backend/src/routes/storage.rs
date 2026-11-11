@@ -81,6 +81,7 @@ async fn overview(State(state): State<AppState>, auth: AuthUser) -> AppResult<Js
         "areas": pair(areas), "kinds": pair(kinds),
         "people": people.into_iter().map(|(id, n, c, b)| json!({ "id": id, "name": n, "files": c, "bytes": b })).collect::<Vec<_>>(),
         "largest": largest.into_iter().map(|(id, n, b, o, at, m)| json!({ "id": id, "name": n, "bytes": b, "owner": o, "created_at": at, "mime_type": m })).collect::<Vec<_>>(),
+        "encryption": crate::blob::status(&state).await?,
         "cleanup": { "old_versions": { "count": old_versions.0, "bytes": old_versions.1 }, "drive_trash": { "count": trash.0, "bytes": trash.1 } },
     })))
 }
