@@ -221,6 +221,8 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bod
     .bind(auth.id)
     .execute(&state.db)
     .await?;
+    // Due now (e.g. "start now"): queue it at once rather than at the next minute's check.
+    run_due(&state).await?;
     state.job_wakeup.notify_one();
     Ok(Json(describe(&state, &load(&state, g.id).await?).await?))
 }
@@ -286,6 +288,8 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     .bind(next)
     .execute(&state.db)
     .await?;
+    // Due now (e.g. "start now"): queue it at once rather than at the next minute's check.
+    run_due(&state).await?;
     state.job_wakeup.notify_one();
     Ok(Json(describe(&state, &load(&state, id).await?).await?))
 }
