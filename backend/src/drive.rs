@@ -111,6 +111,17 @@ async fn group_level(state: &AppState, auth: &AuthUser, project: Uuid, created_b
 
 /// What the user may do with a node.
 async fn level_of(state: &AppState, auth: &AuthUser, n: &Node) -> AppResult<Level> {
+    // Guests: only the files of the workgroups they are in (not open groups' files by
+    // being open, not the company's or anyone's own).
+    if auth.is_guest() {
+        if n.space != "group" {
+            return Ok(Level::None);
+        }
+        let member: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2)").bind(n.project_id).bind(auth.id).fetch_one(&state.db).await?;
+        if !member {
+            return Ok(Level::None);
+        }
+    }
     if n.space == "group" {
         return group_level(state, auth, n.project_id.unwrap_or_default(), n.created_by).await;
     }
@@ -193,6 +204,16 @@ struct BrowseQuery {
 }
 
 async fn browse(State(state): State<AppState>, auth: AuthUser, Query(q): Query<BrowseQuery>) -> AppResult<Json<Value>> {
+    if auth.is_guest() && q.folder.is_none() {
+        // A workgroup's files only, and only a group the guest is in.
+        let member: bool = match (q.space.as_deref(), q.project_id) {
+            (Some("group"), Some(p)) => sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2)").bind(p).bind(auth.id).fetch_one(&state.db).await?,
+            _ => false,
+        };
+        if !member {
+            return Err(AppError::Forbidden);
+        }
+    }
     let mut group = q.project_id.filter(|_| q.folder.is_none() && q.space.as_deref() == Some("group"));
     let (items, path, level): (Vec<Entry>, Vec<Value>, Level) = match q.folder {
         Some(f) => {
@@ -289,6 +310,10 @@ struct Place {
 }
 
 async fn place(state: &AppState, auth: &AuthUser, space: Option<&str>, project: Option<Uuid>, parent: Option<Uuid>) -> AppResult<Place> {
+    // Guests add files only inside their workgroups' folders (checked as any other folder).
+    if auth.is_guest() && parent.is_none() && (space != Some("group") || project.is_none()) {
+        return Err(AppError::Forbidden);
+    }
     match parent {
         Some(p) => {
             let (n, _) = need(state, auth, p, Level::Edit).await?;
@@ -521,6 +546,9 @@ async fn remove_node(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 /// What the user put in the trash (the top items deleted).
 async fn trash(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Err(AppError::Forbidden);
+    }
     let items: Vec<(Uuid, String, String, String, DateTime<Utc>)> = sqlx::query_as(
         "SELECT n.id, n.kind, n.name, n.space, n.deleted_at FROM drive_nodes n
          WHERE n.deleted_at IS NOT NULL AND n.deleted_by = $1
@@ -654,6 +682,9 @@ struct ShareInput {
 
 /// Replaces who an item in My drive is shared with.
 async fn set_shares(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<Vec<ShareInput>>) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Err(AppError::Forbidden);
+    }
     let (n, _) = need(&state, &auth, id, Level::Own).await?;
     if n.space != "personal" {
         return Err(AppError::bad("the company drive is open to everyone already"));
@@ -699,6 +730,9 @@ struct LinkInput {
 }
 
 async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<LinkInput>) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Err(AppError::Forbidden);
+    }
     crate::routes::settings::require_public_links(&state).await?;
     need(&state, &auth, id, Level::Own).await?;
     if b.expires_days.is_some_and(|d| !(1..=365).contains(&d)) {
@@ -845,6 +879,9 @@ struct SearchQuery {
 
 /// By name, over My drive, the company drive and what is shared with me.
 async fn search(State(state): State<AppState>, auth: AuthUser, Query(q): Query<SearchQuery>) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Err(AppError::Forbidden);
+    }
     let t = q.q.trim().to_lowercase();
     if t.chars().count() < 2 {
         return Ok(Json(json!({ "items": [] })));

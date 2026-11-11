@@ -7,6 +7,8 @@
 	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 	import NotificationBell from '#lib/components/NotificationBell.svelte';
 	import GlobalSearch from '#lib/components/GlobalSearch.svelte';
+	import TourGuide from '#lib/components/TourGuide.svelte';
+	import { tours } from '#lib/tours.svelte.ts';
 	import CheckIn from '#lib/components/CheckIn.svelte';
 	import WorkDay from '#lib/components/WorkDay.svelte';
 	import { session } from '#lib/session.svelte.ts';
@@ -29,7 +31,17 @@
 		if (!(await session.restore())) {
 			const next = page.url.pathname + page.url.search;
 			goto(`/login${next !== '/' ? `?next=${encodeURIComponent(next)}` : ''}`, { replace: true });
-		} else ui.load();
+		} else {
+			ui.load();
+			if (!session.user?.is_guest) tours.load();
+		}
+	});
+	// A tour is offered on the first visit to where it starts (once the page has drawn).
+	$effect(() => {
+		const path = page.url.pathname;
+		if (!tours.done) return;
+		const t = setTimeout(() => tours.offer(path), 900);
+		return () => clearTimeout(t);
 	});
 
 	// Customising the menu and the background.
@@ -393,7 +405,7 @@
 					</div>
 				</div>
 			{:else}
-				<div class="flex items-center px-6 py-3 text-xs text-slate-400"><span class="flex-1">NERP</span><button class="hover:text-slate-600" onclick={() => (ui.editing = true)}>Customise</button></div>
+				<div class="flex items-center px-6 py-3 text-xs text-slate-400"><span class="flex-1">NERP</span><button class="hover:text-slate-600" data-tour="customise" onclick={() => (ui.editing = true)}>Customise</button></div>
 			{/if}
 		</aside>
 		{#if mobileNav}
@@ -418,16 +430,17 @@
 					</div>
 				{/if}
 				{#if !user.is_guest}
-					<div class="hidden md:block"><GlobalSearch /></div>
+					<div class="hidden md:block" data-tour="search"><GlobalSearch /></div>
 					<CheckIn />
 					<WorkDay />
 				{:else}
 					<span class="badge bg-amber-50 text-amber-800" data-guest-badge>Guest</span>
 				{/if}
-				<NotificationBell />
+				<span data-tour="notifications"><NotificationBell /></span>
 				<div class="relative">
 					<button
 						class="flex items-center gap-2.5 rounded-lg p-1.5 pr-2 hover:bg-slate-100"
+						data-tour="me"
 						onclick={() => (menuOpen = !menuOpen)}
 						onblur={() => setTimeout(() => (menuOpen = false), 150)}
 					>
@@ -443,6 +456,9 @@
 							<a href="/profile" class="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
 								<Icon name="user" class="size-4" /> My profile
 							</a>
+							{#if !user.is_guest}<button onmousedown={() => tours.replay()} class="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50" data-replay-tour>
+								<Icon name="play" class="size-4" /> Take the tour
+							</button>{/if}
 							<button onmousedown={logout} class="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
 								<Icon name="logout" class="size-4" /> Sign out
 							</button>
@@ -453,6 +469,7 @@
 			<main class="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8">
 				{@render children()}
 			</main>
+			<TourGuide />
 		</div>
 	</div>
 {:else}

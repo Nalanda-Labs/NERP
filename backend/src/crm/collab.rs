@@ -33,6 +33,7 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/crm/items/{id}/observers", put(set_observers))
+        .route("/crm/items/{id}/chat", post(record_chat))
         .route("/crm/items/{id}/tasks", get(item_tasks))
         .route("/crm/email-templates", get(list_templates).post(create_template))
         .route("/crm/email-templates/{id}", patch(update_template).delete(delete_template))
@@ -175,6 +176,22 @@ struct ObserversBody {
 }
 
 /// Replaces a record's observers. Needs write access to the record.
+/// The record's chat (made on first use): its responsible person, creator and observers.
+/// Someone else who may read the record joins by becoming an observer.
+async fn record_chat(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    let row = load_row(&state, id, false).await?;
+    super::access::require_read(&state, &auth, row.entity_type, id, row.assigned_to).await?;
+    if auth.is_guest() {
+        return Err(AppError::Forbidden);
+    }
+    let link = crate::im::Link::CrmItem(id);
+    if !link.has(&state, auth.id).await? {
+        sqlx::query("INSERT INTO crm_item_observers (item_id, user_id, added_by) VALUES ($1, $2, $2) ON CONFLICT DO NOTHING").bind(id).bind(auth.id).execute(&state.db).await?;
+        broadcast(&state, row.entity_type, id, false).await;
+    }
+    Ok(Json(json!({ "chat_id": crate::im::linked_chat(&state, link).await? })))
+}
+
 async fn set_observers(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<ObserversBody>) -> AppResult<Json<Value>> {
     let row = load_row(&state, id, false).await?;
     require(&state, &auth, row.entity_type, "read", row.assigned_to).await?;
@@ -215,6 +232,7 @@ async fn set_observers(State(state): State<AppState>, auth: AuthUser, Path(id): 
         })
         .await;
         broadcast(&state, row.entity_type, id, false).await;
+        crate::im::sync_linked_chat(&state, crate::im::Link::CrmItem(id)).await?;
     }
     Ok(Json(json!({ "observers": observers(&state, id).await? })))
 }

@@ -40,6 +40,70 @@ pub fn router() -> Router<AppState> {
         .route("/crm/products/{id}/prices", axum::routing::put(put_prices))
         .route("/crm/products/{id}/variants", post(make_variants))
         .route("/crm/prices", post(prices_for))
+        .route("/crm/catalog/sections/{id}/editors", get(section_editors).put(set_section_editors))
+        .route("/crm/catalog/my-sections", get(my_sections))
+}
+
+// ---------------------------------------------------------------------------
+// Section editors
+// ---------------------------------------------------------------------------
+
+async fn section_editors(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    can_manage_products(&auth)?;
+    let users: Vec<(Uuid, String)> = sqlx::query_as("SELECT u.id, trim(u.first_name || ' ' || u.last_name) FROM catalog_section_editors e JOIN users u ON u.id = e.user_id WHERE e.category_id = $1 ORDER BY 2").bind(id).fetch_all(&state.db).await?;
+    let deps: Vec<(Uuid, String)> = sqlx::query_as("SELECT d.id, d.name FROM catalog_section_editors e JOIN departments d ON d.id = e.department_id WHERE e.category_id = $1 ORDER BY 2").bind(id).fetch_all(&state.db).await?;
+    Ok(Json(json!({
+        "users": users.into_iter().map(|(i, n)| json!({ "id": i, "name": n })).collect::<Vec<_>>(),
+        "departments": deps.into_iter().map(|(i, n)| json!({ "id": i, "name": n })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct Editors {
+    #[serde(default)]
+    users: Vec<Uuid>,
+    #[serde(default)]
+    departments: Vec<Uuid>,
+}
+
+async fn set_section_editors(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<Editors>) -> AppResult<Json<Value>> {
+    can_manage_products(&auth)?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shop_categories WHERE id = $1)").bind(id).fetch_one(&state.db).await?;
+    if !exists {
+        return Err(AppError::NotFound("section"));
+    }
+    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest").bind(&b.users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(&b.departments).fetch_one(&state.db).await?;
+    if u as usize != b.users.len() || d as usize != b.departments.len() || b.users.len() + b.departments.len() > 200 {
+        return Err(AppError::bad("choose active employees and existing departments"));
+    }
+    let mut tx = state.db.begin().await?;
+    sqlx::query("DELETE FROM catalog_section_editors WHERE category_id = $1").bind(id).execute(&mut *tx).await?;
+    for x in &b.users {
+        sqlx::query("INSERT INTO catalog_section_editors (category_id, user_id) VALUES ($1, $2)").bind(id).bind(x).execute(&mut *tx).await?;
+    }
+    for x in &b.departments {
+        sqlx::query("INSERT INTO catalog_section_editors (category_id, department_id) VALUES ($1, $2)").bind(id).bind(x).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    section_editors(State(state), auth, Path(id)).await
+}
+
+/// What the caller may edit in the catalog: everything, or these sections.
+async fn my_sections(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    if can_manage_products(&auth).is_ok() {
+        return Ok(Json(json!({ "all": true, "sections": [] })));
+    }
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "WITH RECURSIVE mine AS (
+             SELECT department_id AS id FROM user_departments WHERE user_id = $1
+             UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
+         SELECT DISTINCT category_id FROM catalog_section_editors WHERE user_id = $1 OR department_id IN (SELECT id FROM mine)",
+    )
+    .bind(auth.id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!({ "all": false, "sections": ids })))
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +278,7 @@ struct PropsBody {
 
 /// Replaces a product's own property values (variant values stay as they are).
 async fn put_props(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PropsBody>) -> AppResult<Json<Value>> {
-    can_manage_products(&auth)?;
+    super::money::may_edit_product(&state, &auth, id).await?;
     let defs = props(&state).await?;
     let clean = clean_props(&defs, &b.props, false)?;
     let current: Value = sqlx::query_scalar("SELECT props FROM crm_products WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("product"))?;
@@ -283,7 +347,7 @@ struct PricesBody {
 }
 
 async fn put_prices(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PricesBody>) -> AppResult<Json<Value>> {
-    can_manage_products(&auth)?;
+    super::money::may_edit_product(&state, &auth, id).await?;
     let types: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM crm_price_types").fetch_all(&state.db).await?;
     let mut tx = state.db.begin().await?;
     for (t, p) in b.prices {
@@ -406,7 +470,7 @@ struct Parent {
 
 /// Makes a variant for every combination of the chosen values that doesn't exist yet.
 async fn make_variants(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<MakeVariants>) -> AppResult<Json<Value>> {
-    can_manage_products(&auth)?;
+    super::money::may_edit_product(&state, &auth, id).await?;
     let p: Parent = sqlx::query_as(
         "SELECT name, description, price, currency, tax_rate, tax_included, unit, in_shop, shop_category_id, parent_id, props FROM crm_products WHERE id = $1",
     )

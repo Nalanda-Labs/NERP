@@ -83,7 +83,7 @@ async fn guest_for(state: &AppState, auth: &AuthUser, b: &Invite, ip: Option<&st
 async fn invite_to_chat(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Path(chat): Path<Uuid>, Json(b): Json<Invite>) -> AppResult<Json<Value>> {
     let row: Option<(Option<String>, String, bool)> = sqlx::query_as(
         "SELECT (SELECT role FROM im_members WHERE chat_id = c.id AND user_id = $2), c.kind,
-                (c.audience <> 'manual' OR c.is_general OR c.project_id IS NOT NULL OR c.task_id IS NOT NULL OR c.event_id IS NOT NULL OR c.board_id IS NOT NULL)
+                (c.audience <> 'manual' OR c.is_general OR c.project_id IS NOT NULL OR c.task_id IS NOT NULL OR c.event_id IS NOT NULL OR c.board_id IS NOT NULL OR c.crm_item_id IS NOT NULL)
          FROM im_chats c WHERE c.id = $1",
     )
     .bind(chat)

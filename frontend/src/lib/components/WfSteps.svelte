@@ -17,6 +17,8 @@
 		text?: string;
 		description?: string;
 		deadline_hours?: number;
+		/** A task step: wait here until its tasks are done. */
+		wait?: boolean;
 		hours?: number;
 		status?: 'completed' | 'rejected';
 	};
@@ -122,7 +124,10 @@
 				{@render whoEditor(st.who!)}
 				<input class="input mt-2" aria-label="Task title" bind:value={st.title} />
 				<textarea class="input mt-2" rows="2" aria-label="Task description" bind:value={st.description}></textarea>
-				<label class="mt-2 flex items-center gap-1 text-sm">Due in <input class="input w-20" type="number" min="1" bind:value={st.deadline_hours} /> hours</label>
+				<div class="mt-2 flex flex-wrap items-center gap-4 text-sm">
+					<label class="flex items-center gap-1">Due in <input class="input w-20" type="number" min="1" bind:value={st.deadline_hours} /> hours</label>
+					<label class="flex items-center gap-1.5"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={st.wait} data-wait-for-task /> Wait until the task is done</label>
+				</div>
 			{:else if st.kind === 'set_field'}
 				<div class="flex gap-2">
 					<select class="input w-auto" aria-label="Field to set" bind:value={st.field}>{#each fields.filter((f) => !['file', 'user', 'crm'].includes(f.kind)) as f (f.code)}<option value={f.code}>{f.label}</option>{/each}</select>

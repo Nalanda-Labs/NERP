@@ -75,17 +75,38 @@
 	let signers = $state<{ name: string; email: string }[]>([]);
 	let signMessage = $state('');
 	let openRequest = $state<string | null>(null);
-	function startSigning(d: Doc) {
+	// Signing templates: who signs, by role, filled in for this record.
+	type SignTemplate = { id: string; name: string; message: string | null };
+	let signTemplates = $state<SignTemplate[]>([]);
+	let templateId = $state('');
+	let templateError = $state('');
+	async function startSigning(d: Doc) {
 		signDoc = d;
 		signers = [{ name: '', email: '' }];
 		signMessage = '';
+		templateId = '';
+		templateError = '';
 		signOpen = true;
+		signTemplates = (await api.get<{ items: SignTemplate[] }>('/crm/sign-templates').catch(() => ({ items: [] }))).items;
+	}
+	async function useTemplate() {
+		templateError = '';
+		if (!templateId) return;
+		const t = signTemplates.find((x) => x.id === templateId);
+		try {
+			signers = (await api.get<{ signers: { name: string; email: string }[] }>(`/crm/items/${itemId}/sign-templates/${templateId}/signers`)).signers;
+			signMessage = t?.message ?? '';
+		} catch (e) {
+			templateError = e instanceof Error ? e.message : 'This template can\'t be used here';
+			templateId = '';
+		}
 	}
 	async function sendForSignature(e: SubmitEvent) {
 		e.preventDefault();
 		busy = true;
 		try {
-			await api.post(`/crm/documents/${signDoc!.id}/signature`, { signers, message: signMessage || null });
+			if (templateId) await api.post(`/crm/items/${itemId}/sign`, { template_id: templateId, document_id: signDoc!.id });
+			else await api.post(`/crm/documents/${signDoc!.id}/signature`, { signers, message: signMessage || null });
 			signOpen = false;
 			toasts.success('Sent for signature');
 			await loadSignatures();
@@ -272,14 +293,26 @@
 <Modal bind:open={signOpen} title={signDoc ? `Send ${signDoc.number} for signature` : ''}>
 	<form id="sign-form" class="space-y-3" onsubmit={sendForSignature}>
 		<p class="text-sm text-slate-500">Each signer gets a personal link by email to read the PDF and sign it. When everyone has signed, they all get the signed copy with a certificate page, and it appears here.</p>
+		{#if signTemplates.length}
+			<div>
+				<label class="label" for="sign-tpl">From a template</label>
+				<select id="sign-tpl" class="input" bind:value={templateId} onchange={useTemplate}>
+					<option value="">— Choose the signers yourself —</option>
+					{#each signTemplates as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
+				</select>
+				{#if templateError}<p class="mt-1 text-xs text-red-600" role="alert">{templateError}</p>{/if}
+			</div>
+		{/if}
 		{#each signers as x, i (i)}
 			<div class="flex gap-2">
-				<input class="input flex-1" required maxlength="200" placeholder="Name" aria-label="Signer {i + 1} name" bind:value={x.name} />
-				<input class="input flex-1" type="email" required placeholder="Email" aria-label="Signer {i + 1} email" bind:value={x.email} />
+				<input class="input flex-1" required maxlength="200" placeholder="Name" aria-label="Signer {i + 1} name" bind:value={x.name} readonly={!!templateId} />
+				<input class="input flex-1" type="email" required placeholder="Email" aria-label="Signer {i + 1} email" bind:value={x.email} readonly={!!templateId} />
 				{#if signers.length > 1}<button type="button" class="btn btn-ghost p-1.5" aria-label="Remove signer" onclick={() => signers.splice(i, 1)}><Icon name="x" class="size-4" /></button>{/if}
 			</div>
 		{/each}
-		{#if signers.length < 10}<button type="button" class="text-sm font-medium text-brand-600 hover:underline" onclick={() => signers.push({ name: '', email: '' })}>+ Add signer</button>{/if}
+		{#if templateId}
+			<button type="button" class="text-sm font-medium text-brand-600 hover:underline" onclick={() => (templateId = '')}>Change the signers</button>
+		{:else if signers.length < 10}<button type="button" class="text-sm font-medium text-brand-600 hover:underline" onclick={() => signers.push({ name: '', email: '' })}>+ Add signer</button>{/if}
 		<div><label class="label" for="sign-msg">Message <span class="font-normal text-slate-400">(optional)</span></label><textarea id="sign-msg" class="input" rows="2" maxlength="2000" bind:value={signMessage}></textarea></div>
 	</form>
 	{#snippet footer()}

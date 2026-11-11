@@ -92,7 +92,7 @@ pub(crate) async fn seat(state: &AppState, auth: &AuthUser, chat: Uuid) -> AppRe
     #[allow(clippy::type_complexity)]
     let row: Option<(String, String, String, String, bool, bool, Option<Uuid>, Option<String>, bool)> = sqlx::query_as(
         "SELECT c.kind, c.audience, c.visibility, c.post_policy, c.is_general,
-                (c.project_id IS NOT NULL OR c.task_id IS NOT NULL OR c.event_id IS NOT NULL),
+                (c.project_id IS NOT NULL OR c.task_id IS NOT NULL OR c.event_id IS NOT NULL OR c.crm_item_id IS NOT NULL),
                 c.department_id,
                 (SELECT role FROM im_members WHERE chat_id = c.id AND user_id = $2),
                 EXISTS (SELECT 1 FROM departments d WHERE d.id = c.department_id AND d.head_user_id = $2)

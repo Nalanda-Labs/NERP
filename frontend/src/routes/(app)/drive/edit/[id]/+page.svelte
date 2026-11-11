@@ -26,7 +26,7 @@
 
 <div class="flex h-[calc(100dvh-7rem)] min-h-[480px] flex-col gap-2">
 	<div class="flex items-center gap-2">
-		<a class="btn btn-ghost px-2" href="/drive" aria-label="Back to Drive">‹</a>
+		<a class="btn btn-ghost px-2" href="/drive" aria-label="Back" onclick={(e) => { if (history.length > 1) { e.preventDefault(); history.back(); } }}>‹</a>
 		<h1 class="text-lg font-semibold text-slate-900">{opened?.name ?? ''}</h1>
 		{#if opened && !opened.can_edit}<span class="badge bg-slate-100 text-slate-600">View only</span>{/if}
 		{#if opened?.can_edit}<span class="text-xs text-slate-500">Changes are saved as new versions of the file.</span>{/if}

@@ -71,9 +71,13 @@ pub fn router(state: AppState) -> Router<AppState> {
         // An unknown API path is a JSON 404, not the app's HTML page (which would look like
         // success to an API client).
         .fallback(|| async { crate::error::AppError::NotFound("API endpoint") })
+        .layer(axum::middleware::from_fn(backups::maintenance))
 }
 
 async fn health(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    if backups::restoring() {
+        return Ok(Json(json!({ "status": "restoring" })));
+    }
     sqlx::query("SELECT 1").execute(&state.db).await?;
     let mut redis = state.redis.clone();
     let _: String = redis::cmd("PING").query_async(&mut redis).await?;

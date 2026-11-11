@@ -4,6 +4,7 @@
 	import { api, downloadUrl, query } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import { formatBytes, formatRelative } from '#lib/format.ts';
+	import { session } from '#lib/session.svelte.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
 
 	let { projectId }: { projectId: string } = $props();
@@ -15,6 +16,10 @@
 	let canAdd = $state(false);
 	let busy = $state(false);
 	let dragging = $state(false);
+	// Office documents open in the editor (when the server has one), for guests too.
+	let editable = $state<string[]>([]);
+	api.get<{ editing: boolean; editable: string[] }>('/office/status').then((s) => (editable = s.editing ? s.editable : [])).catch(() => {});
+	const canOpen = (name: string) => editable.includes(name.split('.').pop()?.toLowerCase() ?? '');
 
 	async function load() {
 		try {
@@ -84,7 +89,7 @@
 			<button class="btn btn-secondary" onclick={newFolder}><Icon name="folder" class="size-4" /> New folder</button>
 			<label class="btn btn-primary cursor-pointer {busy ? 'opacity-60' : ''}"><Icon name="upload" class="size-4" /> Upload<input type="file" multiple class="sr-only" aria-label="Upload files to the group" onchange={(e) => upload(e.currentTarget.files ?? [])} /></label>
 		{/if}
-		<a class="btn btn-ghost" href="/drive?{folder ? `folder=${folder}` : `space=group&project=${projectId}`}">Open in Drive</a>
+		{#if !session.user?.is_guest}<a class="btn btn-ghost" href="/drive?{folder ? `folder=${folder}` : `space=group&project=${projectId}`}">Open in Drive</a>{/if}
 	</div>
 	{#if items}
 		<ul class="divide-y divide-slate-100">
@@ -95,6 +100,7 @@
 						<button class="min-w-0 flex-1 truncate text-left text-sm font-medium text-slate-800 hover:text-brand-700" onclick={() => (folder = e.id)}>{e.name}</button>
 					{:else}
 						<button class="min-w-0 flex-1 truncate text-left text-sm font-medium text-slate-800 hover:text-brand-700" onclick={() => downloadUrl(`/api/drive/nodes/${e.id}/download`, e.name).catch(toasts.error)}>{e.name}</button>
+						{#if canOpen(e.name)}<a class="text-xs font-medium text-brand-600 hover:underline" href="/drive/edit/{e.id}" data-edit-doc={e.name}>Edit</a>{/if}
 						<span class="text-xs text-slate-500">{formatBytes(e.size_bytes)}{e.version > 1 ? ` · v${e.version}` : ''}</span>
 					{/if}
 					<span class="hidden w-40 truncate text-right text-xs text-slate-400 sm:block">{e.updated_by_name ?? ''} · {formatRelative(e.updated_at)}</span>

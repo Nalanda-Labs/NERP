@@ -2,8 +2,13 @@
 //! uploaded files, one dated folder each), backing up now, proving the newest one restores
 //! (`nerp-verify-backup.sh`, into a temporary database), and downloading a database dump.
 //!
-//! Restoring replaces the live data, so it runs from the command line with the server
-//! stopped (`nerp-restore.sh`); the page shows the exact command.
+//! Restoring replaces the live data. From the command line it runs with the server stopped
+//! (`nerp-restore.sh`; the page shows the exact command). From the page it runs only when the
+//! server allows it (`BACKUP_RESTORE=true`), for someone with "Manage system" who gives their
+//! password and types the backup's name: the app pauses (every other request answers 503),
+//! other database connections are closed, the backup is restored (database and files, in one
+//! transaction for the database), the database is brought up to this version's schema, and
+//! the app carries on. Only this server instance pauses; run one instance while restoring.
 //!
 //! BACKUP_DIR (default /var/backups/nerp) is where backups live; BACKUP_SCRIPTS (default
 //! ../deploy/backup, from where the server runs) holds the scripts.
@@ -31,6 +36,28 @@ pub fn router() -> Router<AppState> {
         .route("/admin/backups", get(list).post(back_up))
         .route("/admin/backups/verify", post(verify))
         .route("/admin/backups/{name}/database.dump", get(download))
+        .route("/admin/backups/{name}/restore", post(restore))
+}
+
+/// While a restore runs, the API answers 503 (see `maintenance`).
+static RESTORING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn restoring() -> bool {
+    RESTORING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Middleware: during a restore, everything but the health check waits outside.
+pub async fn maintenance(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Inside the API router the path has no "/api" in front.
+    if restoring() && !matches!(req.uri().path(), "/health" | "/api/health") {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": { "code": "maintenance", "message": "NERP is restoring a backup; try again in a few minutes" } }))).into_response();
+    }
+    next.run(req).await
+}
+
+fn restore_allowed() -> bool {
+    std::env::var("BACKUP_RESTORE").is_ok_and(|v| v == "true")
 }
 
 fn dir() -> PathBuf {
@@ -90,6 +117,8 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
         "last_backup": last(&state, "backup_last").await?,
         "last_verify": last(&state, "backup_verify_last").await?,
         "restore_command": newest.map(|n| format!("sudo systemctl stop nerp && {}/nerp-restore.sh {}/{n} --yes && sudo systemctl start nerp", s.display(), d.display())),
+        "restore_from_app": restore_allowed(),
+        "last_restore": last(&state, "backup_restore_last").await?,
     })))
 }
 
@@ -137,6 +166,72 @@ async fn back_up(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
 
 async fn verify(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp) -> AppResult<Json<Value>> {
     run(&state, &auth, ip.as_deref(), "nerp-verify-backup.sh", "backup_verify_last", "backup_verify").await
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreInput {
+    password: String,
+    /// The backup's name typed again.
+    confirm: String,
+}
+
+/// Restores a backup over the live data (see the module notes).
+async fn restore(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Path(name): Path<String>, Json(b): Json<RestoreInput>) -> AppResult<Json<Value>> {
+    auth.require(perm::SYSTEM_MANAGE)?;
+    if !restore_allowed() {
+        return Err(AppError::bad("restoring from the app is off on this server (BACKUP_RESTORE); use the command shown"));
+    }
+    if !valid_name(&name) || !dir().join(&name).join("database.dump").is_file() {
+        return Err(AppError::NotFound("backup"));
+    }
+    if b.confirm.trim() != name {
+        return Err(AppError::bad("type the backup's name to confirm"));
+    }
+    if !crate::routes::auth::verify_user_password(&state, auth.id, b.password).await? {
+        return Err(AppError::bad("password is incorrect"));
+    }
+    let script = scripts().join("nerp-restore.sh");
+    if !script.is_file() {
+        return Err(AppError::bad(format!("{} was not found (set BACKUP_SCRIPTS)", script.display())));
+    }
+    let mut redis = state.redis.clone();
+    let free: bool = redis::cmd("SET").arg("backup:running").arg("restore").arg("NX").arg("EX").arg(4 * 3600).query_async::<Option<String>>(&mut redis).await?.is_some();
+    if !free {
+        return Err(AppError::Conflict("a backup or check is already running".into()));
+    }
+    audit::record(&state.db, Some(auth.id), "system.backup_restore", "backup", Some(name.clone()), json!({}), ip.as_deref()).await;
+    let state = state.clone();
+    let started = chrono::Utc::now();
+    tokio::spawn(async move {
+        RESTORING.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Requests already inside finish; then every other connection to the database goes.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let _ = sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()").execute(&state.db).await;
+        let out = tokio::process::Command::new("bash").arg(&script).arg(dir().join(&name)).arg("--yes").kill_on_drop(false).output().await;
+        let (mut ok, mut text) = match out {
+            Ok(o) => (o.status.success(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+            Err(e) => (false, e.to_string()),
+        };
+        // An older backup has an older schema: bring it up to this version.
+        if ok && let Err(e) = crate::migrate::run(&state.db).await {
+            ok = false;
+            text.push_str(&format!("\nupdating the database failed: {e}"));
+        }
+        let text = match std::env::current_dir().ok().and_then(|d| d.parent().map(|p| p.display().to_string())) {
+            Some(root) if root.len() > 1 => text.replace(&root, "<NERP>"),
+            _ => text,
+        };
+        let tail: String = text.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
+        let v = json!({ "started_at": started, "finished_at": chrono::Utc::now(), "ok": ok, "backup": name, "output": tail });
+        let _ = sqlx::query("INSERT INTO settings (key, value) VALUES ('backup_restore_last', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()").bind(v).execute(&state.db).await;
+        let mut redis = state.redis.clone();
+        let _: Result<(), _> = redis.del("backup:running").await;
+        RESTORING.store(false, std::sync::atomic::Ordering::SeqCst);
+        if !ok {
+            tracing::warn!("restoring the backup failed");
+        }
+    });
+    Ok(Json(json!({ "started": true })))
 }
 
 /// The database dump of one backup (all the company's data: for administrators only).

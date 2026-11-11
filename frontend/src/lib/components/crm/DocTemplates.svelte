@@ -7,6 +7,7 @@
 	import { toasts } from '#lib/toast.svelte.ts';
 	import Icon from '../Icon.svelte';
 	import CrmPicker from './CrmPicker.svelte';
+	import MultiUserPicker, { type PickedUser } from '../MultiUserPicker.svelte';
 
 	type Engine = 'typst' | 'latex' | 'office';
 	type Template = {
@@ -22,9 +23,20 @@
 		builtin_key: string | null;
 		is_active: boolean;
 		available: boolean;
+		user_ids: string[];
+		department_ids: string[];
 	};
 	type Engines = { typst: string | null; latex: string | null; office: string | null };
-	type Draft = Omit<Template, 'id' | 'builtin_key' | 'available' | 'entity_types'> & { id: string | null; types: string[] };
+	type Draft = Omit<Template, 'id' | 'builtin_key' | 'available' | 'entity_types' | 'user_ids'> & { id: string | null; types: string[]; users: PickedUser[] };
+	let departments = $state<{ id: string; name: string }[]>([]);
+	async function usersFor(ids: string[]): Promise<PickedUser[]> {
+		const out: PickedUser[] = [];
+		for (const id of ids) {
+			const u = await api.get<{ id: string; first_name: string; last_name: string; avatar_file_id: string | null }>(`/users/${id}`).catch(() => null);
+			if (u) out.push({ id: u.id, name: `${u.first_name} ${u.last_name}`, avatar_file_id: u.avatar_file_id });
+		}
+		return out;
+	}
 
 	const ENGINE_NAME: Record<Engine, string> = { typst: 'Typst', latex: 'LuaLaTeX', office: 'Word / Writer' };
 	const STARTER: Record<Exclude<Engine, 'office'>, string> = {
@@ -99,8 +111,10 @@ Item & Qty & Amount \\\\ \\hline
 	});
 	onDestroy(() => previewUrl && URL.revokeObjectURL(previewUrl));
 
-	function open(t: Template) {
+	async function open(t: Template) {
 		if (dirty && !confirm('Discard unsaved changes?')) return;
+		const users = await usersFor(t.user_ids ?? []);
+		if (!departments.length) departments = await api.get<{ id: string; name: string }[]>('/departments').catch(() => []);
 		draft = {
 			id: t.id,
 			name: t.name,
@@ -111,7 +125,9 @@ Item & Qty & Amount \\\\ \\hline
 			source: t.source,
 			file_id: t.file_id,
 			number_prefix: t.number_prefix,
-			is_active: t.is_active
+			is_active: t.is_active,
+			users,
+			department_ids: [...(t.department_ids ?? [])]
 		};
 		saved = JSON.stringify(draft);
 		clearPreview();
@@ -120,6 +136,7 @@ Item & Qty & Amount \\\\ \\hline
 
 	function startNew(engine: Engine) {
 		if (dirty && !confirm('Discard unsaved changes?')) return;
+		if (!departments.length) api.get<{ id: string; name: string }[]>('/departments').then((d) => (departments = d)).catch(() => {});
 		draft = {
 			id: null,
 			name: '',
@@ -130,7 +147,9 @@ Item & Qty & Amount \\\\ \\hline
 			source: engine === 'office' ? null : STARTER[engine],
 			file_id: null,
 			number_prefix: 'INV-{YYYY}-',
-			is_active: true
+			is_active: true,
+			users: [],
+			department_ids: []
 		};
 		saved = '';
 		clearPreview();
@@ -179,7 +198,7 @@ Item & Qty & Amount \\\\ \\hline
 		if (!draft) return;
 		saving = true;
 		try {
-			const body = { name: draft.name, engine: draft.engine, entity_types: draft.types, doc_title: draft.doc_title, locale: draft.locale, source: draft.source ?? undefined, file_id: draft.file_id ?? undefined, number_prefix: draft.number_prefix, is_active: draft.is_active };
+			const body = { name: draft.name, engine: draft.engine, entity_types: draft.types, doc_title: draft.doc_title, locale: draft.locale, source: draft.source ?? undefined, file_id: draft.file_id ?? undefined, number_prefix: draft.number_prefix, is_active: draft.is_active, user_ids: draft.users.map((u) => u.id), department_ids: draft.department_ids };
 			const t = draft.id ? await api.patch<Template>(`/crm/doc-templates/${draft.id}`, body) : await api.post<Template>('/crm/doc-templates', body);
 			await load();
 			saved = '';
@@ -381,6 +400,19 @@ Item & Qty & Amount \\\\ \\hline
 					{/each}
 					<label class="ml-auto flex items-center gap-1.5"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={draft.is_active} /> Active</label>
 				</div>
+				<details class="mt-3 text-sm" data-template-access>
+					<summary class="cursor-pointer text-slate-600">Who may use it {draft.users.length || draft.department_ids.length ? `(${draft.users.length + draft.department_ids.length} chosen)` : '(everyone who can make documents)'}</summary>
+					<div class="mt-2 grid gap-3 md:grid-cols-2">
+						<div><span class="label">People</span><MultiUserPicker bind:value={draft.users} placeholder="Everyone" /></div>
+						<div>
+							<span class="label">Departments <span class="font-normal text-slate-400">(with sub-departments)</span></span>
+							<div class="grid max-h-40 grid-cols-2 gap-1 overflow-y-auto">
+								{#each departments as d (d.id)}<label class="flex items-center gap-2"><input type="checkbox" class="rounded border-slate-300 text-brand-600" value={d.id} bind:group={draft.department_ids} /> {d.name}</label>{/each}
+							</div>
+						</div>
+					</div>
+					<p class="mt-1 text-xs text-slate-500">Nobody chosen: everyone who may make documents for the record. CRM admins always may.</p>
+				</details>
 			</section>
 
 			<div class="grid gap-4 xl:grid-cols-2">

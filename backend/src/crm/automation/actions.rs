@@ -27,7 +27,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("set_field", "Change a field"),
     ("assign", "Change the responsible person"),
     ("move_stage", "Move to another stage"),
+    ("tunnel", "Tunnel to another pipeline"),
     ("document", "Create a document"),
+    ("sign", "Send for signature"),
     ("comment", "Add a comment"),
     ("webhook", "Call a webhook"),
     ("create_record", "Create a linked record"),
@@ -118,6 +120,51 @@ fn opt_uuid(p: &Map<String, Value>, key: &str, msg: &str) -> AppResult<Option<Uu
         Some(s) => Ok(Some(Uuid::parse_str(s).map_err(|_| AppError::bad(msg.to_string()))?)),
         None => Ok(None),
     }
+}
+
+/// A copy of the record in another pipeline's stage, linked to it, with its client, amount,
+/// custom fields and products.
+async fn tunnel_copy(state: &AppState, et: &crate::crm::EntityType, source: Uuid, category: Uuid, stage: Uuid) -> AppResult<Uuid> {
+    let (title, assigned, company, currency, amount, manual, uf, comments): (String, Option<Uuid>, Option<Uuid>, Option<String>, rust_decimal::Decimal, bool, Value, Option<String>) = sqlx::query_as(
+        "SELECT title, assigned_to, company_id, currency, opportunity, is_manual_amount, uf, comments FROM crm_items WHERE id = $1",
+    )
+    .bind(source)
+    .fetch_one(&state.db)
+    .await?;
+    let contacts: Vec<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort").bind(source).fetch_all(&state.db).await?;
+    let mut m = Map::new();
+    m.insert("title".into(), json!(title));
+    m.insert("assigned_to".into(), json!(assigned));
+    m.insert("category_id".into(), json!(category));
+    m.insert("stage_id".into(), json!(stage));
+    if et.has_client {
+        m.insert("company_id".into(), json!(company));
+        m.insert("contact_ids".into(), json!(contacts));
+    }
+    if et.has_amount {
+        m.insert("currency".into(), json!(currency));
+        m.insert("opportunity".into(), json!(amount.to_string()));
+        m.insert("is_manual_amount".into(), json!(manual));
+    }
+    if uf.as_object().is_some_and(|o| !o.is_empty()) {
+        m.insert("uf".into(), uf);
+    }
+    if let Some(c) = comments {
+        m.insert("comments".into(), json!(c));
+    }
+    let id = create_item(state, &system_auth(), et, m, Some(source)).await?;
+    sqlx::query(
+        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort)
+         SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort FROM crm_item_products WHERE item_id = $2",
+    )
+    .bind(id)
+    .bind(source)
+    .execute(&state.db)
+    .await?;
+    crate::crm::money::totals(state, id).await?;
+    timeline(&state.db, source, "automation", Some(SYSTEM_USER), None, json!({ "event": "tunnel", "item_id": id })).await?;
+    broadcast(state, et.id, id, false).await;
+    Ok(id)
 }
 
 async fn check_template(state: &AppState, entity_type: i16, t: Uuid) -> AppResult<()> {
@@ -231,6 +278,30 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
             let t = p.get("template_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::bad("choose a template"))?;
             check_template(state, entity_type, t).await?;
             json!({ "template_id": t })
+        }
+        "tunnel" => {
+            // A stage of another pipeline of the same record type; the record is copied there
+            // (linked to this one) or moved there.
+            let s = p.get("stage_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::bad("choose the stage to tunnel to"))?;
+            let target: Option<(Uuid, i16)> = sqlx::query_as("SELECT s.category_id, c.entity_type FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1").bind(s).fetch_optional(&state.db).await?;
+            match target {
+                Some((c, et)) if et == entity_type && c != category => {}
+                Some(_) => return Err(AppError::bad("tunnel to a stage of another pipeline of the same record type")),
+                None => return Err(AppError::bad("that stage doesn't exist")),
+            }
+            let mode = p.get("mode").and_then(Value::as_str).unwrap_or("copy");
+            if !["copy", "move"].contains(&mode) {
+                return Err(AppError::bad("a tunnel copies or moves the record"));
+            }
+            json!({ "stage_id": s, "mode": mode })
+        }
+        "sign" => {
+            let t = p.get("sign_template_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::bad("choose a signing template"))?;
+            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sign_templates WHERE id = $1 AND (cardinality(entity_types) = 0 OR $2 = ANY(entity_types)))").bind(t).bind(entity_type).fetch_one(&state.db).await?;
+            if !ok {
+                return Err(AppError::bad("that signing template is not offered for this record type"));
+            }
+            json!({ "sign_template_id": t })
         }
         "webhook" => {
             let url = text(&p, "url", "URL", 2000, true)?;
@@ -545,12 +616,39 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
             update_item(state, &system_auth(), &et, item, body).await.map_err(err)?;
             done("moved the record".into())
         }
+        "tunnel" => {
+            let stage = p["stage_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or("no stage")?;
+            let (category, stage_name, pipeline): (Uuid, String, String) = sqlx::query_as("SELECT s.category_id, s.name, c.name FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1")
+                .bind(stage)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(err)?
+                .ok_or("the stage was deleted")?;
+            if p["mode"] == "move" {
+                let mut body = Map::new();
+                body.insert("category_id".into(), json!(category));
+                body.insert("stage_id".into(), json!(stage));
+                update_item(state, &system_auth(), &et, item, body).await.map_err(err)?;
+                done(format!("moved to {pipeline}: {stage_name}"))
+            } else {
+                let id = tunnel_copy(state, &et, item, category, stage).await.map_err(err)?;
+                let number: i64 = sqlx::query_scalar("SELECT number FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await.map_err(err)?;
+                done(format!("copied to {pipeline}: {stage_name} as #{number}"))
+            }
+        }
         "document" => {
             let t = p["template_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or("no template")?;
             let id = crate::crm::docs::api::generate(state, &system_auth(), item, t).await.map_err(err)?;
             let number: String = sqlx::query_scalar("SELECT number FROM crm_documents WHERE id = $1").bind(id).fetch_one(&state.db).await.map_err(err)?;
             broadcast(state, et.id, item, false).await;
             done(format!("created {number}"))
+        }
+        "sign" => {
+            // Sent in the name of the record's responsible person.
+            let t = p["sign_template_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or("no signing template")?;
+            let by = ctx.row.assigned_to.ok_or("the record has no responsible person to send it")?;
+            let r = crate::crm::sign_templates::start(state, by, item, t, None).await.map_err(err)?;
+            done(if r["status"] == "sent" { "sent for signature".to_string() } else { "the document is being made; it goes out for signature when ready".to_string() })
         }
         "webhook" => call_webhook(state, robot, ctx).await.map(Step::Done),
         "create_record" => {

@@ -1094,6 +1094,7 @@ pub async fn apply_status(state: &AppState, auth: &AuthUser, id: Uuid, target: &
         super::parts::stop_all_timers_on(state, id).await?;
     }
     if changed && new_status == "done" {
+        crate::workflows::task_done(state, id).await;
         crate::crm::collab::task_event(state, id, "completed", auth.id).await;
     }
     if changed {

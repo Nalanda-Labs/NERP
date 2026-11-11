@@ -5,6 +5,9 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import DocTemplates from '#lib/components/crm/DocTemplates.svelte';
 	import Automation from '#lib/components/crm/Automation.svelte';
+	import SignTemplates from '#lib/components/crm/SignTemplates.svelte';
+	import TunnelsSummary from '#lib/components/crm/TunnelsSummary.svelte';
+	import TrafficSources from '#lib/components/crm/TrafficSources.svelte';
 	import TypeManager from '#lib/components/crm/TypeManager.svelte';
 	import { allCurrencies, crm, currencyName, type CrmCategory, type CrmType, type FieldDef } from '#lib/crm.svelte.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
@@ -107,6 +110,7 @@
 		{/if}
 
 		{#if tab === 'pipelines' && type}
+			<TunnelsSummary categories={type.categories} />
 			{#each type.categories as c (c.id)}
 				<section class="card">
 					<div class="flex flex-wrap items-center gap-2 border-b border-slate-100 px-5 py-3">
@@ -209,10 +213,12 @@
 			</form>
 		{:else if tab === 'types'}
 			<TypeManager />
+			<TrafficSources />
 		{:else if tab === 'automation'}
 			<Automation />
 		{:else if tab === 'documents'}
 			<DocTemplates />
+			<SignTemplates />
 		{:else if tab === 'access' && access}
 			<div class="flex flex-wrap items-center gap-3">
 				<select class="input w-64" bind:value={roleId} aria-label="Role">{#each access.roles as r (r.id)}<option value={r.id}>{r.name}</option>{/each}</select>

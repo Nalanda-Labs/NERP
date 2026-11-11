@@ -100,7 +100,8 @@ void gid;
 const gChats = (await guest.get('/im/chats')).data;
 ok('a guest sees only the chat they were invited to', !JSON.stringify(gChats).includes(`Staff only ${stamp}`) && JSON.stringify(gChats).includes(`Partners ${stamp}`), JSON.stringify(gChats).slice(0, 400));
 // The guest's own areas: what api72 shows a guest uses. Anything else answering 2xx is a leak.
-const GUEST_OK = /^\/api\/(auth\/|me\/|profile|notifications|realtime\/|files|download-links|im\/|calls|projects|tasks|feed|boards|settings$|users\/me)/;
+// Their workgroups' files are theirs too (the drive keeps them to those).
+const GUEST_OK = /^\/api\/(auth\/|me\/|profile|notifications|realtime\/|files|download-links|im\/|calls|projects|tasks|feed|boards|drive|office\/status|settings$|users\/me)/;
 const all = Object.values(ids).concat([company.id, ann.id, chat.id]) as string[];
 const reached: string[] = [];
 for (const route of routes()) {

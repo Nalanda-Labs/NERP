@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import MultiUserPicker, { type PickedUser } from '#lib/components/MultiUserPicker.svelte';
 	import { api, query, requestBlob } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import Modal from '#lib/components/Modal.svelte';
@@ -108,11 +109,37 @@
 		items = p.items;
 		total = p.total;
 	}
+	// What I may edit: everything (catalog managers) or the sections naming me as an editor.
+	let mine = $state<{ all: boolean; sections: string[] }>({ all: false, sections: [] });
+	const canEdit = (section: string | null) => mine.all || (!!section && mine.sections.includes(section));
+	const canAdd = $derived(mine.all || mine.sections.length > 0);
 	onMount(async () => {
 		await crm.load();
 		load();
 		loadCategories().catch(() => {});
+		mine = await api.get<typeof mine>('/crm/catalog/my-sections').catch(() => ({ all: false, sections: [] }));
 	});
+	// Section editors (catalog managers set them).
+	let editorsOf = $state<{ id: string; name: string } | null>(null);
+	let editorUsers = $state<PickedUser[]>([]);
+	let editorDeps = $state<string[]>([]);
+	let departments = $state<{ id: string; name: string }[]>([]);
+	async function openEditors(c: { id: string; name: string }) {
+		const e = await api.get<{ users: { id: string; name: string }[]; departments: { id: string; name: string }[] }>(`/crm/catalog/sections/${c.id}/editors`);
+		editorUsers = e.users.map((u) => ({ id: u.id, name: u.name, avatar_file_id: null }));
+		editorDeps = e.departments.map((d) => d.id);
+		departments = departments.length ? departments : await api.get<{ id: string; name: string }[]>('/departments').catch(() => []);
+		editorsOf = c;
+	}
+	async function saveEditors() {
+		try {
+			await api.put(`/crm/catalog/sections/${editorsOf!.id}/editors`, { users: editorUsers.map((u) => u.id), departments: editorDeps });
+			editorsOf = null;
+			toasts.success('Section editors saved');
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
 	function edit(p: Product | null) {
 		editing = p;
 		form = p
@@ -175,7 +202,7 @@
 	<div class="flex flex-wrap items-center gap-3">
 		<h1 class="text-2xl font-semibold text-slate-900">Products</h1>
 		<span class="text-sm text-slate-500">{total}</span>
-		{#if crm.config?.can_manage_products}<button class="btn btn-primary ml-auto" onclick={() => edit(null)}><Icon name="plus" class="size-4" /> New product</button>{/if}
+		{#if canAdd}<button class="btn btn-primary ml-auto" onclick={() => edit(null)}><Icon name="plus" class="size-4" /> New product</button>{/if}
 	</div>
 	<div class="flex flex-wrap items-center gap-3">
 		<input class="input max-w-sm" placeholder="Search name or SKU" bind:value={q} oninput={() => (clearTimeout(t), (t = setTimeout(load, 250)))} />
@@ -198,7 +225,7 @@
 						<td class="px-4 py-2.5 text-slate-600">{#if p.in_shop}<span class="badge bg-emerald-50 text-emerald-800">In the shop</span> <span class="text-xs text-slate-500">{categories.find((c) => c.id === p.shop_category_id)?.name ?? ''}</span>{:else}<span class="text-slate-400">—</span>{/if}</td>
 						<td class="px-4 py-2.5 text-right tabular-nums" data-stock={p.name}>{#if p.is_service}<span class="text-slate-400">service</span>{:else if p.stock === null}<span class="text-slate-400">not counted</span>{:else if Number(p.stock) <= 0}<span class="font-medium text-red-700">Sold out</span>{:else}{num(p.stock)}{/if}</td>
 						<td class="px-4 py-2.5 text-right">
-							{#if crm.config?.can_manage_products}
+							{#if canEdit(p.shop_category_id)}
 								<button class="btn btn-ghost p-1.5" aria-label="Edit" onclick={() => edit(p)}><Icon name="edit" class="size-4" /></button>
 								<button class="btn btn-ghost p-1.5 hover:text-red-600" aria-label="Delete" onclick={() => remove(p)}><Icon name="trash" class="size-4" /></button>
 							{/if}
@@ -231,7 +258,7 @@
 			<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={form.in_shop} /> Sell in the online shop</label>
 			{#if form.in_shop}
 				{#if crm.config && shopCurrency && form.currency !== shopCurrency}<p class="text-xs text-amber-800">The shop sells in {shopCurrency}; this product is priced in {form.currency}, so it won't be listed.</p>{/if}
-				<div><label class="label" for="p-cat">Category</label><select id="p-cat" class="input" bind:value={form.shop_category_id}><option value={null}>No category</option>{#each categories as c (c.id)}<option value={c.id}>{c.name}</option>{/each}</select></div>
+				<div><label class="label" for="p-cat">Category</label><select id="p-cat" class="input" bind:value={form.shop_category_id}>{#if mine.all}<option value={null}>No category</option>{/if}{#each categories.filter((c) => mine.all || mine.sections.includes(c.id)) as c (c.id)}<option value={c.id}>{c.name}</option>{/each}</select></div>
 				<div>
 					<span class="label">Photo</span>
 					<div class="flex items-center gap-3">
@@ -258,6 +285,7 @@
 			<li class="flex items-center gap-2 px-3 py-2" data-category={c.name}>
 				<input class="input flex-1" value={c.name} aria-label="Category name" onchange={(e) => renameCategory(c, e.currentTarget.value)} />
 				<span class="w-20 text-right text-xs text-slate-500">{c.products} product{c.products === 1 ? '' : 's'}</span>
+				<button class="btn btn-ghost px-2 py-1 text-xs" onclick={() => openEditors(c)} data-section-editors={c.name}>Editors</button>
 				<button class="btn btn-ghost p-1.5 hover:text-red-600" aria-label="Delete {c.name}" onclick={() => removeCategory(c)}><Icon name="trash" class="size-4" /></button>
 			</li>
 		{:else}
@@ -270,5 +298,22 @@
 	</form>
 	{#snippet footer()}
 		<button class="btn btn-secondary" onclick={() => (catOpen = false)}>Done</button>
+	{/snippet}
+</Modal>
+
+<Modal open={!!editorsOf} title="Editors of “{editorsOf?.name ?? ''}”" onclose={() => (editorsOf = null)}>
+	<div class="space-y-3 text-sm">
+		<p class="text-slate-500">They add, change and remove the products in this category without the catalog-wide permission. Everyone can still see and sell every product.</p>
+		<div><span class="label">People</span><MultiUserPicker bind:value={editorUsers} placeholder="Add people…" /></div>
+		<div>
+			<span class="label">Departments <span class="font-normal text-slate-400">(with their sub-departments)</span></span>
+			<div class="grid max-h-48 grid-cols-2 gap-1 overflow-y-auto">
+				{#each departments as d (d.id)}<label class="flex items-center gap-2"><input type="checkbox" class="rounded border-slate-300 text-brand-600" value={d.id} bind:group={editorDeps} /> {d.name}</label>{/each}
+			</div>
+		</div>
+	</div>
+	{#snippet footer()}
+		<button class="btn btn-secondary" onclick={() => (editorsOf = null)}>Cancel</button>
+		<button class="btn btn-primary" onclick={saveEditors}>Save</button>
 	{/snippet}
 </Modal>

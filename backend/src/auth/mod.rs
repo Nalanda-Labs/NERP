@@ -76,6 +76,16 @@ pub async fn invalidate_authz(state: &AppState, user_ids: &[Uuid]) -> AppResult<
     Ok(())
 }
 
+/// An active person acting without a request of their own (automation acting for them).
+pub async fn load_auth_user(state: &AppState, user_id: Uuid) -> AppResult<AuthUser> {
+    let active: bool = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1").bind(user_id).fetch_optional(&state.db).await?.unwrap_or(false);
+    if !active {
+        return Err(AppError::bad("that person is no longer active"));
+    }
+    let perms = load_permissions(state, user_id).await?;
+    Ok(AuthUser { id: user_id, session_id: Uuid::nil(), permissions: perms.into_iter().collect() })
+}
+
 pub async fn load_permissions(state: &AppState, user_id: Uuid) -> AppResult<Vec<String>> {
     let mut perms = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT rp.permission FROM user_roles ur
@@ -101,6 +111,8 @@ pub const GUEST: &str = "@guest";
 /// them by name, notifications, and their own account. Everything else answers 403.
 const GUEST_PATHS: &[&str] = &[
     "/auth/", "/me/", "/profile", "/notifications", "/realtime/", "/files", "/download-links", "/im/", "/calls", "/projects", "/tasks", "/feed", "/boards",
+    // Their workgroups' files (the drive itself keeps them to those), and editing them.
+    "/drive", "/office/status",
 ];
 
 fn guest_may(path: &str, method: &axum::http::Method) -> bool {

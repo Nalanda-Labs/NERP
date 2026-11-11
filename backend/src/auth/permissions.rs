@@ -36,6 +36,7 @@ pub const ACCOUNTING_ADMIN: &str = "accounting.admin";
 pub const BI: &str = "bi.manage";
 pub const FEED_MODERATE: &str = "feed.moderate";
 pub const USERS_INVITE: &str = "users.invite";
+pub const ESIGN: &str = "crm.esign";
 
 #[derive(Serialize)]
 pub struct PermissionInfo {
@@ -55,6 +56,7 @@ pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: TASKS_MANAGE_ALL, group: "Tasks", name: "Manage all tasks and projects", description: "See, edit and delete every task and project, including private ones" },
     PermissionInfo { code: CRM_ADMIN, group: "CRM", name: "Configure CRM", description: "Pipelines, stages, custom fields, currencies and CRM access rights; full access to every CRM record" },
     PermissionInfo { code: CRM_PRODUCTS, group: "CRM", name: "Manage product catalog", description: "Create and edit products and their prices" },
+    PermissionInfo { code: ESIGN, group: "CRM", name: "Send for e-signature", description: "Send documents for signature and manage signing templates (needed only when the company limits e-signature to these people)" },
     PermissionInfo { code: SITES, group: "CRM", name: "Build websites", description: "Make and publish the company's websites" },
     PermissionInfo { code: MARKETING, group: "CRM", name: "Run marketing", description: "Build segments, send email campaigns to them and manage the unsubscribe list" },
     PermissionInfo { code: CHAT, group: "CRM", name: "Manage live chat", description: "Set up website chat buttons and their operators, and see every chat" },

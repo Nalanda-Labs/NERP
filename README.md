@@ -176,7 +176,13 @@ The safeguards always keep at least one active administrator, and nobody can dea
   - duplicate warnings while typing (phone, email or name), and merging records
   - CSV import as a background job, with an auto-guessed column mapping, duplicate handling
     (skip, update or create), progress and an error report
-  - streamed CSV export, with protection against spreadsheet formula injection
+  - streamed CSV export, with protection against spreadsheet formula injection; also Excel
+    (.xlsx) and, for contacts, leads and companies, vCards (Outlook, Gmail, phones)
+  - a chat in each record (its responsible person, creator and observers; opening it as
+    someone else who may read the record makes you an observer)
+  - the company's own traffic sources (CRM settings → Record types) beside the built-in
+    ones: a record arriving with one of a source's utm_source values gets that source
+  - document templates limited to chosen people and departments
   - a recycle bin with restore, purged automatically after 30 days (emptying it also removes
     the records' generated documents, and emails no other record shows, with their files)
 - **Built for millions of records:** indexes in the order lists are read, a trigram index for
@@ -299,6 +305,10 @@ amounts.
 ### Automation (robots and triggers)
 
 CRM settings → Automation shows each pipeline as columns of stages.
+
+- **Tunnels:** the "Tunnel to another pipeline" robot copies the record (linked, with its
+  client, amount, products and custom fields) or moves it into a stage of another pipeline
+  of the same type. Pipelines & stages lists the tunnels as arrows.
 
 - **Robots** belong to a stage and act only if their conditions hold (field = ≠ > < ≥ ≤,
   contains, empty). For dates, compare with `today`, `today+7`, `today-3` or `now` (UTC).
@@ -462,6 +472,10 @@ optional end date or number of copies), the same rules as recurring tasks.
 
 Set up under Products → Catalog settings by people who manage the catalog.
 
+- **Section editors:** each category (Products → Shop categories → Editors) can name people
+  and departments who add, change and remove its products without the catalog-wide
+  permission.
+
 - **Properties:** details products can have, as text, numbers or a list of values
   (Material, Weight…). Each product form shows them; the shop shows the ones marked
   "shown in the shop" on the product page.
@@ -502,6 +516,15 @@ signature from the record's Documents card, by anyone who can edit the record.
   working) or cancel the request. All of it goes on the record's timeline.
 - Signed copies, frozen PDFs and signature images are deleted with the record when it is
   emptied from the recycle bin; merging records keeps them.
+- **Signing templates** (CRM settings → Documents) name the signers by role: the record's
+  contact, its company, the record itself, the responsible person, whoever sends it, or a
+  fixed person; with a message and optionally a document template to make the document
+  from. Choosing one in the send dialog fills the signers in for that record.
+- **Automation:** triggers on "Everyone signs a document" and "Someone declines to sign"
+  (optionally for one signing template), and a "Send for signature" robot that sends in the
+  name of the record's responsible person (a document still rendering goes out when ready).
+- **Who sends:** a company setting limits e-signature to people with "Send for
+  e-signature" (and CRM admins).
 
 ### Smart processes (your own record types)
 
@@ -772,6 +795,7 @@ All settings are environment variables (see `backend/.env.example`):
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | — | required with `LIVEKIT_URL` |
 | `LIVEKIT_RECORDINGS_DIR` | empty | folder LiveKit Egress writes recordings to (as NERP sees it); empty: no recording |
 | `LIVEKIT_EGRESS_DIR` | `LIVEKIT_RECORDINGS_DIR` | the same folder as Egress sees it, if different (e.g. in a container) |
+| `BACKUP_RESTORE` | `false` | `true` lets System → Backups restore a backup over the live data (with the person's password and the backup's name typed; the app pauses meanwhile). Off: the page shows the command instead |
 | `BACKUP_DIR` | `/var/backups/nerp` | where `deploy/backup/nerp-backup.sh` writes backups; the System → Backups page lists them and runs the scripts |
 | `BACKUP_SCRIPTS` | `../deploy/backup` | the folder holding the backup scripts, as the server sees it |
 | `NERP_TEST_SIGNIN_BASE` | empty | tests only: send every outside sign-in provider (Google, Microsoft, Apple, Facebook, X) to a stand-in at this address; never set it in production |
@@ -911,6 +935,12 @@ in** in the top bar or HR → Check-in.
 ## Drive
 
 Under Drive in the sidebar (My uploads still lists every file you have uploaded anywhere).
+
+- **Guests** from outside the company reach only the files of the workgroups they are in
+  (the group's Files tab), add files there and edit its office documents with everyone
+  else; never the company's or anyone's own files, search, links or sharing.
+- **Guided tours** show newcomers around (the app, the CRM lists, tasks) once; "Take the
+  tour" in the user menu plays them again.
 
 - **My drive** is yours alone until you share something. **Company** is open to every
   employee to look at and add to; renaming, moving and deleting there is for whoever added
@@ -1068,6 +1098,11 @@ Approvals (with a count in the sidebar).
 - **Access:** everyone, or chosen people and departments (with sub-departments): readers
   see items; editors also add items and change their own; managers change any item, the
   fields, the processes and the access. Whoever made the list manages it.
+- **From the feed:** "Request…" starts a process by filling in its list's form; the post goes
+  to the author and whoever has to approve it (later approvers join as the process reaches
+  them), who approve or reject right on the post.
+- **Testing:** while testers are named on a process, only their items start it; the run log
+  shows everything the process did, over a chosen period.
 - **Business processes** start when an item is added, when it changes, or by hand, and run
   their steps in order: an **approval** (by named people, the author, or the author's
   department head; any one or all of them, optionally within a time; with steps for
@@ -1233,6 +1268,8 @@ Company news, under News feed in the sidebar.
 - **Likes and comments.** The author and earlier commenters are notified of new comments.
 - **Editing:** authors edit and delete their posts and comments; people who manage settings
   can delete any. New posts are announced live ("1 new post"); search finds posts by text.
+- **Requests:** "Request…" starts one of the company's processes (see Lists and business
+  processes); its approvers decide on the post.
 
 ## Messenger
 

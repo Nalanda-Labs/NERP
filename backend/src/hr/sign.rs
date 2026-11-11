@@ -60,21 +60,59 @@ fn need_hr(auth: &AuthUser) -> AppResult<()> {
 
 async fn list_templates(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     need_hr(&auth)?;
-    let rows: Vec<(Uuid, String, String, DateTime<Utc>)> = sqlx::query_as("SELECT id, name, body, updated_at FROM hr_doc_templates ORDER BY name").fetch_all(&state.db).await?;
-    Ok(Json(json!({ "items": rows.into_iter().map(|(id, n, b, u)| json!({ "id": id, "name": n, "body": b, "updated_at": u })).collect::<Vec<_>>() })))
+    let rows: Vec<(Uuid, String, String, Value, DateTime<Utc>)> = sqlx::query_as("SELECT id, name, body, after_signing, updated_at FROM hr_doc_templates ORDER BY name").fetch_all(&state.db).await?;
+    Ok(Json(json!({ "items": rows.into_iter().map(|(id, n, b, a, u)| json!({ "id": id, "name": n, "body": b, "after_signing": a, "updated_at": u })).collect::<Vec<_>>() })))
 }
 
 #[derive(Deserialize)]
 struct TemplateInput {
     name: Option<String>,
     body: Option<String>,
+    /// What happens once everyone has signed (see `after_signing`).
+    after_signing: Option<Value>,
+}
+
+/// Checks the after-signing rules: people to tell, a task, and a list to add an item to
+/// (which starts that list's processes). The person saving must be able to add to the list.
+async fn check_after(state: &AppState, auth: &AuthUser, v: &Value) -> AppResult<Value> {
+    let o = v.as_object().cloned().unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    if let Some(n) = o.get("notify").and_then(Value::as_array).filter(|a| !a.is_empty()) {
+        let ids: Vec<Uuid> = n.iter().filter_map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok())).collect();
+        let found: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest").bind(&ids).fetch_one(&state.db).await?;
+        if ids.len() != n.len() || found as usize != ids.len() || ids.len() > 50 {
+            return Err(AppError::bad("tell up to 50 active employees"));
+        }
+        out.insert("notify".into(), json!(ids));
+    }
+    if let Some(t) = o.get("task").and_then(Value::as_object).filter(|t| t.get("title").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())) {
+        let title = required("task title", t["title"].as_str().unwrap_or(""), 300)?;
+        let resp = t.get("responsible").and_then(Value::as_str).unwrap_or("hr");
+        if !["hr", "employee"].contains(&resp) {
+            let u = Uuid::parse_str(resp).map_err(|_| AppError::bad("the task goes to HR, the employee, or a chosen employee"))?;
+            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active AND NOT is_guest)").bind(u).fetch_one(&state.db).await?;
+            if !ok {
+                return Err(AppError::bad("the task's employee isn't active"));
+            }
+        }
+        out.insert("task".into(), json!({ "title": title, "responsible": resp }));
+    }
+    if let Some(l) = o.get("list_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        let list = Uuid::parse_str(l).map_err(|_| AppError::bad("choose a list"))?;
+        if !crate::lists::may_add(state, auth, list).await {
+            return Err(AppError::bad("you can't add items to that list"));
+        }
+        out.insert("list_id".into(), json!(list));
+    }
+    Ok(Value::Object(out))
 }
 
 async fn create_template(State(state): State<AppState>, auth: AuthUser, Json(b): Json<TemplateInput>) -> AppResult<Json<Value>> {
     need_hr(&auth)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 200)?;
     let body = required("text", b.body.as_deref().unwrap_or(""), 100_000)?;
-    sqlx::query("INSERT INTO hr_doc_templates (name, body, created_by) VALUES ($1, $2, $3)").bind(name).bind(body).bind(auth.id).execute(&state.db).await?;
+    let after = check_after(&state, &auth, b.after_signing.as_ref().unwrap_or(&Value::Null)).await?;
+    sqlx::query("INSERT INTO hr_doc_templates (name, body, after_signing, created_by) VALUES ($1, $2, $3, $4)").bind(name).bind(body).bind(after).bind(auth.id).execute(&state.db).await?;
     list_templates(State(state), auth).await
 }
 
@@ -82,7 +120,11 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
     need_hr(&auth)?;
     let name = b.name.as_deref().map(|n| required("name", n, 200)).transpose()?;
     let body = b.body.as_deref().map(|n| required("text", n, 100_000)).transpose()?;
-    sqlx::query("UPDATE hr_doc_templates SET name = COALESCE($2, name), body = COALESCE($3, body), updated_at = now() WHERE id = $1").bind(id).bind(name).bind(body).execute(&state.db).await?;
+    let after = match &b.after_signing {
+        Some(v) => Some(check_after(&state, &auth, v).await?),
+        None => None,
+    };
+    sqlx::query("UPDATE hr_doc_templates SET name = COALESCE($2, name), body = COALESCE($3, body), after_signing = COALESCE($4, after_signing), updated_at = now() WHERE id = $1").bind(id).bind(name).bind(body).bind(after).execute(&state.db).await?;
     list_templates(State(state), auth).await
 }
 
@@ -296,6 +338,52 @@ async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
     tell.extend(by);
     notify(state, &tell, NewNotification { kind: "hr.document", title: format!("“{title}” for {emp_name} is signed"), body: None, link: Some(format!("/hr/documents/{id}")), actor: None }).await;
     crate::api::webhooks::emit(state, "hr.document.signed", json!({ "id": id, "title": title, "employee_id": employee, "signed_sha256": sha256_hex(&signed) })).await;
+    if let Err(e) = after_signing(state, id, &title, employee, &emp_name, by).await {
+        tracing::warn!(document = %id, error = ?e, "after-signing steps of an HR document failed");
+    }
+    Ok(())
+}
+
+/// The template's after-signing steps: tell people, make a task, add a list item (whose
+/// processes then start). Acts as whoever sent the document.
+async fn after_signing(state: &AppState, id: Uuid, title: &str, employee: Uuid, emp_name: &str, by: Option<Uuid>) -> AppResult<()> {
+    let rules: Option<Value> = sqlx::query_scalar("SELECT t.after_signing FROM hr_docs d JOIN hr_doc_templates t ON t.id = d.template_id WHERE d.id = $1").bind(id).fetch_optional(&state.db).await?;
+    let Some(rules) = rules.filter(|r| r.as_object().is_some_and(|o| !o.is_empty())) else { return Ok(()) };
+    let link = format!("/hr/documents/{id}");
+    if let Some(ids) = rules.get("notify").and_then(Value::as_array) {
+        let ids: Vec<Uuid> = ids.iter().filter_map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok())).collect();
+        notify(state, &ids, NewNotification { kind: "hr.document", title: format!("{emp_name} signed “{title}”"), body: None, link: Some(link.clone()), actor: None }).await;
+    }
+    let Some(by) = by else { return Ok(()) };
+    if let Some(t) = rules.get("task") {
+        let resp = match t["responsible"].as_str().unwrap_or("hr") {
+            "hr" => by,
+            "employee" => employee,
+            u => Uuid::parse_str(u).unwrap_or(by),
+        };
+        let body: crate::tasks::items::CreateTask = serde_json::from_value(json!({
+            "title": t["title"].as_str().unwrap_or("Follow up").replace("{{name}}", emp_name).replace("{{document}}", title),
+            "description": format!("{emp_name} signed “{title}”."),
+            "responsible_id": resp,
+        }))
+        .map_err(|e| AppError::Internal(e.into()))?;
+        crate::tasks::items::create_task(state, &crate::auth::load_auth_user(state, by).await?, body).await?;
+    }
+    if let Some(list) = rules.get("list_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()) {
+        // The first person field gets the employee, the first date field today, the first
+        // text field the document's title.
+        let mut values = serde_json::Map::new();
+        let (mut user, mut date, mut text) = (false, false, false);
+        for (code, kind) in crate::lists::field_kinds(state, list).await? {
+            match kind.as_str() {
+                "user" if !user => { values.insert(code, json!(employee)); user = true; }
+                "date" if !date => { values.insert(code, json!(Utc::now().date_naive())); date = true; }
+                "text" | "string" if !text => { values.insert(code, json!(title)); text = true; }
+                _ => {}
+            }
+        }
+        crate::lists::add_item(state, crate::auth::load_auth_user(state, by).await?, list, format!("{title}: {emp_name}"), values).await?;
+    }
     Ok(())
 }
 

@@ -14,7 +14,11 @@ use crate::{
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/me/ui", get(get_mine).put(put_mine)).route("/settings/ui-default", put(put_default))
+    Router::new()
+        .route("/me/ui", get(get_mine).put(put_mine))
+        .route("/settings/ui-default", put(put_default))
+        .route("/me/tours", get(tours).delete(reset_tours))
+        .route("/me/tours/{name}", axum::routing::post(tour_done))
 }
 
 const PRESETS: &[&str] = &["plain", "sky", "sand", "mint", "dusk", "grid"];
@@ -118,4 +122,30 @@ async fn put_default(State(state): State<AppState>, auth: AuthUser, ClientIp(ip)
     audit::record(&mut *tx, Some(auth.id), "settings.ui_default", "settings", None, json!({ "menu": b.menu.is_some(), "background": b.background, "apply_to_all": b.apply_to_all }), ip.as_deref()).await;
     tx.commit().await?;
     get_mine(State(state), auth).await
+}
+
+// ---------------------------------------------------------------------------
+// Guided tours
+// ---------------------------------------------------------------------------
+
+const TOURS: &[&str] = &["welcome", "crm", "tasks"];
+
+async fn tours(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    let done: Vec<String> = sqlx::query_scalar("SELECT tours_done FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    Ok(Json(json!({ "done": done, "tours": TOURS })))
+}
+
+/// A tour seen to the end (or skipped): not offered again.
+async fn tour_done(State(state): State<AppState>, auth: AuthUser, axum::extract::Path(name): axum::extract::Path<String>) -> AppResult<Json<Value>> {
+    if !TOURS.contains(&name.as_str()) {
+        return Err(AppError::NotFound("tour"));
+    }
+    sqlx::query("UPDATE users SET tours_done = array_append(tours_done, $2) WHERE id = $1 AND NOT ($2 = ANY(tours_done))").bind(auth.id).bind(&name).execute(&state.db).await?;
+    tours(State(state), auth).await
+}
+
+/// "Take the tours again".
+async fn reset_tours(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    sqlx::query("UPDATE users SET tours_done = '{}' WHERE id = $1").bind(auth.id).execute(&state.db).await?;
+    tours(State(state), auth).await
 }

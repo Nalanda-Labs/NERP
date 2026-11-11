@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ChatCallButtons from '#lib/components/ChatCallButtons.svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
@@ -27,6 +28,8 @@
 
 	const code = $derived(page.params.type!);
 	const id = $derived(page.params.id!);
+	// The record's chat: its responsible person, creator and observers (opening it makes you one).
+	const recordChat = async () => (await api.post<{ chat_id: string }>(`/crm/items/${id}/chat`)).chat_id;
 	const isNew = $derived(id === 'new');
 	let type = $state<CrmType | null>(null);
 	let item = $state<CrmDetail | null>(null);
@@ -394,7 +397,10 @@
 		<div class="flex flex-wrap items-start gap-4">
 			<div class="min-w-0 flex-1">
 				<p class="text-xs text-slate-400">{type.name} #{item.number}{category && type.categories.length > 1 ? ` · ${category.name}` : ''}</p>
-				<h1 class="text-2xl text-slate-900">{item.title}</h1>
+				<div class="flex flex-wrap items-center gap-3">
+					<h1 class="text-2xl text-slate-900">{item.title}</h1>
+					<ChatCallButtons small chat={recordChat} call={false} />
+				</div>
 				<p class="mt-1 flex flex-wrap gap-x-4 text-sm text-slate-500">
 					{#if type.has_amount}<span class="font-medium text-slate-800">{money(item.opportunity, item.currency)}</span>{/if}
 					{#if item.company_title && item.company_id}<a class="hover:underline" href="/crm/company/{item.company_id}">{item.company_title}</a>{/if}
