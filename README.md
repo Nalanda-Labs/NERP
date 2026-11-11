@@ -151,6 +151,10 @@ The safeguards always keep at least one active administrator, and nobody can dea
   address, amount and products. Every record links back to its source.
 - **Custom fields:** text, long text, number, money, date, date and time, yes/no, list, employee,
   link and address; required, multiple-value and show-in-list options. They can be filtered on.
+  A field can be limited to chosen people and departments (with their sub-departments): everyone
+  else gets neither the field nor its values — not on the record, list, board, exports,
+  documents or e-mail templates, not in the edit history, and not as a filter — and can't write
+  it (a required field they can't see isn't asked of them). CRM admins see every field.
 - **Contact details:** any number of phones, emails, websites and messengers, each with a type.
 - **Every country:** ISO 3166 countries and ISO 4217 currencies. Names, symbols and number formats
   come from the browser's localisation data. Structured addresses.
@@ -159,7 +163,9 @@ The safeguards always keep at least one active administrator, and nobody can dea
   base currency for filters and board totals.
 - **Products:** a catalog with SKU, unit, price and currency, tax rate (inclusive or exclusive),
   plus product rows on deals and leads with percent or amount discounts and exact tax maths. The
-  deal amount follows the products.
+  deal amount follows the products. A product's cost price (or, without one, the average
+  purchase price of its posted receipts) is copied onto the rows when they're saved, so later
+  changes don't rewrite past deals; a row's cost can also be typed in.
 - **Views:** a Kanban board per pipeline (per-stage counts and totals, drag and drop, "show more")
   and a list with column-aware rows, paging, multi-select and bulk assign, change stage or delete.
 - **Filters:** search by name, phone, email or #number, mine, state, activity (overdue, today,
@@ -174,8 +180,19 @@ The safeguards always keep at least one active administrator, and nobody can dea
   access and the settings; `crm.products` manages the catalog.
 - **Data tools:**
   - duplicate warnings while typing (phone, email or name), and merging records
+  - **Duplicates** (`/crm/{type}/duplicates`): a search over the whole type for groups of
+    records sharing a phone, an email or a name, among the records you may read. Merge chosen
+    groups at once (each into its oldest record, or the one you pick), or mark a group "not
+    duplicates" so it stays hidden until another record joins it
   - CSV import as a background job, with an auto-guessed column mapping, duplicate handling
-    (skip, update or create), progress and an error report
+    (skip, update or create), progress and an error report. Contacts exported from Gmail,
+    Outlook or Yahoo Mail are recognised and mapped as they are (UTF-8, UTF-16 or
+    Windows-1252; country names and unknown birthday formats are left out instead of failing
+    the row), and vCard files (2.1, 3.0, 4.0) import contacts with their company, phones,
+    emails, messengers, address, birthday and notes
+  - a **Booking link** on each record: one of your calendar slot links made out for the
+    record's client. What they book is a meeting on the record (and on your calendar, once);
+    if they cancel, the meeting is closed as cancelled
   - streamed CSV export, with protection against spreadsheet formula injection; also Excel
     (.xlsx) and, for contacts, leads and companies, vCards (Outlook, Gmail, phones)
   - a chat in each record (its responsible person, creator and observers; opening it as
@@ -296,6 +313,10 @@ amounts.
   base currency (**Set targets**). Progress counts deals won in that month.
 - **Sources** and **lead conversion** (converted, still open, junk) for records created in the
   period.
+- **Gross profit:** for records won in the period, net sales (after discounts, without tax) of
+  their product rows, cost, gross profit and margin — in total and by manager, product, month
+  and record. Rows without a known cost are left out of profit and margin and shown apart, as
+  are records won without product rows.
 - **Rules:**
   - Amounts are in the base currency.
   - Days follow the viewer's time zone.
@@ -366,9 +387,17 @@ CRM settings → Automation shows each pipeline as columns of stages.
   kind), a comment is added, a document is created (optionally from one template), or an
   external system calls the trigger's secret webhook URL (`POST {"item_id": …}`, no login,
   rate-limited). By default they only move records forward.
+  "All its tasks are done" moves a record on once every task linked to it (for instance the
+  ones its stage's robots handed out) is done, so a smart process can run as a simple RPA
+  flow: each stage gives people their tasks, and the record moves on by itself when they
+  finish.
 - **How it runs:** robots run in the background job queue as the built-in "Automation" user.
   That user is hidden from employee lists and cannot sign in. Every run is recorded, and done
   or failed runs appear in the record's timeline. Waiting robots are listed on the record.
+- **Test mode** (per pipeline, CRM admins): while it's on, the pipeline's robots, triggers and
+  schedules run only for records whose responsible person is one of the chosen testers;
+  everyone else's records are left alone. Runs made in test mode are marked "test" in the log
+  and on the record.
 - **Log** tab: every robot and schedule run of the pipeline in a period, with counts per status
   and per robot or schedule. You can search by record, robot or result, and retry a failed run
   (it checks the stage and conditions again but does not wait again).
@@ -574,6 +603,13 @@ connection test runs before saving.
   note of your own and a link to its record, in a chat you're in or in the news feed.
 - **Automation:** the "Email the client" robot sends from the responsible person's mailbox when
   they have one. A new trigger fires when an email arrives from the client.
+- **Sharing:** a mailbox can be shared with chosen people, roles and departments (with
+  sub-departments); they read its mail and send from it.
+- **Admin → Mailboxes** ("Manage everyone's mailboxes"): every employee's connected mailbox
+  with its status and last sync. Admins connect many employees' IMAP/SMTP mailboxes at once
+  (one row each: employee, address, password), sync them, change their sharing or remove
+  them. Each employee is told when an admin connects or removes their mailbox, and the
+  passwords are stored encrypted like any other.
 - **Security:**
   - Passwords are encrypted with AES-256-GCM. The key comes from `DATA_ENCRYPTION_KEY` (32+
     characters), or is derived from `JWT_SECRET` when that is unset.
@@ -826,6 +862,15 @@ Shown in the sidebar to people with the "Run marketing" permission.
   - **Writing:** a draft has a sender name, a reply-to address, a subject and a plain-text
     message with placeholders (`{{first_name}}`, `{{title}}`, `{{company}}`, …). Send a test
     to any address, filled in from the first person in the audience.
+  - **Designed emails:** instead of plain text, a message can be built from blocks in the
+    email designer — heading, text (with **bold**, *italic* and `[label](https://…)`
+    links), button, image (uploaded or by address), two columns, divider, space and social
+    links — dragged in from the palette, reordered by dragging and set up on the side, with
+    a page style (colours, font, the preview text inboxes show). The preview in the middle is
+    rendered by the server exactly as it is sent: table-based HTML with inline styles, which
+    mail programs understand, and a plain-text version alongside. Placeholders are filled per
+    recipient and escaped, links go through click tracking, and uploaded images are served
+    from a signed public address (mail programs load images without signing in).
   - **Sending:** send now or schedule it. Sending starts by listing one recipient per email
     address across the chosen segments, leaving out unsubscribed addresses and records with
     none. Emails then go out in the background, 300 a minute, through the configured SMTP
@@ -843,6 +888,37 @@ Shown in the sidebar to people with the "Run marketing" permission.
     recipient list can be filtered by opened, clicked, unsubscribed or failed. Each
     recipient's record gets a timeline entry when it is sent the campaign and when they
     unsubscribe.
+- **Sales generator** (`/marketing/generators`): a deal or lead for every client in a segment
+  of contacts or companies — repeat sales, renewals, seasonal offers — now, at a set time, or
+  every week, month or quarter. Records go to the client's responsible person or to chosen
+  people in turn, in the chosen pipeline and stage, titled from a template (`{{name}}`,
+  `{{month}}`, `{{year}}`), linked to the client. Clients who already have an open record of
+  that kind (in that pipeline) can be skipped. Running one by hand first shows how many it
+  will make and skip, and keeps its schedule. The generator lists what it made, and its
+  author is told after each run.
+- **Traffic** (`/marketing/traffic`), where clients come from:
+  - **Websites:** a tracking script for each company website
+    (`<script src="…/track.js" data-site="KEY" async>`), optionally limited to its host names.
+    It keeps a visitor id in the browser and reports each page, single-page sites included.
+    Pages within 30 minutes of each other from one source make a visit, put down to a
+    channel — paid ads (click ids or paid mediums), search engines, social networks, email,
+    other websites, tagged campaigns, offline ads or direct — and a source (a CRM traffic
+    source when its UTM tag matches). Browsers asking not to be tracked (Global Privacy
+    Control, Do Not Track) are left alone. Web forms and the live chat on those pages pass
+    the visitor id along, so the CRM record they make carries the visitor's **journey**: a
+    card on the record (and, for a deal, its contacts' and company's) with every visit,
+    where it came from and the pages seen, then the record's own milestones (made, stages,
+    won or lost).
+  - **Analysis:** for a period and website, visits, visitors and new visitors by channel or
+    by source, and what visitors who first came that way became: CRM records, deals opened,
+    deals won and revenue, against the spend entered — conversion, cost per record and ROI.
+  - **Ad links:** short links (`/go/<code>`) and QR codes for posters, print, radio or events.
+    They send people on to a page with UTM tags and count clicks (once an hour per address);
+    visits through them count as offline ads for the link's source.
+  - **Spend:** what each channel or source cost per month, in any enabled currency
+    (converted to the base currency when entered).
+  - Page lists are kept for 400 days, and visitors who never became a CRM record are
+    forgotten after 400 days without a visit.
 - **Unsubscribes:** the public unsubscribe page shows the address masked and asks once.
   The list shows who unsubscribed from which campaign and lets you add addresses or remove
   one (for someone who asked to get emails again). The list only affects campaigns; emails
@@ -954,7 +1030,16 @@ Under Drive in the sidebar (My uploads still lists every file you have uploaded 
   edit (add files and new versions). A shared folder shares everything in it. People are
   notified when something is shared with them.
 - **Public links** to a file, optionally expiring after some days, with a download count;
-  the link is shown once and can be removed.
+  the link is shown once and can be removed. For an office document the owner may edit, a
+  link can also let anyone with it **edit it in the browser** (Collabora), under the name they
+  give; each save is a version made on the owner's behalf. Removing the link (or trashing
+  the file) closes those editors at once.
+- **Boards** can be made in a drive folder ("Board"): they show there and open as the drive
+  lets each person (looking or drawing).
+- **Videos** get a copy every browser plays (H.264/AAC MP4, at most 1080p) and a poster frame,
+  made in the background with ffmpeg; videos that already play everywhere keep their
+  original, and ones larger than `VIDEO_CONVERT_MAX_MB` (default 2048) or longer than four
+  hours aren't converted. Players use the copy once it is ready.
 - **Trash:** deleted things (folders with their contents) can be put back for 30 days; then
   they and every version are deleted for good, or sooner with "Delete for good".
 - Editing office documents in the browser needs a document server (e.g. Collabora Online,
@@ -1114,6 +1199,13 @@ Approvals (with a count in the sidebar).
   with comments). The author is told how it ended. The starter or a list manager can cancel
   a process. A process keeps the steps it started with, so changing the design affects only
   processes started afterwards.
+- **On CRM records:** CRM administrators design processes for a record type under CRM
+  settings → Business processes, in the same flowchart designer, with the record's fields
+  (stage, amount, responsible person, custom fields…). They start when a record is made, when
+  it changes, or by hand from the record (by people who may change it); "the author's head"
+  means the head of the responsible person's department. "Set a field" changes the record like
+  any other change, in its history; the processes' own changes start no further processes.
+  Each record shows its processes with their history, and approvals link to the record.
 
 ## Knowledge base
 
@@ -1136,6 +1228,17 @@ Handbooks, how-tos and policies, under Knowledge base in the sidebar.
   stored with the page, so whoever may read the page may open them. Type `[[` (or use
   "Page") to link another page by its title. Ctrl+S saves; going to another page with unsaved
   changes asks first, while reloading keeps you in the editor with them (kept in the browser); a word count and reading time show at the bottom.
+- **The visual editor** (switch between Visual and Markdown above the page; the choice is
+  remembered): what you see is what readers get — headings, bold, italic, lists, checklists,
+  quotes, code, links, tables, pictures — and everyone editing the page in it at the same time
+  sees each other's text as they type, with their cursors and names. Their changes merge
+  (a shared CRDT document kept by the server, passed on through the real-time connection);
+  Save makes a version for everyone. The page is still kept as Markdown. Saving in the
+  Markdown editor, or restoring a version, starts the live document again from the saved page.
+- **Import:** a Markdown or HTML file, or a ZIP of them — exports from Notion, Obsidian and
+  the like (folders become parent pages; ids are taken out of titles) or a Confluence HTML
+  export (its tree from `index.html`; only each page's own content) — becomes pages under the
+  space or a chosen page, with their pictures and the links between them.
 - **Reading:** headings get links to copy, longer pages show their contents beside the text,
   code is highlighted by language, and pictures and files open with your sign-in.
 - **History:** every save is a version; any version can be viewed and restored (restoring
@@ -1270,6 +1373,11 @@ Company news, under News feed in the sidebar.
   can delete any. New posts are announced live ("1 new post"); search finds posts by text.
 - **Requests:** "Request…" starts one of the company's processes (see Lists and business
   processes); its approvers decide on the post.
+- **Video announcements:** "Video" records from the camera in the browser (up to five
+  minutes; watch it, record again or use it); it goes on the post and plays there for the
+  post's readers.
+- **A board for the post:** "Board" makes a whiteboard with the post; its readers draw on it
+  or only look, as the author chooses.
 
 ## Messenger
 
@@ -1398,6 +1506,11 @@ Everyone's own calendar, under Calendar in the sidebar, with month and week view
 - **Subscribe:** a private link (`…/api/public/calendar/<token>.ics`) adds your events and
   CRM calls and meetings to Google Calendar, Outlook or a phone. The link is shown once;
   making a new one stops the old one, and it can be turned off.
+- **The employee list in contacts apps:** with the same app password as the calendar, a
+  CardDAV account (`…/dav/`, found from `/.well-known/carddav`) gives phones and mail
+  programs an "Employees" address book — everyone working at the company, with job title,
+  department, emails and phones — kept up to date (people who leave drop out). It is
+  read-only. For Outlook, Employees → "vCards" downloads the list as a file to import.
 
 ### Host controls and call history
 
@@ -1554,6 +1667,22 @@ Admin → **API & webhooks** (shown to people with "Use the API" or "Manage webh
 curl -H "Authorization: Bearer nerp_…" "https://nerp.example.com/api/crm/deal/items?semantics=process&limit=50"
 ```
 
+### MCP server (outside AI clients)
+
+`POST /api/mcp` speaks the Model Context Protocol (JSON-RPC over Streamable HTTP, protocol
+versions 2025-03-26 to 2025-11-25, no sessions or server stream), so AI assistants and agent
+tools can work with NERP. Give the client the URL `https://nerp.example.com/api/mcp` and an
+API key as `Authorization: Bearer nerp_…` (Profile → API keys shows the details).
+
+- **Tools:** CRM (`crm_record_types`, `crm_search`, `crm_get`, `crm_timeline`, `crm_create`,
+  `crm_update`, `crm_comment`, `crm_add_activity`), tasks (`tasks_search`, `task_get`,
+  `projects_list`, `task_create`, `task_update`, `task_set_status`, `task_comment`) and
+  employees (`employees_search`, `departments_list`).
+- **Rights:** a client sees only the tools its key's scopes allow; each tool is an ordinary
+  API request with the same key, so the owner's access rights, the rate limit and the audit
+  trail apply as for any API call. A key with no tool here is refused.
+- Browsers may call it only from NERP's own pages (other `Origin`s are refused).
+
 ## API overview
 
 All endpoints are under `/api`, and every one except setup, login and refresh needs a
@@ -1615,6 +1744,9 @@ POST /crm/doc-templates/preview  GET /crm/doc-templates/sample
 POST /crm/types   PATCH|DELETE /crm/types/{code}
 GET /crm/mailboxes/oauth/providers   POST /crm/mailboxes/oauth/{google|microsoft}/start   GET /crm/mailboxes/oauth/callback
 GET|POST /crm/mailboxes   POST /crm/mailboxes/test   PATCH|DELETE /crm/mailboxes/{id}   POST /crm/mailboxes/{id}/sync
+GET /admin/mailboxes   POST /admin/mailboxes/bulk   PATCH|DELETE /admin/mailboxes/{id}   POST /admin/mailboxes/{id}/sync
+GET|POST /crm/{type}/workflows   GET /crm/items/{id}/workflows   POST /crm/items/{id}/workflows/{template}
+POST /mcp   (MCP, API keys only)
 GET|POST /crm/items/{id}/emails   GET /crm/items/{id}/email-recipients   GET /crm/emails/{id}   POST /crm/emails/{id}/resend
 GET /crm/automation?category_id=   POST /crm/robots   PATCH|DELETE /crm/robots/{id}
 POST /crm/triggers   PATCH|DELETE /crm/triggers/{id}   GET /crm/items/{id}/automation
@@ -1632,6 +1764,16 @@ POST /crm/{type}/categories      PATCH|DELETE /crm/categories/{id}
 POST /crm/categories/{id}/stages PUT /crm/categories/{id}/stage-order  PATCH|DELETE /crm/stages/{id}
 GET /crm/permissions             PUT /crm/permissions/{role_id}
 GET /crm/{type}/duplicates       POST /crm/{type}/merge
+GET /crm/{type}/duplicate-groups POST /crm/{type}/duplicate-groups/ignore|merge
+GET /crm/analytics/{type}/profit PUT /crm/automation/test-mode
+GET|POST /tracking/sites         PATCH|DELETE /tracking/sites/{id}
+GET|POST /tracking/links         PATCH|DELETE /tracking/links/{id}  GET /tracking/links/{id}/qr.svg
+GET|PUT /tracking/spend          GET /tracking/report         GET /crm/items/{id}/journey
+POST /public/track/{key}         GET /go/{code} (outside /api)
+GET|POST /marketing/generators   GET|PATCH|DELETE /marketing/generators/{id}
+POST /marketing/generators/{id}/run  GET /marketing/generators/{id}/preview
+POST /marketing/design/preview   GET /public/m/i/{file}/{sig}
+POST /calendar/slot-links/{id}/for-record
 POST /crm/{type}/import          GET /crm/imports/{job}       GET /crm/{type}/export
 GET /crm/recycle-bin             POST /crm/recycle-bin/{id}/restore  DELETE /crm/recycle-bin/{id}
 GET|POST /crm/{type}/filters     DELETE /crm/filters/{id}

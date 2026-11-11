@@ -10,6 +10,7 @@
 	import { realtime } from '#lib/realtime.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
+	import VideoRecorder from '#lib/components/VideoRecorder.svelte';
 	import { PERM } from '#lib/types.ts';
 
 	let posts = $state<Post[]>([]);
@@ -63,6 +64,22 @@
 	const BADGES: [string, string][] = [['thanks', '🙏 Thank you'], ['team_player', '🤝 Team player'], ['great_idea', '💡 Great idea'], ['problem_solver', '🧩 Problem solver'], ['leader', '⭐ Leader'], ['above_beyond', '🚀 Above and beyond']];
 	let poll = $state({ question: '', options: ['', ''] });
 	let files = $state<{ id: string; name: string }[]>([]);
+	// A board for the post: made when it's posted, for its readers to draw on (or look at).
+	let withBoard = $state(false);
+	// A video announcement recorded here.
+	let recordingVideo = $state(false);
+	async function addVideo(f: File) {
+		recordingVideo = false;
+		const fd = new FormData();
+		fd.append('file', f);
+		try {
+			const up = await api.post<{ id: string }>('/files', fd);
+			files = [...files, { id: up.id, name: f.name }];
+		} catch (err) {
+			toasts.error(err);
+		}
+	}
+	let boardLevel = $state<'edit' | 'view'>('edit');
 	let busy = $state(false);
 	let requestOpen = $state(false);
 	onMount(() => {
@@ -86,7 +103,10 @@
 		e.preventDefault();
 		busy = true;
 		try {
+			const board = withBoard ? await api.post<{ id: string }>('/boards', { title: body.trim().split('\n')[0]!.slice(0, 120) || 'Board' }) : null;
 			const p = await api.post<Post>('/feed', {
+				board_id: board?.id,
+				board_level: board ? boardLevel : undefined,
 				body,
 				to_all: toAll,
 				users: toAll ? [] : people.map((x) => x.id),
@@ -98,6 +118,7 @@
 				badge_user_ids: withBadge ? badgePeople.map((p) => p.id) : []
 			});
 			withBadge = false;
+			withBoard = false;
 			badgePeople = [];
 			posts = [p, ...posts.filter((x) => x.id !== p.id)];
 			body = '';
@@ -150,12 +171,16 @@
 				{/if}
 			</div>
 		{/if}
+		{#if recordingVideo}<VideoRecorder onrecorded={addVideo} oncancel={() => (recordingVideo = false)} />{/if}
 		{#if files.length}<div class="flex flex-wrap gap-2">{#each files as f, i (f.id)}<span class="flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-xs">{f.name}<button type="button" aria-label="Remove {f.name}" onclick={() => files.splice(i, 1)}><Icon name="x" class="size-3" /></button></span>{/each}</div>{/if}
 		<div class="flex flex-wrap items-center gap-3 text-sm">
 			<select class="input w-40" aria-label="Who sees it" bind:value={toAll}><option value={true}>Everyone</option><option value={false}>Chosen people…</option></select>
 			<label class="btn btn-ghost cursor-pointer px-2" aria-label="Attach files"><Icon name="paperclip" class="size-4" /><input type="file" multiple class="sr-only" onchange={upload} /></label>
+			<button type="button" class="btn btn-ghost px-2 {recordingVideo ? 'text-brand-700' : ''}" aria-pressed={recordingVideo} onclick={() => (recordingVideo = !recordingVideo)} data-record-video>Video</button>
 			<button type="button" class="btn btn-ghost px-2 {withPoll ? 'text-brand-700' : ''}" aria-pressed={withPoll} onclick={() => (withPoll = !withPoll)}>Poll</button>
 			<button type="button" class="btn btn-ghost px-2 {withBadge ? 'text-brand-700' : ''}" aria-pressed={withBadge} onclick={() => (withBadge = !withBadge)}>Give a badge</button>
+			<button type="button" class="btn btn-ghost px-2 {withBoard ? 'text-brand-700' : ''}" aria-pressed={withBoard} onclick={() => (withBoard = !withBoard)} data-post-board>Board</button>
+			{#if withBoard}<select class="input w-auto py-1 text-xs" aria-label="Readers may" bind:value={boardLevel}><option value="edit">Readers draw on it</option><option value="view">Readers look at it</option></select>{/if}
 			<button type="button" class="btn btn-ghost px-2" onclick={() => (requestOpen = true)} data-new-request>Request…</button>
 			<label class="flex items-center gap-2 text-slate-600"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={isImportant} /> Important</label>
 			<button class="btn btn-primary ml-auto" disabled={busy || !body.trim()}>Post</button>

@@ -6,6 +6,7 @@
 	import { onMount } from 'svelte';
 	import { api } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
+	import EmailDesigner, { blankDesign } from '#lib/components/marketing/EmailDesigner.svelte';
 	import { crm, money } from '#lib/crm.svelte.ts';
 	import { formatDateTime } from '#lib/format.ts';
 	import { session } from '#lib/session.svelte.ts';
@@ -53,7 +54,7 @@
 		if (!c) return;
 		saving = true;
 		try {
-			c = await api.patch<Campaign>(`/marketing/campaigns/${id}`, { name: c.name, segment_ids: c.segment_ids, subject: c.subject, body: c.body, from_name: c.from_name || null, reply_to: c.reply_to || null });
+			c = await api.patch<Campaign>(`/marketing/campaigns/${id}`, { name: c.name, segment_ids: c.segment_ids, subject: c.subject, body: c.body, design: c.design ? $state.snapshot(c.design) : null, from_name: c.from_name || null, reply_to: c.reply_to || null });
 			dirty = false;
 			toasts.success('Saved');
 		} catch (e) {
@@ -61,6 +62,12 @@
 		} finally {
 			saving = false;
 		}
+	}
+	function setDesigned(on: boolean) {
+		if (!c || on === !!c.design) return;
+		if (!on && !confirm('Go back to a plain-text message? The design is dropped; its text stays.')) return;
+		c.design = on ? blankDesign() : null;
+		dirty = true;
 	}
 	const reach = $derived(segments.filter((s) => c?.segment_ids.includes(s.id)).reduce((a, s) => a + s.reachable, 0));
 	// ----- starting points for the message -----
@@ -198,13 +205,22 @@
 		</div>
 
 		{#if c.status === 'draft'}
-			<div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+			<div class="grid gap-5 {c.design ? 'xl:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_20rem]'}">
 				<section class="card space-y-4 p-5 text-sm">
 					<div class="grid gap-3 sm:grid-cols-2">
 						<div><label class="label" for="cp-from">Sender name</label><input id="cp-from" class="input" maxlength="100" bind:value={c.from_name} oninput={() => (dirty = true)} placeholder="e.g. Acme team" /></div>
 						<div><label class="label" for="cp-reply">Replies go to</label><input id="cp-reply" class="input" type="email" bind:value={c.reply_to} oninput={() => (dirty = true)} placeholder="sales@yourcompany.com" /></div>
 					</div>
 					<div><label class="label" for="cp-subject">Subject</label><input id="cp-subject" class="input" maxlength="300" bind:value={c.subject} oninput={() => (dirty = true)} /></div>
+					<div class="flex rounded-full bg-slate-100 p-0.5 text-xs w-fit" role="tablist" aria-label="Message kind">
+						{#each [[false, 'Plain text'], [true, 'Designed']] as const as [on, l] (l)}
+							<button type="button" role="tab" aria-selected={!!c.design === on} class="rounded-full px-3 py-1 {!!c.design === on ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-600'}" onclick={() => setDesigned(on)} data-message-kind={on ? 'designed' : 'plain'}>{l}</button>
+						{/each}
+					</div>
+					{#if c.design}
+						<EmailDesigner bind:design={c.design} onchange={() => (dirty = true)} />
+						<p class="text-xs text-slate-500">Links are tracked and get UTM tags (<code>utm_campaign={c.slug}</code>). An unsubscribe line is added at the end. A plain-text version goes with it.</p>
+					{:else}
 					<div>
 						<div class="flex flex-wrap items-center gap-2">
 							<label class="label mr-auto" for="cp-body">Message</label>
@@ -222,6 +238,7 @@
 						</div>
 						<p class="mt-1 text-xs text-slate-500">Links are tracked and get UTM tags (<code>utm_campaign={c.slug}</code>), so leads and deals they bring in are counted. An unsubscribe link is added at the end.</p>
 					</div>
+					{/if}
 					<div class="flex gap-2"><button class="btn btn-primary" disabled={saving || !dirty} onclick={save}>{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}</button></div>
 				</section>
 				<aside class="space-y-4">

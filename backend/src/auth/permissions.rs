@@ -37,6 +37,7 @@ pub const BI: &str = "bi.manage";
 pub const FEED_MODERATE: &str = "feed.moderate";
 pub const USERS_INVITE: &str = "users.invite";
 pub const ESIGN: &str = "crm.esign";
+pub const MAIL_ADMIN: &str = "mail.admin";
 
 #[derive(Serialize)]
 pub struct PermissionInfo {
@@ -58,6 +59,7 @@ pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: CRM_PRODUCTS, group: "CRM", name: "Manage product catalog", description: "Create and edit products and their prices" },
     PermissionInfo { code: ESIGN, group: "CRM", name: "Send for e-signature", description: "Send documents for signature and manage signing templates (needed only when the company limits e-signature to these people)" },
     PermissionInfo { code: SITES, group: "CRM", name: "Build websites", description: "Make and publish the company's websites" },
+    PermissionInfo { code: MAIL_ADMIN, group: "CRM", name: "Manage everyone's mailboxes", description: "See every connected mailbox, connect mailboxes for employees in bulk, pause, sync or disconnect them" },
     PermissionInfo { code: MARKETING, group: "CRM", name: "Run marketing", description: "Build segments, send email campaigns to them and manage the unsubscribe list" },
     PermissionInfo { code: CHAT, group: "CRM", name: "Manage live chat", description: "Set up website chat buttons and their operators, and see every chat" },
     PermissionInfo { code: INVENTORY, group: "CRM", name: "Manage inventory", description: "Warehouses, and documents that receive, write off, move or count stock" },

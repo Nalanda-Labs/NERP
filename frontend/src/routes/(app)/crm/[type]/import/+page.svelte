@@ -16,6 +16,10 @@
 	let mapping = $state<Record<number, string>>({});
 	let duplicates = $state<'skip' | 'update' | 'create'>('skip');
 	let job = $state<string | null>(null);
+	// A .vcf file: contacts as phones and address books export them (no columns to map).
+	let vcard = $state<{ count: number; names: string[] } | null>(null);
+	// Which mail program's export the columns look like.
+	let source = $state<string | null>(null);
 	let status = $state<{ state: string; processed?: number; created?: number; updated?: number; skipped?: number; errors?: { line: number; error: string }[] } | null>(null);
 
 	onMount(async () => {
@@ -40,6 +44,53 @@
 		for (const d of type.custom_fields) out.push({ key: d.code, label: d.label });
 		return out;
 	});
+
+	// Column names of contact exports from mail programs → fields (checked before the guess).
+	const PRESETS: { name: string; sign: string[]; map: Record<string, string> }[] = [
+		{
+			name: 'Google Contacts',
+			sign: ['E-mail 1 - Value', 'Phone 1 - Value'],
+			map: {
+				'First Name': 'first_name', 'Given Name': 'first_name', 'Middle Name': 'middle_name', 'Additional Name': 'middle_name', 'Last Name': 'last_name', 'Family Name': 'last_name',
+				'Name Prefix': 'honorific', 'Organization Name': 'company', 'Organization 1 - Name': 'company', 'Organization Title': 'job_title', 'Organization 1 - Title': 'job_title',
+				Birthday: 'birthdate', Notes: 'comments', 'E-mail 1 - Value': 'email', 'E-mail 2 - Value': 'email', 'E-mail 3 - Value': 'email',
+				'Phone 1 - Value': 'phone', 'Phone 2 - Value': 'phone', 'Phone 3 - Value': 'phone', 'Website 1 - Value': 'web',
+				'Address 1 - Street': 'address.line1', 'Address 1 - City': 'address.city', 'Address 1 - Region': 'address.region', 'Address 1 - Postal Code': 'address.postal_code', 'Address 1 - Country': 'address.country'
+			}
+		},
+		{
+			name: 'Outlook',
+			sign: ['E-mail Address', 'Mobile Phone'],
+			map: {
+				'First Name': 'first_name', 'Middle Name': 'middle_name', 'Last Name': 'last_name', Title: 'honorific', Company: 'company', 'Job Title': 'job_title',
+				'Business Street': 'address.line1', 'Business City': 'address.city', 'Business State': 'address.region', 'Business Postal Code': 'address.postal_code', 'Business Country/Region': 'address.country',
+				'Business Phone': 'phone', 'Business Phone 2': 'phone', 'Home Phone': 'phone', 'Mobile Phone': 'phone', 'Other Phone': 'phone',
+				'E-mail Address': 'email', 'E-mail 2 Address': 'email', 'E-mail 3 Address': 'email', Birthday: 'birthdate', Notes: 'comments', 'Web Page': 'web'
+			}
+		},
+		{
+			name: 'Yahoo Mail',
+			sign: ['First', 'Last', 'Email', 'Alternate Email 1'],
+			map: {
+				First: 'first_name', Middle: 'middle_name', Last: 'last_name', Email: 'email', 'Alternate Email 1': 'email', 'Alternate Email 2': 'email',
+				Home: 'phone', Work: 'phone', Mobile: 'phone', Other: 'phone', Title: 'job_title', Company: 'company',
+				'Work Address': 'address.line1', 'Work City': 'address.city', 'Work State': 'address.region', 'Work ZIP': 'address.postal_code', 'Work Country': 'address.country',
+				'Business Website': 'web', 'Personal Website': 'web', Birthday: 'birthdate', Comments: 'comments'
+			}
+		}
+	];
+
+	/** A file's text: UTF-8, UTF-16 with a byte-order mark, or else Windows-1252 (older Outlook). */
+	async function readText(f: Blob): Promise<string> {
+		const b = new Uint8Array(await f.arrayBuffer());
+		if (b[0] === 0xff && b[1] === 0xfe) return new TextDecoder('utf-16le').decode(b);
+		if (b[0] === 0xfe && b[1] === 0xff) return new TextDecoder('utf-16be').decode(b);
+		try {
+			return new TextDecoder('utf-8', { fatal: true }).decode(b).replace(/^﻿/, '');
+		} catch {
+			return new TextDecoder('windows-1252').decode(b);
+		}
+	}
 
 	// Minimal RFC 4180 parser for the preview (the server does the real parsing).
 	function parse(text: string, d: string): string[][] {
@@ -72,15 +123,30 @@
 			type = crm.type(code) ?? null;
 		}
 		file = f;
-		const head = await f.slice(0, 64 * 1024).text();
+		source = null;
+		vcard = null;
+		const head = await readText(f.slice(0, 64 * 1024));
+		if (/\.vcf$/i.test(f.name) || /^\s*BEGIN:VCARD/i.test(head)) {
+			const all = await readText(f);
+			const names = [...all.matchAll(/^FN[^:\r\n]*:(.*)$/gim)].map((m) => m[1]!.trim());
+			vcard = { count: (all.match(/^BEGIN:VCARD/gim) ?? []).length, names: names.slice(0, 8) };
+			return;
+		}
 		delimiter = (head.split('\n')[0]!.match(/;/g)?.length ?? 0) > (head.split('\n')[0]!.match(/,/g)?.length ?? 0) ? ';' : ',';
 		const rows = parse(head, delimiter);
 		header = rows[0] ?? [];
 		sample = rows.slice(1, 6);
-		// Guess the mapping from header names.
+		// A known export's columns, or else a guess from the header names.
+		const preset = PRESETS.find((p) => p.sign.every((x) => header.includes(x)));
+		source = preset?.name ?? null;
 		const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 		const guess: Record<number, string> = {};
 		header.forEach((h, i) => {
+			const known = preset?.map[h.trim()];
+			if (preset) {
+				if (known && targets.some((t) => t.key === known || (known === 'company' && t.key === 'company_name'))) guess[i] = targets.some((t) => t.key === known) ? known : 'company_name';
+				return;
+			}
 			const n = norm(h);
 			const hit = targets.find((t) => norm(t.label) === n || norm(t.key) === n) ??
 				(n.includes('phone') || n.includes('mobile') ? targets.find((t) => t.key === 'phone') : undefined) ??
@@ -101,7 +167,9 @@
 			fd.append('file', file!);
 			const meta = await api.post<{ id: string }>('/files', fd);
 			const map = Object.fromEntries(Object.entries(mapping).filter(([, v]) => v));
-			const r = await api.post<{ job_id: string }>(`/crm/${code}/import`, { file_id: meta.id, mapping: map, has_header: hasHeader, duplicates, delimiter });
+			const r = vcard
+				? await api.post<{ job_id: string }>(`/crm/${code}/import`, { file_id: meta.id, mapping: {}, format: 'vcard', duplicates })
+				: await api.post<{ job_id: string }>(`/crm/${code}/import`, { file_id: meta.id, mapping: map, has_header: hasHeader, duplicates, delimiter });
 			job = r.job_id;
 			poll();
 		} catch (e) {
@@ -135,14 +203,33 @@
 	{:else if !file}
 		<label class="card flex cursor-pointer flex-col items-center gap-2 border-2 border-dashed border-slate-200 p-14 text-center hover:border-brand-400">
 			<Icon name="upload" class="size-8 text-slate-400" />
-			<span class="font-medium text-slate-800">Choose a CSV file</span>
-			<span class="text-sm text-slate-500">UTF-8, comma or semicolon separated. Phones/emails can hold several values separated by ";".</span>
-			<input type="file" accept=".csv,text/csv" class="hidden" onchange={(e) => pick(e.currentTarget.files?.[0])} />
+			<span class="font-medium text-slate-800">Choose a CSV{code === 'contact' ? ' or vCard' : ''} file</span>
+			<span class="text-sm text-slate-500">Comma or semicolon separated; phones/emails can hold several values separated by ";".</span>
+			{#if code === 'contact'}<span class="text-sm text-slate-500">Contacts exported from Gmail, Outlook or Yahoo Mail (CSV), or from phones and address books (.vcf), are recognised as they are.</span>{/if}
+			<input type="file" accept={code === 'contact' ? '.csv,.vcf,text/csv,text/vcard' : '.csv,text/csv'} class="hidden" onchange={(e) => pick(e.currentTarget.files?.[0])} />
 		</label>
+	{:else if vcard}
+		<section class="card space-y-3 p-5 text-sm" data-vcard-preview>
+			<div class="flex items-center gap-3">
+				<span class="font-medium text-slate-800">{file.name}</span>
+				<span class="text-slate-500">{vcard.count} card{vcard.count === 1 ? '' : 's'}</span>
+				<button class="btn btn-ghost ml-auto" onclick={() => ((file = null), (vcard = null))}>Choose another file</button>
+			</div>
+			{#if vcard.names.length}<p class="text-slate-600">{vcard.names.join(', ')}{vcard.count > vcard.names.length ? '…' : ''}</p>{/if}
+			<p class="text-slate-500">Names, phones, emails, the company (found or added by name), job title, address, birthday and notes are taken from each card.</p>
+		</section>
+		<section class="card flex flex-wrap items-center gap-4 p-4 text-sm">
+			<span class="font-medium text-slate-700">If a card matches an existing contact by phone or email:</span>
+			{#each [['skip', 'Skip it'], ['update', 'Update the existing contact'], ['create', 'Create a new one anyway']] as [v, l] (v)}
+				<label class="flex items-center gap-1.5"><input type="radio" class="text-brand-600" value={v} bind:group={duplicates} /> {l}</label>
+			{/each}
+			<button class="btn btn-primary ml-auto" disabled={!vcard.count} onclick={start}>Start import</button>
+		</section>
 	{:else}
 		<section class="card overflow-x-auto p-4">
 			<div class="mb-3 flex flex-wrap items-center gap-4 text-sm">
 				<span class="font-medium text-slate-800">{file.name}</span>
+				{#if source}<span class="badge bg-emerald-50 text-emerald-800" data-import-source>{source} export recognised</span>{/if}
 				<label class="flex items-center gap-2"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={hasHeader} /> First row is a header</label>
 				<label class="flex items-center gap-2">Separator <select class="input w-24" bind:value={delimiter} onchange={() => pick(file!)}><option value=",">,</option><option value=";">;</option><option value={'\t'}>Tab</option></select></label>
 				<button class="btn btn-ghost ml-auto" onclick={() => ((file = null), (header = []))}>Choose another file</button>

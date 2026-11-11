@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::{
     access::{is_crm_admin, rights},
     entity_type,
-    fields::{custom_fields, system_fields_for, system_options},
+    fields::{system_fields_for, system_options},
     EntityType,
 };
 use crate::{
@@ -127,7 +127,7 @@ async fn config(State(state): State<AppState>, auth: AuthUser, Query(_): Query<C
             "icon": t.icon,
             "categories": categories(&state, t.id).await?,
             "system_fields": system_fields_for(&t),
-            "custom_fields": custom_fields(&state, t.id).await?,
+            "custom_fields": super::fields::visible_fields(&state, &auth, t.id).await?,
             "rights": rights(&state, &auth, t.id).await?,
         }));
     }

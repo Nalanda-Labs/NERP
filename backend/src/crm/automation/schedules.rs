@@ -139,11 +139,15 @@ const CONTEXT_ONLY: &[&str] = &["contact", "client_email", "assigned_email", "am
 async fn start(state: &AppState, s: &Schedule) -> AppResult<i64> {
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(ROW_SELECT);
     qb.push(" AND i.deleted_at IS NULL AND i.category_id = ").push_bind(s.category_id);
+    let test_mode: bool = sqlx::query_scalar("SELECT automation_test_mode FROM crm_categories WHERE id = $1").bind(s.category_id).fetch_one(&state.db).await?;
     if s.stage_ids.is_empty() {
         qb.push(" AND NOT i.is_closed");
     } else {
         qb.push(" AND i.stage_id = ANY(").push_bind(s.stage_ids.clone()).push(")");
     }
+    // Test mode: only the testers' records.
+    qb.push(" AND NOT EXISTS (SELECT 1 FROM crm_categories c WHERE c.id = i.category_id AND c.automation_test_mode
+              AND NOT COALESCE(i.assigned_to = ANY(c.automation_testers), FALSE))");
     qb.push(" ORDER BY i.created_at LIMIT ").push_bind(MAX_RECORDS);
     let rows: Vec<Row> = qb.build_query_as().fetch_all(&state.db).await?;
     let pre: Vec<Value> = s
@@ -172,8 +176,8 @@ async fn start(state: &AppState, s: &Schedule) -> AppResult<i64> {
     }
     let mut tx = state.db.begin().await?;
     let runs: Vec<Uuid> = sqlx::query_scalar(
-        "INSERT INTO crm_robot_runs (schedule_id, robot_name, item_id, stage_id, category_id, action, run_at)
-         SELECT $1, $2, x.item, x.stage, $3, $4, now() FROM unnest($5::uuid[], $6::uuid[]) AS x(item, stage) RETURNING id",
+        "INSERT INTO crm_robot_runs (schedule_id, robot_name, item_id, stage_id, category_id, action, run_at, is_test)
+         SELECT $1, $2, x.item, x.stage, $3, $4, now(), $7 FROM unnest($5::uuid[], $6::uuid[]) AS x(item, stage) RETURNING id",
     )
     .bind(s.id)
     .bind(&s.name)
@@ -181,6 +185,7 @@ async fn start(state: &AppState, s: &Schedule) -> AppResult<i64> {
     .bind(&s.action)
     .bind(&items)
     .bind(&stages)
+    .bind(test_mode)
     .fetch_all(&mut *tx)
     .await?;
     sqlx::query("INSERT INTO jobs (kind, payload, run_at) SELECT $1, jsonb_build_object('run_id', r), now() FROM unnest($2::uuid[]) AS r")

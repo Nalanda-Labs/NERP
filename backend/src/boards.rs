@@ -87,9 +87,14 @@ struct Board {
     project_id: Option<Uuid>,
     locked: bool,
     updated_at: DateTime<Utc>,
+    /// Made for a feed post: its readers open it (to look or to draw, as the post says).
+    post_id: Option<Uuid>,
+    post_level: String,
+    /// Kept in the drive: the folder's people open it as the drive lets them.
+    drive_node_id: Option<Uuid>,
 }
 
-const COLS: &str = "id, owner_id, title, version, is_template, task_id, project_id, locked, updated_at";
+const COLS: &str = "id, owner_id, title, version, is_template, task_id, project_id, locked, updated_at, post_id, post_level, drive_node_id";
 
 async fn load(state: &AppState, id: Uuid) -> AppResult<Board> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLS} FROM boards WHERE id = $1"))).bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("board"))
@@ -125,6 +130,21 @@ async fn level(state: &AppState, auth: &AuthUser, b: &Board) -> AppResult<Level>
             l = l.max(if a.contribute { Level::Edit } else { Level::View });
         }
     }
+    if let Some(p) = b.post_id
+        && l < Level::Edit
+        && crate::feed::can_see_post(state, auth, p).await?
+    {
+        l = l.max(Level::parse(&b.post_level));
+    }
+    if let Some(n) = b.drive_node_id
+        && l < Level::Edit
+    {
+        l = l.max(match crate::drive::board_item_level(state, auth, n).await? {
+            2 => Level::Edit,
+            1 => Level::View,
+            _ => Level::None,
+        });
+    }
     if b.locked && l == Level::Edit {
         l = Level::View;
     }
@@ -158,6 +178,8 @@ async fn board_json(state: &AppState, b: &Board, l: Level) -> AppResult<Value> {
         "owner": { "id": b.owner_id, "name": owner.0, "avatar_file_id": owner.1 },
         "task": b.task_id.zip(task).map(|(id, (n, t))| json!({ "id": id, "number": n, "title": t })),
         "project": b.project_id.zip(project).map(|(id, n)| json!({ "id": id, "name": n })),
+        "post_id": b.post_id,
+        "drive_node_id": b.drive_node_id,
         "level": l.name(),
     }))
 }
@@ -215,6 +237,15 @@ struct NewBoard {
     scene: Option<Value>,
     task_id: Option<Uuid>,
     project_id: Option<Uuid>,
+    /// Keep it in the drive: personal, company or group (with `project_id`), or in a folder.
+    drive: Option<DrivePlace>,
+}
+
+#[derive(Deserialize)]
+struct DrivePlace {
+    space: Option<String>,
+    project_id: Option<Uuid>,
+    folder_id: Option<Uuid>,
 }
 
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<NewBoard>) -> AppResult<Json<Value>> {
@@ -250,6 +281,17 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<New
         sqlx::query("INSERT INTO board_files (board_id, file_key, file_id) VALUES ($1, $2, $3)").bind(id).bind(k).bind(f).execute(&mut *tx).await?;
     }
     tx.commit().await?;
+    if let Some(d) = &b.drive {
+        match crate::drive::add_board_item(&state, &auth, d.space.as_deref(), d.project_id, d.folder_id, &title, id).await {
+            Ok(node) => {
+                sqlx::query("UPDATE boards SET drive_node_id = $2 WHERE id = $1").bind(id).bind(node).execute(&state.db).await?;
+            }
+            Err(e) => {
+                sqlx::query("DELETE FROM boards WHERE id = $1").bind(id).execute(&state.db).await?;
+                return Err(e);
+            }
+        }
+    }
     let bd = load(&state, id).await?;
     Ok(Json(board_json(&state, &bd, Level::Owner).await?))
 }

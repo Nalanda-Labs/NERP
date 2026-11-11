@@ -63,7 +63,7 @@
 		const res = await fetch(`/api/public/forms/${encodeURIComponent(key!)}/submit`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ values, website, consent, token: form!.token, utm: utm(), page_url: pageUrl || undefined, referrer: referrer || undefined })
+			body: JSON.stringify({ values, website, consent, token: form!.token, utm: utm(), page_url: pageUrl || undefined, referrer: referrer || undefined, visitor_id: page.url.searchParams.get('vid') || undefined })
 		});
 		const data = await res.json().catch(() => ({}));
 		if (!res.ok) throw new Error(data?.error?.message ?? 'Something went wrong. Please try again.');

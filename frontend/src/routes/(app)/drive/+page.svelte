@@ -10,7 +10,7 @@
 	import { formatBytes, formatDateTime, formatRelative } from '#lib/format.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
 
-	type Entry = { id: string; kind: 'folder' | 'file'; space: string; parent_id: string | null; name: string; size_bytes: number; mime_type: string | null; version: number; owner_name: string | null; updated_by_name: string | null; updated_at: string; shared: boolean };
+	type Entry = { id: string; kind: 'folder' | 'file'; space: string; parent_id: string | null; name: string; size_bytes: number; mime_type: string | null; version: number; owner_name: string | null; updated_by_name: string | null; updated_at: string; shared: boolean; board_id?: string | null };
 	type Detail = Entry & { level: 'own' | 'edit' | 'view'; versions?: { version: number; size_bytes: number; by: string | null; at: string }[]; shares?: { user_id: string | null; department_id: string | null; level: string; name: string }[]; links?: { id: string; expires_at: string | null; downloads: number; created_at: string; password?: boolean }[]; url?: string };
 	const space = $derived(page.url.searchParams.get('space') ?? 'personal');
 	const folder = $derived(page.url.searchParams.get('folder'));
@@ -98,6 +98,7 @@
 	let shareLevel = $state<'view' | 'edit'>('view');
 	let linkDays = $state('');
 	let linkPassword = $state('');
+	let linkEdit = $state(false);
 	let linksOn = $state(true);
 	publicLinksAllowed().then((v) => (linksOn = v));
 	let newLink = $state<string | null>(null);
@@ -125,7 +126,18 @@
 	}
 	function open(e: Entry) {
 		if (e.kind === 'folder') go(space, e.id);
+		else if (e.board_id) goto(`/boards/${e.board_id}`);
 		else openDetail(e.id);
+	}
+	async function newBoard() {
+		const title = prompt('Board name');
+		if (!title?.trim()) return;
+		try {
+			const b = await api.post<{ id: string }>('/boards', { title, drive: { folder_id: folder ?? undefined, space: folder ? undefined : space, project_id: folder ? undefined : (project ?? undefined) } });
+			goto(`/boards/${b.id}`);
+		} catch (e) {
+			toasts.error(e);
+		}
 	}
 	async function rename() {
 		const name = prompt('New name', detail!.name);
@@ -154,10 +166,11 @@
 	}
 	async function makeLink() {
 		try {
-			const r = await api.post<Detail>(`/drive/nodes/${detail!.id}/links`, { expires_days: linkDays ? Number(linkDays) : null, password: linkPassword || null });
+			const r = await api.post<Detail>(`/drive/nodes/${detail!.id}/links`, { expires_days: linkDays ? Number(linkDays) : null, password: linkPassword || null, can_edit: linkEdit });
 			newLink = r.url ?? null;
 			detail = r;
 			linkPassword = '';
+			linkEdit = false;
 		} catch (e) {
 			toasts.error(e);
 		}
@@ -178,7 +191,7 @@
 		await api.del(`/drive/trash/${id}`);
 		load();
 	}
-	const icon = (e: { kind: string; mime_type?: string | null }) => (e.kind === 'folder' ? 'folder' : 'file');
+	const icon = (e: { kind: string; mime_type?: string | null; board_id?: string | null }) => (e.kind === 'folder' ? 'folder' : e.board_id ? 'board' : 'file');
 </script>
 
 <svelte:head><title>Drive · NERP</title></svelte:head>
@@ -192,6 +205,7 @@
 		<input class="input ml-auto w-60" type="search" placeholder="Find a file…" aria-label="Find a file" bind:value={q} oninput={search} />
 		{#if canAdd && space !== 'trash'}
 			<button class="btn btn-secondary" onclick={newFolder}><Icon name="folder" class="size-4" /> New folder</button>
+			<button class="btn btn-secondary" onclick={newBoard} data-new-board><Icon name="board" class="size-4" /> Board</button>
 			<label class="btn btn-primary cursor-pointer"><Icon name="upload" class="size-4" /> {busy ? 'Uploading…' : 'Upload'}<input type="file" multiple class="sr-only" aria-label="Upload files" onchange={(e) => upload((e.currentTarget as HTMLInputElement).files!)} /></label>
 		{/if}
 	</div>
@@ -268,7 +282,7 @@
 					<h3 class="font-medium">Public links</h3>
 					{#each detail.links ?? [] as l (l.id)}<div class="flex items-center gap-3 text-xs"><span class="flex-1 text-slate-600">Made {formatRelative(l.created_at)} · {l.expires_at ? `until ${formatDateTime(l.expires_at)}` : 'no end'} · {l.downloads} download{l.downloads === 1 ? '' : 's'}{l.password ? ' · password' : ''}</span><button class="text-slate-400 hover:text-red-600" onclick={() => dropLink(l.id)}>Remove</button></div>{/each}
 					{#if newLink}<code class="block rounded-lg bg-slate-50 px-3 py-2 text-xs break-all" data-link>{newLink}</code><p class="text-xs text-slate-500">Copy it now: it isn't shown again. Anyone with it can download the file.</p>{/if}
-					{#if linksOn}<div class="flex items-center gap-2"><input class="input w-24" type="number" min="1" max="365" placeholder="Days" aria-label="Days the link works" bind:value={linkDays} /><input class="input w-32" type="text" autocomplete="off" placeholder="Password" aria-label="Link password" bind:value={linkPassword} /><button class="btn btn-secondary" onclick={makeLink}>Make a link</button></div>{:else}<p class="text-xs text-amber-800" data-links-off>Links for anyone are switched off for the company.</p>{/if}
+					{#if linksOn}<div class="flex items-center gap-2"><input class="input w-24" type="number" min="1" max="365" placeholder="Days" aria-label="Days the link works" bind:value={linkDays} /><input class="input w-32" type="text" autocomplete="off" placeholder="Password" aria-label="Link password" bind:value={linkPassword} /><button class="btn btn-secondary" onclick={makeLink}>Make a link</button></div>{#if detail?.kind === 'file' && /\.(docx?|xlsx?|pptx?|od[tsp]|rtf|csv)$/i.test(detail.name)}<label class="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={linkEdit} data-link-edit /> Anyone with the link can edit it in the browser</label>{/if}{:else}<p class="text-xs text-amber-800" data-links-off>Links for anyone are switched off for the company.</p>{/if}
 				</section>
 			{/if}
 		</div>

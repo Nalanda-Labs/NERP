@@ -8,6 +8,7 @@
 	import Modal from '#lib/components/Modal.svelte';
 	import MultiUserPicker, { type PickedUser } from '#lib/components/MultiUserPicker.svelte';
 	import { crm, money, moneyShort, optionLabel } from '#lib/crm.svelte.ts';
+	import GrossProfit from '#lib/components/crm/GrossProfit.svelte';
 	import { toasts } from '#lib/toast.svelte.ts';
 
 	type Kpi = { won_count: number; won_amount: string; lost_count: number; new_count: number; new_amount: string; avg_cycle_days: number | null };
@@ -508,6 +509,8 @@
 				{/if}
 			</section>
 		</div>
+
+		<GrossProfit typeCode={report.type} from={report.period.from} to={report.period.to} {category} users={people.map((p) => p.id).join(',')} />
 
 		<p class="text-xs text-slate-400">
 			Amounts are in {cur}, converted at the rates in CRM settings. Days follow your time zone ({report.timezone}). Won and lost count by closing date; new and the funnel count by creation date. Only records you can view are included.

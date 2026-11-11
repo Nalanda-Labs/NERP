@@ -10,7 +10,7 @@
 	let { categoryId }: { categoryId: string; typeCode?: string } = $props();
 
 	type RunRow = {
-		id: string; robot_id: string | null; schedule_id: string | null; robot_name: string; action: string | null; status: string; run_at: string;
+		id: string; robot_id: string | null; schedule_id: string | null; robot_name: string; action: string | null; status: string; run_at: string; is_test?: boolean;
 		finished_at: string | null; wait_until: string | null; result: string | null; attempts: number; created_at: string;
 		item_id: string; item_title: string; item_number: number; type_code: string;
 	};
@@ -142,7 +142,7 @@
 					<tr class="align-top hover:bg-slate-50" data-run={r.id}>
 						<td class="px-5 py-2.5 whitespace-nowrap text-slate-600">{formatDateTime(r.finished_at ?? r.created_at)}</td>
 						<td class="max-w-56 px-3 py-2.5"><a class="block truncate text-brand-700 hover:underline" href="/crm/{r.type_code}/{r.item_id}">#{r.item_number} {r.item_title}</a></td>
-						<td class="px-3 py-2.5 text-slate-800">{r.robot_name}{#if r.schedule_id}<span class="ml-1.5 text-xs text-slate-400">schedule</span>{/if}</td>
+						<td class="px-3 py-2.5 text-slate-800">{r.robot_name}{#if r.schedule_id}<span class="ml-1.5 text-xs text-slate-400">schedule</span>{/if}{#if r.is_test}<span class="badge ml-1.5 bg-amber-100 text-amber-800" data-test-run>test</span>{/if}</td>
 						<td class="px-3 py-2.5 whitespace-nowrap">
 							<span class="rounded-full px-2 py-0.5 text-xs font-medium {st[1]}">{st[0]}</span>
 							{#if r.attempts}<span class="ml-1 text-xs text-slate-400">{r.attempts} retr{r.attempts === 1 ? 'y' : 'ies'}</span>{/if}

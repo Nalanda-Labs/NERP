@@ -1,4 +1,4 @@
-//! Business processes on list items.
+//! Business processes on list items (and, through `workflows_crm.rs`, on CRM records).
 //!
 //! A process is a tree of steps, run in order:
 //! - `approval`: people approve or reject (any one of them, or all); then the `approved` or
@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthUser,
-    crm::automation::system_auth,
+    crm::{automation::system_auth, entity_type_by_id, items::load_row},
     error::{AppError, AppResult},
     lists::{fields, item_row, need, Field},
     notify::{notify, NewNotification},
@@ -38,6 +38,52 @@ use crate::{
 };
 
 pub const RESUME_JOB: &str = "wf.resume";
+
+/// What a process template belongs to.
+#[derive(Clone, Copy)]
+pub enum Scope {
+    List(Uuid),
+    Crm(i16),
+}
+
+/// What a process runs on.
+#[derive(Clone, Copy)]
+pub enum Subject {
+    List(Uuid),
+    Crm(Uuid),
+}
+
+async fn template_scope(state: &AppState, id: Uuid) -> AppResult<Scope> {
+    let (list, crm): (Option<Uuid>, Option<i16>) =
+        sqlx::query_as("SELECT list_id, crm_entity_type FROM wf_templates WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("process"))?;
+    Ok(match (list, crm) {
+        (Some(l), _) => Scope::List(l),
+        (None, Some(t)) => Scope::Crm(t),
+        _ => return Err(AppError::NotFound("process")),
+    })
+}
+
+/// Reading (`read`) or designing (`manage`) a template: a list's people, or for CRM record
+/// types, people who read them / CRM administrators.
+async fn need_scope(state: &AppState, auth: &AuthUser, scope: Scope, want: &str) -> AppResult<()> {
+    match scope {
+        Scope::List(l) => need(state, auth, l, want).await.map(|_| ()),
+        Scope::Crm(t) => {
+            if want == "manage" {
+                if crate::crm::access::is_crm_admin(auth) { Ok(()) } else { Err(AppError::Forbidden) }
+            } else {
+                crate::crm::access::require_any(state, auth, t, "read").await.map(|_| ())
+            }
+        }
+    }
+}
+
+async fn scope_fields(state: &AppState, scope: Scope) -> AppResult<Vec<Field>> {
+    match scope {
+        Scope::List(l) => fields(state, l).await,
+        Scope::Crm(t) => crate::workflows_crm::fields(state, t).await,
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -174,7 +220,7 @@ async fn list_templates(State(state): State<AppState>, auth: AuthUser, Path(list
 }
 
 #[derive(Deserialize)]
-struct TemplateInput {
+pub struct TemplateInput {
     name: Option<String>,
     trigger: Option<String>,
     steps: Option<Value>,
@@ -195,15 +241,24 @@ async fn check_testers(state: &AppState, users: &Option<Vec<Uuid>>) -> AppResult
 
 async fn create_template(State(state): State<AppState>, auth: AuthUser, Path(list): Path<Uuid>, Json(b): Json<TemplateInput>) -> AppResult<Json<Value>> {
     need(&state, &auth, list, "manage").await?;
+    let fs = fields(&state, list).await?;
+    insert_template(&state, &auth, Scope::List(list), &fs, b).await
+}
+
+/// A new template for a list or a CRM record type (its designer checked by the caller).
+pub async fn insert_template(state: &AppState, auth: &AuthUser, scope: Scope, fs: &[Field], b: TemplateInput) -> AppResult<Json<Value>> {
     let name = required("name", b.name.as_deref().unwrap_or(""), 120)?;
     let trigger = b.trigger.unwrap_or_else(|| "manual".into());
     if !["create", "update", "manual"].contains(&trigger.as_str()) {
         return Err(AppError::bad("start on create, update or by hand"));
     }
-    let fs = fields(&state, list).await?;
-    let steps = clean_steps(&b.steps.unwrap_or(json!([])), &fs, 0, &mut 0)?;
-    check_testers(&state, &b.test_users).await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO wf_templates (list_id, name, trigger, steps, is_active, created_by, test_users) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id")
+    let steps = clean_steps(&b.steps.unwrap_or(json!([])), fs, 0, &mut 0)?;
+    check_testers(state, &b.test_users).await?;
+    let (list, crm) = match scope {
+        Scope::List(l) => (Some(l), None),
+        Scope::Crm(t) => (None, Some(t)),
+    };
+    let id: Uuid = sqlx::query_scalar("INSERT INTO wf_templates (list_id, crm_entity_type, name, trigger, steps, is_active, created_by, test_users) VALUES ($1, $8, $2, $3, $4, $5, $6, $7) RETURNING id")
         .bind(list)
         .bind(&name)
         .bind(&trigger)
@@ -211,9 +266,10 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Path(lis
         .bind(b.is_active.unwrap_or(true))
         .bind(auth.id)
         .bind(b.test_users.clone().unwrap_or_default())
+        .bind(crm)
         .fetch_one(&state.db)
         .await?;
-    get_template(State(state), auth, Path(id)).await
+    get_template(State(state.clone()), auth.clone(), Path(id)).await
 }
 
 #[derive(Deserialize)]
@@ -225,11 +281,12 @@ struct LogQuery {
 /// Everything a process recorded, over all its runs, in a period (newest first, at most 1000):
 /// what the list's managers look at while testing it.
 async fn template_log(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Query(q): Query<LogQuery>) -> AppResult<Json<Value>> {
-    let list = template_list(&state, id).await?;
-    need(&state, &auth, list, "manage").await?;
+    let scope = template_scope(&state, id).await?;
+    need_scope(&state, &auth, scope, "manage").await?;
     let rows: Vec<(chrono::DateTime<Utc>, String, Option<String>, Uuid, String, i64, Uuid, String)> = sqlx::query_as(
-        "SELECT l.at, l.text, trim(u.first_name || ' ' || u.last_name), w.id, i.title, i.number, i.id, w.status
-         FROM wf_log l JOIN wf_instances w ON w.id = l.instance_id JOIN list_items i ON i.id = w.item_id LEFT JOIN users u ON u.id = l.user_id
+        "SELECT l.at, l.text, trim(u.first_name || ' ' || u.last_name), w.id, COALESCE(i.title, c.title), COALESCE(i.number, c.number), COALESCE(i.id, c.id), w.status
+         FROM wf_log l JOIN wf_instances w ON w.id = l.instance_id LEFT JOIN list_items i ON i.id = w.item_id LEFT JOIN crm_items c ON c.id = w.crm_item_id
+         LEFT JOIN users u ON u.id = l.user_id
          WHERE w.template_id = $1 AND ($2::timestamptz IS NULL OR l.at >= $2) AND ($3::timestamptz IS NULL OR l.at < $3)
          ORDER BY l.at DESC LIMIT 1000",
     )
@@ -243,26 +300,26 @@ async fn template_log(State(state): State<AppState>, auth: AuthUser, Path(id): P
     })).collect::<Vec<_>>() })))
 }
 
-async fn template_list(state: &AppState, id: Uuid) -> AppResult<Uuid> {
-    sqlx::query_scalar("SELECT list_id FROM wf_templates WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("process"))
-}
-
 async fn get_template(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let list = template_list(&state, id).await?;
-    need(&state, &auth, list, "read").await?;
+    let scope = template_scope(&state, id).await?;
+    need_scope(&state, &auth, scope, "read").await?;
     let (name, trigger, steps, active, testers): (String, String, Value, bool, Vec<Uuid>) = sqlx::query_as("SELECT name, trigger, steps, is_active, test_users FROM wf_templates WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    Ok(Json(json!({ "id": id, "list_id": list, "name": name, "trigger": trigger, "steps": steps, "is_active": active, "test_users": testers })))
+    let (list, crm_type, fs) = match scope {
+        Scope::List(l) => (Some(l), None, None),
+        Scope::Crm(t) => (None, Some(entity_type_by_id(&state, t).await?.code), Some(crate::workflows_crm::fields(&state, t).await?)),
+    };
+    Ok(Json(json!({ "id": id, "list_id": list, "crm_type": crm_type, "fields": fs, "name": name, "trigger": trigger, "steps": steps, "is_active": active, "test_users": testers })))
 }
 
 async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<TemplateInput>) -> AppResult<Json<Value>> {
-    let list = template_list(&state, id).await?;
-    need(&state, &auth, list, "manage").await?;
+    let scope = template_scope(&state, id).await?;
+    need_scope(&state, &auth, scope, "manage").await?;
     let name = b.name.as_deref().map(|n| required("name", n, 120)).transpose()?;
     if b.trigger.as_ref().is_some_and(|t| !["create", "update", "manual"].contains(&t.as_str())) {
         return Err(AppError::bad("start on create, update or by hand"));
     }
     let steps = match &b.steps {
-        Some(v) => Some(clean_steps(v, &fields(&state, list).await?, 0, &mut 0)?),
+        Some(v) => Some(clean_steps(v, &scope_fields(&state, scope).await?, 0, &mut 0)?),
         None => None,
     };
     check_testers(&state, &b.test_users).await?;
@@ -280,8 +337,8 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
 
 /// Processes already running carry on with their own copy of the steps.
 async fn delete_template(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let list = template_list(&state, id).await?;
-    need(&state, &auth, list, "manage").await?;
+    let scope = template_scope(&state, id).await?;
+    need_scope(&state, &auth, scope, "manage").await?;
     sqlx::query("DELETE FROM wf_templates WHERE id = $1").bind(id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -305,22 +362,27 @@ pub async fn on_item(state: &AppState, auth: &AuthUser, list: Uuid, item: Uuid, 
     .await
     .unwrap_or_default();
     for t in templates {
-        if let Err(e) = start(state, t, item, Some(auth.id)).await {
+        if let Err(e) = start(state, t, Subject::List(item), Some(auth.id)).await {
             tracing::warn!(template = %t, item = %item, error = ?e, "business process could not start");
         }
     }
 }
 
-async fn start(state: &AppState, template: Uuid, item: Uuid, by: Option<Uuid>) -> AppResult<Uuid> {
+pub async fn start(state: &AppState, template: Uuid, subject: Subject, by: Option<Uuid>) -> AppResult<Uuid> {
     let (name, steps): (String, Value) = sqlx::query_as("SELECT name, steps FROM wf_templates WHERE id = $1").bind(template).fetch_one(&state.db).await?;
     let cursor = json!([Frame { at: vec![], idx: 0 }]);
-    let id: Uuid = sqlx::query_scalar("INSERT INTO wf_instances (template_id, name, item_id, steps, cursor, started_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id")
+    let (item, crm) = match subject {
+        Subject::List(i) => (Some(i), None),
+        Subject::Crm(i) => (None, Some(i)),
+    };
+    let id: Uuid = sqlx::query_scalar("INSERT INTO wf_instances (template_id, name, item_id, crm_item_id, steps, cursor, started_by) VALUES ($1, $2, $3, $7, $4, $5, $6) RETURNING id")
         .bind(template)
         .bind(&name)
         .bind(item)
         .bind(&steps)
         .bind(cursor)
         .bind(by)
+        .bind(crm)
         .fetch_one(&state.db)
         .await?;
     log(state, id, by, "Started".into()).await;
@@ -342,7 +404,7 @@ async fn start_manual(State(state): State<AppState>, auth: AuthUser, Path((item,
     if running {
         return Err(AppError::bad("this process is already running on the item"));
     }
-    start(&state, template, item, Some(auth.id)).await?;
+    start(&state, template, Subject::List(item), Some(auth.id)).await?;
     Ok(Json(item_processes(&state, item).await?))
 }
 
@@ -350,19 +412,54 @@ async fn log(state: &AppState, instance: Uuid, user: Option<Uuid>, text: String)
     let _ = sqlx::query("INSERT INTO wf_log (instance_id, user_id, text) VALUES ($1, $2, $3)").bind(instance).bind(user).bind(text).execute(&state.db).await;
 }
 
+/// What a process runs on, as it sees it: a list item, or a CRM record (whose responsible
+/// person stands in for the author).
 struct Item {
     id: Uuid,
-    list_id: Uuid,
+    list_id: Option<Uuid>,
+    /// CRM records: their type's code (for links).
+    crm_code: Option<String>,
     number: i64,
     title: String,
     values: Value,
     author: Option<Uuid>,
 }
 
+impl Item {
+    fn link(&self) -> String {
+        match (&self.list_id, &self.crm_code) {
+            (Some(l), _) => format!("/lists/{l}?item={}", self.id),
+            (None, Some(c)) => format!("/crm/{c}/{}", self.id),
+            _ => "/".into(),
+        }
+    }
+}
+
 async fn item(state: &AppState, id: Uuid) -> AppResult<Item> {
     let (list_id, number, title, values, author): (Uuid, i64, String, Value, Option<Uuid>) =
         sqlx::query_as("SELECT list_id, number, title, \"values\", created_by FROM list_items WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    Ok(Item { id, list_id, number, title, values, author })
+    Ok(Item { id, list_id: Some(list_id), crm_code: None, number, title, values, author })
+}
+
+async fn subject_item(state: &AppState, s: Subject) -> AppResult<Item> {
+    match s {
+        Subject::List(i) => item(state, i).await,
+        Subject::Crm(i) => {
+            let (r, values) = crate::workflows_crm::values(state, i).await?;
+            let code = entity_type_by_id(state, r.entity_type).await?.code;
+            Ok(Item { id: i, list_id: None, crm_code: Some(code), number: r.number, title: r.title, values, author: r.assigned_to })
+        }
+    }
+}
+
+/// The subject of an instance.
+async fn instance_subject(state: &AppState, id: Uuid) -> AppResult<Subject> {
+    let (item, crm): (Option<Uuid>, Option<Uuid>) = sqlx::query_as("SELECT item_id, crm_item_id FROM wf_instances WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    match (item, crm) {
+        (Some(i), _) => Ok(Subject::List(i)),
+        (None, Some(c)) => Ok(Subject::Crm(c)),
+        _ => Err(AppError::NotFound("process")),
+    }
 }
 
 /// Fills {{title}}, {{number}}, {{author}} and field codes.
@@ -421,25 +518,29 @@ async fn finish(state: &AppState, id: Uuid, status: &str, text: String) -> AppRe
     sqlx::query("UPDATE wf_instances SET status = $2, finished_at = now(), cursor = '[]' WHERE id = $1").bind(id).bind(status).execute(&state.db).await?;
     sqlx::query("UPDATE wf_approvals SET status = 'cancelled' WHERE instance_id = $1 AND status = 'pending'").bind(id).execute(&state.db).await?;
     log(state, id, None, text).await;
-    // The author hears how it ended.
-    let (item_id, name): (Uuid, String) = sqlx::query_as("SELECT item_id, name FROM wf_instances WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    let it = item(state, item_id).await?;
+    // The author (a record's responsible person) hears how it ended.
+    let name: String = sqlx::query_scalar("SELECT name FROM wf_instances WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let it = subject_item(state, instance_subject(state, id).await?).await?;
     if let Some(a) = it.author {
         let how = match status { "completed" => "is complete", "rejected" => "was rejected", "cancelled" => "was cancelled", _ => "stopped with an error" };
-        notify(state, &[a], NewNotification { kind: "workflow.done", title: format!("“{name}” {how}: {}", it.title), body: None, link: Some(format!("/lists/{}?item={}", it.list_id, it.id)), actor: None }).await;
+        notify(state, &[a], NewNotification { kind: "workflow.done", title: format!("“{name}” {how}: {}", it.title), body: None, link: Some(it.link()), actor: None }).await;
     }
     Ok(())
 }
 
 /// Runs the process from where it is until it waits or ends.
 pub async fn run(state: &AppState, id: Uuid) -> AppResult<()> {
-    let (status, steps, cursor, item_id): (String, Value, Value, Uuid) = sqlx::query_as("SELECT status, steps, cursor, item_id FROM wf_instances WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (status, steps, cursor): (String, Value, Value) = sqlx::query_as("SELECT status, steps, cursor FROM wf_instances WHERE id = $1").bind(id).fetch_one(&state.db).await?;
     if !["running", "waiting"].contains(&status.as_str()) {
         return Ok(());
     }
     let mut stack: Vec<Frame> = serde_json::from_value(cursor).unwrap_or_default();
-    let mut it = item(state, item_id).await?;
-    let fs = fields(state, it.list_id).await?;
+    let subject = instance_subject(state, id).await?;
+    let mut it = subject_item(state, subject).await?;
+    let fs = match subject {
+        Subject::List(_) => fields(state, it.list_id.unwrap_or_default()).await?,
+        Subject::Crm(c) => crate::workflows_crm::fields(state, load_row(state, c, false).await?.entity_type).await?,
+    };
     sqlx::query("UPDATE wf_instances SET status = 'running' WHERE id = $1").bind(id).execute(&state.db).await?;
     for _ in 0..500 {
         let Some(frame) = stack.last().cloned() else {
@@ -469,7 +570,7 @@ pub async fn run(state: &AppState, id: Uuid) -> AppResult<()> {
             "notify" => {
                 let who = people(state, &step["who"], &it).await?;
                 let text = fill(state, &s(&step, "text"), &it).await;
-                notify(state, &who, NewNotification { kind: "workflow.notify", title: text.clone(), body: Some(it.title.clone()), link: Some(format!("/lists/{}?item={}", it.list_id, it.id)), actor: None }).await;
+                notify(state, &who, NewNotification { kind: "workflow.notify", title: text.clone(), body: Some(it.title.clone()), link: Some(it.link()), actor: None }).await;
                 log(state, id, None, format!("Notified {} {}: {text}", who.len(), if who.len() == 1 { "person" } else { "people" })).await;
             }
             "task" => {
@@ -495,6 +596,23 @@ pub async fn run(state: &AppState, id: Uuid) -> AppResult<()> {
                     save(state, id, &stack, "waiting").await?;
                     log(state, id, None, format!("Waiting for {} to be done", if made.len() == 1 { "the task".to_string() } else { format!("{} tasks", made.len()) })).await;
                     return Ok(());
+                }
+            }
+            "set_field" if matches!(subject, Subject::Crm(_)) => {
+                let field = s(&step, "field");
+                let value = fill(state, &s(&step, "value"), &it).await;
+                let label = fs.iter().find(|f| f.code == field).map(|f| f.label.clone()).unwrap_or(field.clone());
+                match crate::workflows_crm::set_field(state, it.id, &field, &value).await {
+                    Ok(()) => {
+                        it = subject_item(state, subject).await?;
+                        log(state, id, None, format!("Set “{label}” to “{value}”")).await;
+                    }
+                    Err(e) => {
+                        let msg = format!("could not set “{label}”: {e}");
+                        sqlx::query("UPDATE wf_instances SET status = 'failed', error = $2, finished_at = now() WHERE id = $1").bind(id).bind(&msg).execute(&state.db).await?;
+                        log(state, id, None, format!("Stopped: {msg}")).await;
+                        return Ok(());
+                    }
                 }
             }
             "set_field" => {
@@ -542,6 +660,7 @@ pub async fn run(state: &AppState, id: Uuid) -> AppResult<()> {
                     .await?;
                 save(state, id, &stack, "waiting").await?;
                 // A request started from the feed: its approvers see its post.
+                if it.list_id.is_some() {
                 sqlx::query(
                     "INSERT INTO feed_audience (post_id, user_id) SELECT p.id, u FROM feed_posts p, UNNEST($2::uuid[]) u
                      WHERE p.list_item_id = $1 AND NOT EXISTS (SELECT 1 FROM feed_audience a WHERE a.post_id = p.id AND a.user_id = u)",
@@ -550,6 +669,7 @@ pub async fn run(state: &AppState, id: Uuid) -> AppResult<()> {
                 .bind(&who)
                 .execute(&state.db)
                 .await?;
+                }
                 notify(state, &who, NewNotification { kind: "workflow.approval", title: format!("Please approve: {title}"), body: Some(it.title.clone()), link: Some("/approvals".into()), actor: None }).await;
                 crate::realtime::publish(state, Some(who.clone()), "approvals.changed", json!({})).await;
                 log(state, id, None, format!("Waiting for approval: {title}")).await;
@@ -602,28 +722,49 @@ pub async fn task_done(state: &AppState, task: Uuid) {
 }
 
 async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let (item_id, started_by, status): (Uuid, Option<Uuid>, String) = sqlx::query_as("SELECT item_id, started_by, status FROM wf_instances WHERE id = $1")
+    let (started_by, status): (Option<Uuid>, String) = sqlx::query_as("SELECT started_by, status FROM wf_instances WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("process"))?;
-    let (list, _) = item_row(&state, item_id).await?;
-    let l = need(&state, &auth, list, "read").await?;
-    if l != "manage" && started_by != Some(auth.id) {
-        return Err(AppError::Forbidden);
+    let subject = instance_subject(&state, id).await?;
+    match subject {
+        Subject::List(item_id) => {
+            let (list, _) = item_row(&state, item_id).await?;
+            let l = need(&state, &auth, list, "read").await?;
+            if l != "manage" && started_by != Some(auth.id) {
+                return Err(AppError::Forbidden);
+            }
+        }
+        Subject::Crm(c) => {
+            let r = load_row(&state, c, false).await?;
+            crate::crm::access::require_read(&state, &auth, r.entity_type, c, r.assigned_to).await?;
+            if !crate::crm::access::is_crm_admin(&auth) && started_by != Some(auth.id) {
+                return Err(AppError::Forbidden);
+            }
+        }
     }
     if !["running", "waiting"].contains(&status.as_str()) {
         return Err(AppError::bad("this process has already ended"));
     }
     let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
     finish(&state, id, "cancelled", format!("Cancelled by {name}")).await?;
-    Ok(Json(item_processes(&state, item_id).await?))
+    Ok(Json(processes_of(&state, subject).await?))
 }
 
 /// An item's processes, newest first, with their log and approvals.
 pub async fn item_processes(state: &AppState, item: Uuid) -> AppResult<Value> {
+    processes_of(state, Subject::List(item)).await
+}
+
+/// A list item's or CRM record's processes, newest first, with their log and approvals.
+pub async fn processes_of(state: &AppState, subject: Subject) -> AppResult<Value> {
+    let (col, item) = match subject {
+        Subject::List(i) => ("item_id", i),
+        Subject::Crm(i) => ("crm_item_id", i),
+    };
     let rows: Vec<(Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<String>)> =
-        sqlx::query_as("SELECT id, name, status, started_at, finished_at, error FROM wf_instances WHERE item_id = $1 ORDER BY started_at DESC").bind(item).fetch_all(&state.db).await?;
+        sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id, name, status, started_at, finished_at, error FROM wf_instances WHERE {col} = $1 ORDER BY started_at DESC"))).bind(item).fetch_all(&state.db).await?;
     let mut out = Vec::new();
     for (id, name, status, started, finished, error) in rows {
         let log: Vec<(String, Option<String>, chrono::DateTime<Utc>)> = sqlx::query_as(
@@ -647,19 +788,23 @@ pub async fn item_processes(state: &AppState, item: Uuid) -> AppResult<Value> {
 // ---------------------------------------------------------------------------
 
 async fn my_approvals(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, String, String, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>, Uuid, String, i64, Uuid, String, Option<String>, Value)> = sqlx::query_as(
-        "SELECT a.id, a.title, a.mode, a.due_at, a.created_at, i.id, i.title, i.number, l.id, l.name, trim(u.first_name || ' ' || u.last_name), a.decisions
-         FROM wf_approvals a JOIN wf_instances w ON w.id = a.instance_id JOIN list_items i ON i.id = w.item_id JOIN lists l ON l.id = i.list_id
-         LEFT JOIN users u ON u.id = i.created_by
+    let rows: Vec<(Uuid, String, String, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>, Uuid, String, i64, Option<Uuid>, String, Option<String>, Value, Option<String>)> = sqlx::query_as(
+        "SELECT a.id, a.title, a.mode, a.due_at, a.created_at, COALESCE(i.id, c.id), COALESCE(i.title, c.title), COALESCE(i.number, c.number), l.id,
+                COALESCE(l.name, et.name_plural), trim(u.first_name || ' ' || u.last_name), a.decisions, et.code
+         FROM wf_approvals a JOIN wf_instances w ON w.id = a.instance_id
+         LEFT JOIN list_items i ON i.id = w.item_id LEFT JOIN lists l ON l.id = i.list_id
+         LEFT JOIN crm_items c ON c.id = w.crm_item_id LEFT JOIN crm_entity_types et ON et.id = c.entity_type
+         LEFT JOIN users u ON u.id = COALESCE(i.created_by, c.assigned_to)
          WHERE a.status = 'pending' AND $1 = ANY(a.approvers) AND NOT a.decisions @> jsonb_build_array(jsonb_build_object('user_id', $1::text))
          ORDER BY a.created_at",
     )
     .bind(auth.id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(json!({ "items": rows.into_iter().map(|(id, title, mode, due, created, item_id, item_title, number, list_id, list_name, author, decisions)| json!({
+    Ok(Json(json!({ "items": rows.into_iter().map(|(id, title, mode, due, created, item_id, item_title, number, list_id, list_name, author, decisions, crm_code)| json!({
         "id": id, "title": title, "mode": mode, "due_at": due, "created_at": created, "item_id": item_id, "item_title": item_title, "number": number,
         "list_id": list_id, "list_name": list_name, "author": author, "decisions": decisions,
+        "link": match (&list_id, &crm_code) { (Some(l), _) => format!("/lists/{l}?item={item_id}"), (None, Some(c)) => format!("/crm/{c}/{item_id}"), _ => "/".into() },
     })).collect::<Vec<_>>() })))
 }
 

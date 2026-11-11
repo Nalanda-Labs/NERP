@@ -48,7 +48,7 @@
 <section class="card" data-app-passwords>
 	<div class="border-b border-slate-100 px-6 py-3.5">
 		<h2 class="font-semibold text-slate-900">App passwords</h2>
-		<p class="text-sm text-slate-500">For calendar apps on your phone or computer (Apple Calendar, Thunderbird, DAVx5 on Android…). They only work for those apps, not for signing in here.</p>
+		<p class="text-sm text-slate-500">For calendar and contacts apps on your phone or computer (Apple Calendar and Contacts, Thunderbird, DAVx5 on Android…): your calendar, and the company's employee list as an address book. They only work for those apps, not for signing in here.</p>
 	</div>
 	<div class="space-y-3 px-6 py-4 text-sm">
 		{#if made}
@@ -59,7 +59,7 @@
 					<dt>User name</dt><dd><code class="break-all">{session.user?.email}</code></dd>
 					<dt>Password</dt><dd><code class="text-base font-semibold tracking-wide" data-password>{made.password}</code></dd>
 				</dl>
-				<p class="text-xs text-emerald-800">In most apps choose “CalDAV account” (on iPhone: Settings → Calendar → Accounts → Add Account → Other).</p>
+				<p class="text-xs text-emerald-800">In most apps choose “CalDAV account” for the calendar and “CardDAV account” for the employee list, with the same server and password (on iPhone: Settings → Calendar or Contacts → Accounts → Add Account → Other).</p>
 				<button class="btn btn-secondary" onclick={() => (made = null)}>Done</button>
 			</div>
 		{/if}

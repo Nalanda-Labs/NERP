@@ -26,7 +26,7 @@ pub use schedules::{run_due as schedules_due, JOB as SCHEDULE_JOB};
 
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
@@ -76,6 +76,7 @@ fn depth() -> u32 {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/crm/automation", get(overview))
+        .route("/crm/automation/test-mode", put(set_test_mode))
         .route("/crm/robots", post(create_robot))
         .route("/crm/robots/{id}", patch(update_robot).delete(delete_robot))
         .route("/crm/robot-order", post(order_robots))
@@ -321,6 +322,19 @@ async fn enqueue_run(state: &AppState, run: Uuid, at: DateTime<Utc>, timeout: bo
 
 /// Called after a record entered a stage (created in it or moved to it). Never fails the
 /// caller: problems are logged.
+/// Test mode of a pipeline's automation: `None` when the record is left alone (test mode is on
+/// and its responsible person isn't a tester), otherwise whether the run is a test run.
+pub async fn test_gate(state: &AppState, category: Uuid, assigned: Option<Uuid>) -> AppResult<Option<bool>> {
+    let mode: Option<(bool, Vec<Uuid>)> = sqlx::query_as("SELECT automation_test_mode, automation_testers FROM crm_categories WHERE id = $1")
+        .bind(category)
+        .fetch_optional(&state.db)
+        .await?;
+    Ok(match mode {
+        Some((true, testers)) => assigned.filter(|a| testers.contains(a)).map(|_| true),
+        _ => Some(false),
+    })
+}
+
 pub async fn stage_entered(state: &AppState, item: Uuid, stage: Uuid) {
     if let Err(e) = schedule(state, item, stage).await {
         tracing::warn!(item = %item, error = ?e, "could not schedule robots");
@@ -365,6 +379,9 @@ async fn schedule(state: &AppState, item: Uuid, stage: Uuid) -> AppResult<()> {
         return Ok(());
     }
     let row = load_row(state, item, false).await?;
+    let Some(is_test) = test_gate(state, robots[0].category_id, row.assigned_to).await? else {
+        return Ok(());
+    };
     let record = serde_json::to_value(&row).unwrap_or_default();
     let tz = record_tz(state, row.assigned_to).await;
     let now = Utc::now();
@@ -378,8 +395,8 @@ async fn schedule(state: &AppState, item: Uuid, stage: Uuid) -> AppResult<()> {
             },
         };
         let run: Uuid = sqlx::query_scalar(
-            "INSERT INTO crm_robot_runs (robot_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, status, result, after_run, finished_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CASE WHEN $9 = 'skipped' THEN now() END) RETURNING id",
+            "INSERT INTO crm_robot_runs (robot_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, status, result, after_run, finished_at, is_test)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CASE WHEN $9 = 'skipped' THEN now() END, $12) RETURNING id",
         )
         .bind(r.id)
         .bind(&r.name)
@@ -392,6 +409,7 @@ async fn schedule(state: &AppState, item: Uuid, stage: Uuid) -> AppResult<()> {
         .bind(status)
         .bind(result)
         .bind(if status == "pending" { previous } else { None })
+        .bind(is_test)
         .fetch_one(&state.db)
         .await?;
         if status == "scheduled" {
@@ -687,7 +705,7 @@ pub struct Trigger {
 const TRIGGER_COLUMNS: &str = "id, entity_type, category_id, stage_id, name, event, params, conditions, allow_backwards, token, sort, is_active, created_at, updated_at";
 /// Events a robot can wait for.
 const WAIT_EVENTS: &[&str] = &["email_received", "activity_done"];
-const EVENTS: &[&str] = &["activity_done", "comment_added", "document_created", "email_received", "webform_submitted", "webhook", "signature_completed", "signature_declined"];
+const EVENTS: &[&str] = &["activity_done", "comment_added", "document_created", "email_received", "webform_submitted", "webhook", "signature_completed", "signature_declined", "tasks_done"];
 
 /// An event happened on a record: the first matching trigger of its pipeline moves it.
 /// `matches` checks the trigger's event parameters. Never fails the caller.
@@ -740,6 +758,9 @@ async fn try_fire(state: &AppState, item: Uuid, event: &str, only: Option<Uuid>,
     let sorts: Vec<(Uuid, i32)> = sqlx::query_as("SELECT id, sort FROM crm_stages WHERE category_id = $1").bind(category).fetch_all(&state.db).await?;
     let sort_of = |s: Uuid| sorts.iter().find(|x| x.0 == s).map(|x| x.1).unwrap_or(0);
     let ctx = context(state, item).await?;
+    let Some(is_test) = test_gate(state, category, ctx.row.assigned_to).await? else {
+        return Ok(false);
+    };
     for t in triggers {
         if t.stage_id == stage || !matches(&t.params) || !conditions_hold(&t.conditions, &ctx.value) {
             continue;
@@ -751,7 +772,7 @@ async fn try_fire(state: &AppState, item: Uuid, event: &str, only: Option<Uuid>,
         let mut body = Map::new();
         body.insert("stage_id".into(), json!(t.stage_id));
         update_item(state, &system_auth(), &et, item, body).await?;
-        timeline(&state.db, item, "trigger", Some(SYSTEM_USER), None, json!({ "name": t.name, "event": event })).await?;
+        timeline(&state.db, item, "trigger", Some(SYSTEM_USER), None, json!({ "name": t.name, "event": event, "test": is_test })).await?;
         return Ok(true);
     }
     Ok(false)
@@ -818,12 +839,51 @@ async fn overview(State(state): State<AppState>, auth: AuthUser, Query(q): Query
         .await?;
     let et: i16 = sqlx::query_scalar("SELECT entity_type FROM crm_categories WHERE id = $1").bind(q.category_id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("pipeline"))?;
     let date_fields: Vec<Value> = date_fields(&state, et).await?.into_iter().map(|(code, label)| json!({ "code": code, "label": label })).collect();
+    let (test_mode, testers): (bool, Vec<Uuid>) =
+        sqlx::query_as("SELECT automation_test_mode, automation_testers FROM crm_categories WHERE id = $1").bind(q.category_id).fetch_one(&state.db).await?;
     Ok(Json(json!({
+        "test_mode": { "enabled": test_mode, "user_ids": testers },
         "robots": robots,
         "triggers": triggers,
         "date_fields": date_fields,
         "webhook_base": format!("{}/api/crm/automation/webhook/", state.config.public_url),
     })))
+}
+
+#[derive(Deserialize)]
+struct TestMode {
+    category_id: Uuid,
+    enabled: bool,
+    #[serde(default)]
+    user_ids: Vec<Uuid>,
+}
+
+/// Turns a pipeline's test mode on (for the chosen testers' records only) or off.
+async fn set_test_mode(State(state): State<AppState>, auth: AuthUser, Json(mut b): Json<TestMode>) -> AppResult<Json<Value>> {
+    require_admin(&auth)?;
+    b.user_ids.sort();
+    b.user_ids.dedup();
+    if b.enabled && b.user_ids.is_empty() {
+        return Err(AppError::bad("choose who tests the automation"));
+    }
+    if b.user_ids.len() > 50 {
+        return Err(AppError::bad("choose at most 50 testers"));
+    }
+    let known: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND NOT is_guest").bind(&b.user_ids).fetch_one(&state.db).await?;
+    if known as usize != b.user_ids.len() {
+        return Err(AppError::bad("choose employees"));
+    }
+    let n = sqlx::query("UPDATE crm_categories SET automation_test_mode = $2, automation_testers = $3 WHERE id = $1")
+        .bind(b.category_id)
+        .bind(b.enabled)
+        .bind(&b.user_ids)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        return Err(AppError::NotFound("pipeline"));
+    }
+    Ok(Json(json!({ "enabled": b.enabled, "user_ids": b.user_ids })))
 }
 
 /// The stage must belong to the pipeline, and the pipeline to a record type with stages.
@@ -1084,7 +1144,8 @@ fn check_trigger_params(event: &str, p: Value) -> AppResult<Value> {
                 out.insert("sign_template_id".into(), json!(t));
             }
         }
-        "comment_added" | "email_received" | "webhook" => {}
+        // Every task linked to the record is done (a stage's tasks finished: move on).
+        "comment_added" | "email_received" | "webhook" | "tasks_done" => {}
         _ => return Err(AppError::bad(format!("event must be one of {}", EVENTS.join(", ")))),
     }
     Ok(Value::Object(out))
@@ -1162,6 +1223,7 @@ struct Run {
     wait_until: Option<DateTime<Utc>>,
     attempts: i32,
     schedule_id: Option<Uuid>,
+    is_test: bool,
 }
 
 /// A record's automation log: scheduled (waiting) and recent robot runs.
@@ -1169,7 +1231,7 @@ async fn item_runs(State(state): State<AppState>, auth: AuthUser, Path(item): Pa
     let row = load_row(&state, item, false).await?;
     super::access::require_read(&state, &auth, row.entity_type, item, row.assigned_to).await?;
     let runs: Vec<Run> = sqlx::query_as(
-        "SELECT id, robot_id, robot_name, status, run_at, finished_at, result, wait_until, attempts, schedule_id FROM crm_robot_runs WHERE item_id = $1 ORDER BY created_at DESC LIMIT 100",
+        "SELECT id, robot_id, robot_name, status, run_at, finished_at, result, wait_until, attempts, schedule_id, is_test FROM crm_robot_runs WHERE item_id = $1 ORDER BY created_at DESC LIMIT 100",
     )
     .bind(item)
     .fetch_all(&state.db)

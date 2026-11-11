@@ -27,6 +27,8 @@
 		username: string;
 		allow_invalid_certs: boolean;
 		shared_with: string[];
+		shared_roles?: string[];
+		shared_departments?: string[];
 		create_leads: boolean;
 		sync_days: number;
 		sync_enabled: boolean;
@@ -73,7 +75,10 @@
 	}
 	const PROVIDER_NAME = { google: 'Google', microsoft: 'Microsoft', password: '' };
 
-	type Draft = Omit<Mailbox, 'id' | 'last_sync_at' | 'last_error' | 'is_owner' | 'shared_with' | 'auth_kind'> & { id: string | null; password: string; shared: PickedUser[]; auth_kind: Mailbox['auth_kind'] };
+	type Draft = Omit<Mailbox, 'id' | 'last_sync_at' | 'last_error' | 'is_owner' | 'shared_with' | 'auth_kind'> & { id: string | null; password: string; shared: PickedUser[]; auth_kind: Mailbox['auth_kind']; shared_roles: string[]; shared_departments: string[] };
+	// Sharing by role and department (with sub-departments).
+	let roles = $state<{ id: string; name: string }[]>([]);
+	let departments = $state<{ id: string; name: string }[]>([]);
 	let draft = $state<Draft | null>(null);
 	let open = $state(false);
 	let saving = $state(false);
@@ -91,9 +96,11 @@
 				/* user gone */
 			}
 		}
+		if (!roles.length) roles = await api.get<{ id: string; name: string }[]>('/roles').catch(() => []);
+		if (!departments.length) departments = await api.get<{ id: string; name: string }[]>('/departments').catch(() => []);
 		draft = m
-			? { ...m, password: '', shared }
-			: { id: null, auth_kind: 'password', email: '', display_name: '', imap_host: '', imap_port: 993, imap_security: 'tls', smtp_host: '', smtp_port: 587, smtp_security: 'starttls', smtp_auth: true, username: '', allow_invalid_certs: false, create_leads: false, sync_days: 7, sync_enabled: true, password: '', shared: [] };
+			? { ...m, password: '', shared, shared_roles: [...(m.shared_roles ?? [])], shared_departments: [...(m.shared_departments ?? [])] }
+			: { id: null, auth_kind: 'password', email: '', display_name: '', imap_host: '', imap_port: 993, imap_security: 'tls', smtp_host: '', smtp_port: 587, smtp_security: 'starttls', smtp_auth: true, username: '', allow_invalid_certs: false, create_leads: false, sync_days: 7, sync_enabled: true, password: '', shared: [], shared_roles: [], shared_departments: [] };
 		open = true;
 	}
 
@@ -110,12 +117,13 @@
 
 	function body() {
 		const d = draft!;
-		if (d.auth_kind !== 'password') return { display_name: d.display_name, create_leads: d.create_leads, sync_days: Number(d.sync_days), sync_enabled: d.sync_enabled, shared_with: d.shared.map((u) => u.id) };
+		const sharing = { shared_with: d.shared.map((u) => u.id), shared_roles: d.shared_roles, shared_departments: d.shared_departments };
+		if (d.auth_kind !== 'password') return { display_name: d.display_name, create_leads: d.create_leads, sync_days: Number(d.sync_days), sync_enabled: d.sync_enabled, ...sharing };
 		return {
 			email: d.email, display_name: d.display_name, imap_host: d.imap_host, imap_port: Number(d.imap_port), imap_security: d.imap_security,
 			smtp_host: d.smtp_host, smtp_port: Number(d.smtp_port), smtp_security: d.smtp_security, smtp_auth: d.smtp_auth,
 			username: d.username || d.email, password: d.password || undefined, allow_invalid_certs: d.allow_invalid_certs,
-			create_leads: d.create_leads, sync_days: Number(d.sync_days), sync_enabled: d.sync_enabled, shared_with: d.shared.map((u) => u.id)
+			create_leads: d.create_leads, sync_days: Number(d.sync_days), sync_enabled: d.sync_enabled, ...sharing
 		};
 	}
 
@@ -258,6 +266,19 @@
 				<span class="label">Colleagues who may also send from it</span>
 				<MultiUserPicker bind:value={draft.shared} />
 			</div>
+			<details class="text-sm" data-mailbox-roles>
+				<summary class="cursor-pointer text-slate-600">…and whole roles or departments {draft.shared_roles.length + draft.shared_departments.length ? `(${draft.shared_roles.length + draft.shared_departments.length} chosen)` : ''}</summary>
+				<div class="mt-2 grid gap-3 sm:grid-cols-2">
+					<div>
+						<span class="label">Roles</span>
+						<div class="max-h-40 space-y-1 overflow-y-auto">{#each roles as r (r.id)}<label class="flex items-center gap-2"><input type="checkbox" class="rounded border-slate-300 text-brand-600" value={r.id} bind:group={draft.shared_roles} /> {r.name}</label>{/each}</div>
+					</div>
+					<div>
+						<span class="label">Departments <span class="font-normal text-slate-400">(with sub-departments)</span></span>
+						<div class="max-h-40 space-y-1 overflow-y-auto">{#each departments as d (d.id)}<label class="flex items-center gap-2"><input type="checkbox" class="rounded border-slate-300 text-brand-600" value={d.id} bind:group={draft.shared_departments} /> {d.name}</label>{/each}</div>
+					</div>
+				</div>
+			</details>
 			{#if result}
 				<div class="grid gap-2 sm:grid-cols-2" role="status">
 					{#each [['Incoming (IMAP)', result.imap], ['Outgoing (SMTP)', result.smtp]] as [label, r] (label)}

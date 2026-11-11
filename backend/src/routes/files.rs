@@ -39,22 +39,22 @@ pub fn router(state: &AppState) -> Router<AppState> {
 
 #[derive(Serialize, FromRow)]
 pub struct FileMeta {
-    id: Uuid,
-    owner_id: Option<Uuid>,
-    original_name: String,
-    mime_type: String,
-    size_bytes: i64,
+    pub(crate) id: Uuid,
+    pub(crate) owner_id: Option<Uuid>,
+    pub(crate) original_name: String,
+    pub(crate) mime_type: String,
+    pub(crate) size_bytes: i64,
     sha256: String,
-    is_public: bool,
+    pub(crate) is_public: bool,
     created_at: DateTime<Utc>,
     #[serde(skip)]
-    storage_path: String,
+    pub(crate) storage_path: String,
 }
 
 const META_COLUMNS: &str =
     "id, owner_id, original_name, mime_type, size_bytes, sha256, is_public, created_at, storage_path";
 
-async fn fetch(state: &AppState, id: Uuid) -> AppResult<FileMeta> {
+pub(crate) async fn fetch(state: &AppState, id: Uuid) -> AppResult<FileMeta> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {META_COLUMNS} FROM files WHERE id = $1")))
         .bind(id)
         .fetch_optional(&state.db)
@@ -68,7 +68,7 @@ fn can_read_direct(file: &FileMeta, auth: &AuthUser) -> bool {
 
 /// Owner, public, files.manage, or attached to something the user can see (a task, a CRM
 /// document or email, a chat message).
-async fn can_read(state: &AppState, file: &FileMeta, auth: &AuthUser) -> AppResult<bool> {
+pub(crate) async fn can_read(state: &AppState, file: &FileMeta, auth: &AuthUser) -> AppResult<bool> {
     if can_read_direct(file, auth) {
         return Ok(true);
     }
@@ -340,6 +340,10 @@ async fn upload(
         return Err(e.into());
     }
     audit::record(&state.db, Some(auth.id), "file.upload", "file", Some(id.to_string()), json!({ "name": name, "size": size }), ip.as_deref()).await;
+    // Videos get a copy every browser plays (in the background).
+    if crate::video::is_video(&mime, &name) {
+        crate::video::queue(&state, id).await;
+    }
     Ok(Json(fetch(&state, id).await?))
 }
 
@@ -404,7 +408,7 @@ async fn download_link(State(state): State<AppState>, auth: AuthUser, Json(b): J
     let (path, query) = b.path.split_once('?').unwrap_or((b.path.as_str(), ""));
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let id_ok = |s: &str| Uuid::parse_str(s).is_ok();
-    let allowed = matches!(parts.as_slice(), ["api", "files", id, "content"] if id_ok(id))
+    let allowed = matches!(parts.as_slice(), ["api", "files", id, "content" | "video" | "poster"] if id_ok(id))
         || matches!(parts.as_slice(), ["api", "drive", "nodes", id, "download"] if id_ok(id));
     if !allowed || query.split('&').any(|kv| kv.starts_with("dl=")) {
         return Err(AppError::bad("download links are for file downloads"));

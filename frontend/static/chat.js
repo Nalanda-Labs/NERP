@@ -23,6 +23,11 @@
 		if (open && !frame) {
 			frame = document.createElement('iframe');
 			var q = new URLSearchParams({ u: location.href });
+			var vid = window.NERP_VID;
+			try {
+				vid = vid || localStorage.getItem('nerp_vid');
+			} catch (e) {}
+			if (vid) q.set('vid', vid);
 			frame.src = origin + '/c/' + encodeURIComponent(key) + '?' + q.toString();
 			frame.title = 'Chat';
 			frame.style.cssText = 'position:fixed;right:20px;bottom:88px;z-index:2147483000;width:min(380px,calc(100vw - 40px));height:min(560px,calc(100vh - 120px));' +

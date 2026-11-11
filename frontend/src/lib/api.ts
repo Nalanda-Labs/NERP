@@ -151,7 +151,7 @@ export async function downloadFile(id: string, name: string, retry = true): Prom
 }
 
 /** File and drive downloads that can go straight to disk through a download link. */
-const LINKABLE = /^\/api\/(files\/[0-9a-f-]{36}\/content|drive\/nodes\/[0-9a-f-]{36}\/download)(\?|$)/;
+const LINKABLE = /^\/api\/(files\/[0-9a-f-]{36}\/(content|video|poster)|drive\/nodes\/[0-9a-f-]{36}\/download)(\?|$)/;
 
 /** A short-lived URL for a private file (download or play it without the bearer token). */
 export async function streamUrl(url: string): Promise<string> {

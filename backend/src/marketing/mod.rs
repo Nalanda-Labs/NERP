@@ -5,6 +5,8 @@
 //! the CRM lists and see every record (a campaign speaks for the company, not for one
 //! employee's share of the CRM).
 
+mod design;
+mod generator;
 mod send;
 mod track;
 
@@ -27,7 +29,14 @@ use crate::{
     state::AppState,
 };
 
-pub use send::{run_due, run_job, DUE_JOB, JOB};
+pub use generator::{run_job as run_generator, GENERATOR_JOB};
+pub use send::{run_job, DUE_JOB, JOB};
+
+/// Scheduled campaigns and sales generators that are due.
+pub async fn run_due(state: &AppState) -> anyhow::Result<()> {
+    send::run_due(state).await?;
+    generator::run_due(state).await
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -44,6 +53,9 @@ pub fn router() -> Router<AppState> {
         .route("/marketing/campaigns/{id}/recipients", get(recipients))
         .route("/marketing/optouts", get(list_optouts).post(add_optout))
         .route("/marketing/optouts/{email}", delete(remove_optout))
+        .route("/marketing/design/preview", post(preview_design))
+        .route("/public/m/i/{file}/{sig}", get(design::image))
+        .merge(generator::router())
         .merge(track::router())
 }
 
@@ -340,10 +352,12 @@ pub(crate) struct Campaign {
     pub skipped: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Designed in blocks (then `body` is its plain text).
+    pub design: Option<Value>,
 }
 
 pub(crate) const CAMPAIGN_COLUMNS: &str =
-    "id, name, slug, status, segment_ids, subject, body, from_name, reply_to, send_at, started_at, finished_at, skipped, created_at, updated_at";
+    "id, name, slug, status, segment_ids, subject, body, from_name, reply_to, send_at, started_at, finished_at, skipped, created_at, updated_at, design";
 
 pub(crate) async fn load_campaign(state: &AppState, id: Uuid) -> AppResult<Campaign> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {CAMPAIGN_COLUMNS} FROM mkt_campaigns WHERE id = $1")))
@@ -412,6 +426,37 @@ struct CampaignBody {
     from_name: Option<Option<String>>,
     #[serde(default, deserialize_with = "crate::routes::double_option")]
     reply_to: Option<Option<String>>,
+    /// The message in blocks; null goes back to plain text.
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    design: Option<Option<Value>>,
+}
+
+/// A design checked, and its plain text (placeholders kept) for the body.
+async fn checked_design(state: &AppState, auth: &AuthUser, d: &Value) -> AppResult<(Value, String)> {
+    let me = auth.id;
+    let db = state.db.clone();
+    let clean = design::clean(d, async move |f: Uuid| {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM files WHERE id = $1 AND owner_id = $2)").bind(f).bind(me).fetch_one(&db).await.unwrap_or(false)
+    })
+    .await?;
+    let (_, text) = design::render(state, &clean, &|t| t.to_string(), &|u| u.to_string(), ("", ""));
+    Ok((clean, text.trim_end().trim_end_matches("--").trim_end().to_string()))
+}
+
+#[derive(Deserialize)]
+struct PreviewDesign {
+    design: Value,
+}
+
+/// The designed email as it will look (for a sample client; links not tracked).
+async fn preview_design(State(state): State<AppState>, auth: AuthUser, Json(b): Json<PreviewDesign>) -> AppResult<Json<Value>> {
+    require(&auth)?;
+    let (d, _) = checked_design(&state, &auth, &b.design).await?;
+    let sample = json!({ "first_name": "Alex", "last_name": "Sample", "title": "Alex Sample", "name": "Alex Sample", "assigned": "Your name", "assigned_email": "you@example.com", "company": "Sample Ltd" });
+    let company = send::company_name(&state).await;
+    let footer = format!("You get this email from {}. <a href=\"#\" style=\"color:#64748b\">Unsubscribe</a>", send::esc(&company));
+    let (html, text) = design::render(&state, &d, &|t| crate::crm::automation::fill(t, &sample), &|u| u.to_string(), (&footer, "Unsubscribe: …"));
+    Ok(Json(json!({ "html": html, "text": text, "design": d })))
 }
 
 fn slugify(name: &str) -> String {
@@ -464,17 +509,26 @@ fn text(v: Option<&str>, label: &str, max: usize) -> AppResult<String> {
 async fn create_campaign(State(state): State<AppState>, auth: AuthUser, Json(b): Json<CampaignBody>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 120)?;
+    let design = match b.design.clone().flatten() {
+        Some(d) => Some(checked_design(&state, &auth, &d).await?),
+        None => None,
+    };
+    let body = match &design {
+        Some((_, text)) => Some(text.clone()),
+        None => b.body.clone(),
+    };
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO mkt_campaigns (name, slug, segment_ids, subject, body, from_name, reply_to, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        "INSERT INTO mkt_campaigns (name, slug, segment_ids, subject, body, from_name, reply_to, created_by, design) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(&name)
     .bind(unique_slug(&state, &name).await?)
     .bind(check_segments(&state, &b.segment_ids.unwrap_or_default()).await?)
     .bind(text(b.subject.as_deref(), "subject", 300)?)
-    .bind(text(b.body.as_deref(), "message", 100_000)?)
+    .bind(text(body.as_deref(), "message", 100_000)?)
     .bind(b.from_name.flatten().map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()))
     .bind(check_reply_to(b.reply_to.flatten())?)
     .bind(auth.id)
+    .bind(design.map(|d| d.0))
     .fetch_one(&state.db)
     .await?;
     Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))
@@ -486,14 +540,24 @@ async fn update_campaign(State(state): State<AppState>, auth: AuthUser, Path(id)
     if cur.status != "draft" {
         return Err(AppError::bad("only drafts can be changed; cancel a scheduled campaign first"));
     }
-    sqlx::query("UPDATE mkt_campaigns SET name = $2, segment_ids = $3, subject = $4, body = $5, from_name = $6, reply_to = $7, updated_at = now() WHERE id = $1")
+    let (design, designed_body): (Option<Value>, Option<String>) = match &b.design {
+        None => (cur.design.clone(), None),
+        Some(None) => (None, None),
+        Some(Some(d)) => {
+            let (d, t) = checked_design(&state, &auth, d).await?;
+            (Some(d), Some(t))
+        }
+    };
+    let body = designed_body.or_else(|| b.body.clone());
+    sqlx::query("UPDATE mkt_campaigns SET name = $2, segment_ids = $3, subject = $4, body = $5, from_name = $6, reply_to = $7, design = $8, updated_at = now() WHERE id = $1")
         .bind(id)
         .bind(match &b.name { Some(n) => required("name", n, 120)?, None => cur.name })
         .bind(match &b.segment_ids { Some(s) => check_segments(&state, s).await?, None => cur.segment_ids })
         .bind(match &b.subject { Some(s) => text(Some(s), "subject", 300)?, None => cur.subject })
-        .bind(match &b.body { Some(s) => text(Some(s), "message", 100_000)?, None => cur.body })
+        .bind(match &body { Some(s) => text(Some(s), "message", 100_000)?, None => cur.body })
         .bind(match b.from_name { Some(f) => f.map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), None => cur.from_name })
         .bind(match b.reply_to { Some(r) => check_reply_to(r)?, None => cur.reply_to })
+        .bind(design)
         .execute(&state.db)
         .await?;
     Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))

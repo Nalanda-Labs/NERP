@@ -75,7 +75,7 @@ fn with_utm(url: &str, slug: &str) -> String {
     u.to_string()
 }
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
@@ -86,7 +86,7 @@ pub(crate) struct Rendered {
     pub unsubscribe_url: String,
 }
 
-async fn company_name(state: &AppState) -> String {
+pub(crate) async fn company_name(state: &AppState) -> String {
     let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "NERP".into())
 }
@@ -107,6 +107,14 @@ pub(crate) async fn render(state: &AppState, c: &Campaign, item: Option<Uuid>, t
             .map(|u| u.to_string())
             .unwrap_or(target)
     };
+    let unsubscribe_page = format!("{base}/unsubscribe/{token}");
+    if let Some(d) = &c.design {
+        let footer_html = format!("You get this email from {}. <a href=\"{}\" style=\"color:#64748b\">Unsubscribe</a>", esc(company), esc(&unsubscribe_page));
+        let footer_text = format!("You get this email from {company}. Unsubscribe: {unsubscribe_page}");
+        let (html, text) = super::design::render(state, d, &|t| automation::fill(t, &ctx), &|u| if u.starts_with("http") { track(u) } else { u.to_string() }, (&footer_html, &footer_text));
+        let pixel = format!("<img src=\"{base}/api/public/m/o/{token}\" width=\"1\" height=\"1\" alt=\"\" style=\"display:block;border:0\"></body>");
+        return Ok(Rendered { subject, text, html: html.replacen("</body>", &pixel, 1), unsubscribe_url: format!("{base}/api/public/m/u/{token}") });
+    }
     let (mut text, mut html) = (String::new(), String::new());
     let mut last = 0;
     for (a, b) in find_links(&body) {
@@ -120,7 +128,6 @@ pub(crate) async fn render(state: &AppState, c: &Campaign, item: Option<Uuid>, t
     }
     text.push_str(&body[last..]);
     html.push_str(&esc(&body[last..]));
-    let unsubscribe_page = format!("{base}/unsubscribe/{token}");
     text.push_str(&format!("\n\n--\nYou get this email from {company}. Unsubscribe: {unsubscribe_page}\n"));
     let html = format!(
         "<div style=\"font-family:sans-serif;font-size:15px;line-height:1.55;color:#1e293b;max-width:640px\">{}</div>\

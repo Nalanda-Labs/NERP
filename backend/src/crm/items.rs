@@ -19,7 +19,7 @@ use super::{
     broadcast,
     config::{categories, default_placement, stage},
     entity_type, entity_type_by_id,
-    fields::{clean_address, custom_fields, system_options, validate_uf},
+    fields::{clean_address, custom_fields, hidden_codes, strip_uf, system_options, validate_uf},
     money::{base_currency, rate_of, totals},
     search_text, timeline, EntityType, COMPANY, CONTACT, DEAL, LEAD,
 };
@@ -203,10 +203,12 @@ pub async fn load_detail(state: &AppState, auth: &AuthUser, t: &EntityType, id: 
         return Err(AppError::NotFound("record"));
     }
     access::require_read(state, auth, t.id, id, row.assigned_to).await?;
-    // Hide values of custom fields that were deleted.
-    let codes: Vec<String> = custom_fields(state, t.id).await?.into_iter().map(|f| f.code).collect();
+    // Hide values of custom fields that were deleted, or that this person may not see.
+    let defs = custom_fields(state, t.id).await?;
+    let hidden = super::fields::hidden_among(state, auth, &defs).await?;
+    let codes: Vec<String> = defs.into_iter().map(|f| f.code).collect();
     if let Value::Object(m) = &mut row.uf {
-        m.retain(|k, _| codes.contains(k));
+        m.retain(|k, _| codes.contains(k) && !hidden.contains(k));
     }
     let multifields: Vec<Multifield> = sqlx::query_as("SELECT id, kind, value_type, value FROM crm_multifields WHERE item_id = $1 ORDER BY kind, sort")
         .bind(id)
@@ -410,6 +412,27 @@ pub fn push_filter(qb: &mut QueryBuilder<Postgres>, t: &EntityType, f: &Filter, 
     Ok(())
 }
 
+/// Refuses filtering on custom fields the person may not see (it would reveal their values).
+/// Returns the hidden fields' codes.
+pub async fn guard_filter(state: &AppState, auth: &AuthUser, t: &EntityType, f: &Filter) -> AppResult<Vec<String>> {
+    let hidden = hidden_codes(state, auth, t.id).await?;
+    if let Some(uf) = f.uf.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        && let Ok(obj) = serde_json::from_str::<Map<String, Value>>(uf)
+        && obj.keys().any(|k| hidden.contains(k))
+    {
+        return Err(AppError::bad("invalid custom field in filter"));
+    }
+    Ok(hidden)
+}
+
+/// Refuses writing custom fields the person may not see.
+pub fn refuse_hidden(body: &Map<String, Value>, hidden: &[String]) -> AppResult<()> {
+    if let Some(k) = body.get("uf").and_then(Value::as_object).and_then(|o| o.keys().find(|k| hidden.contains(k))) {
+        return Err(AppError::bad(format!("unknown field: {k}")));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // List & Kanban
 // ---------------------------------------------------------------------------
@@ -446,6 +469,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(code): Path<St
     if matches!(scope, Visible::Nothing) {
         return Err(AppError::Forbidden);
     }
+    let hidden = guard_filter(&state, &auth, &t, &q.filter).await?;
     let limit = num(&q.limit, 50).clamp(1, 200);
     let offset = num(&q.offset, 0).max(0);
 
@@ -477,6 +501,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(code): Path<St
         .push_bind(offset);
     let mut items: Vec<Row> = qb.build_query_as().fetch_all(&state.db).await?;
     attach_contact_details(&state, &mut items).await?;
+    items.iter_mut().for_each(|r| strip_uf(&mut r.uf, &hidden));
     Ok(Json(ListPage {
         page: Page { items, total: total.min(COUNT_CAP), limit, offset },
         total_is_capped: total > COUNT_CAP,
@@ -506,6 +531,7 @@ async fn kanban(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
         Some(c) => cats.into_iter().find(|x| x.id == c).ok_or_else(|| AppError::bad("unknown pipeline"))?,
         None => cats.into_iter().find(|x| x.is_default).ok_or_else(|| AppError::bad("no pipeline configured"))?,
     };
+    let hidden = guard_filter(&state, &auth, &t, &q.filter).await?;
     let per = num(&q.per_column, 20).clamp(1, 100);
     let mut columns = Vec::new();
     for s in &cat.stages {
@@ -524,6 +550,7 @@ async fn kanban(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
         qb.push(" ORDER BY i.position ASC, i.updated_at DESC LIMIT ").push_bind(per);
         let mut items: Vec<Row> = qb.build_query_as().fetch_all(&state.db).await?;
         attach_contact_details(&state, &mut items).await?;
+        items.iter_mut().for_each(|r| strip_uf(&mut r.uf, &hidden));
         columns.push(json!({
             "stage": s,
             "count": count.min(COUNT_CAP),
@@ -674,6 +701,7 @@ pub async fn apply(
     current: Option<&Row>,
     body: &Map<String, Value>,
     actor: Uuid,
+    hidden: &[String],
 ) -> AppResult<Changes> {
     let mut ch = Changes::default();
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("UPDATE crm_items SET updated_at = now(), updated_by = ");
@@ -854,14 +882,14 @@ pub async fn apply(
     // Custom fields: merge with existing values.
     if let Some(uf) = body.get("uf") {
         let obj = uf.as_object().ok_or_else(|| AppError::bad("uf must be an object"))?;
-        let clean = validate_uf(state, t.id, obj, current.is_some()).await?;
+        let clean = validate_uf(state, t.id, obj, current.is_some(), hidden).await?;
         let mut merged = current.and_then(|c| c.uf.as_object().cloned()).unwrap_or_default();
         for (k, v) in clean {
             if v.is_null() { merged.remove(&k); } else { merged.insert(k, v); }
         }
         qb.push(", uf = ").push_bind(Value::Object(merged));
     } else if current.is_none() {
-        validate_uf(state, t.id, &Map::new(), false).await?; // required custom fields on create
+        validate_uf(state, t.id, &Map::new(), false, hidden).await?; // required custom fields on create
     }
 
     qb.push(" WHERE id = ").push_bind(id);
@@ -1092,6 +1120,7 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
                 body.insert("source".into(), json!(code));
             }
         }
+    let hidden = hidden_codes(state, auth, t.id).await?;
     let mut tx = state.db.begin().await?;
     let number = next_number(&mut tx, t.id).await?;
     let id: Uuid = sqlx::query_scalar(
@@ -1105,7 +1134,7 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
     .bind(source_item)
     .fetch_one(&mut *tx)
     .await?;
-    let ch = apply(state, &mut tx, t, id, None, &body, auth.id).await?;
+    let ch = apply(state, &mut tx, t, id, None, &body, auth.id, &hidden).await?;
     refresh_derived(state, &mut tx, t, id).await?;
     timeline(&mut *tx, id, "created", Some(auth.id), None, json!({})).await?;
     tx.commit().await?;
@@ -1120,11 +1149,14 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
     if let Some(stage) = entered {
         super::automation::stage_entered(state, id, stage).await;
     }
+    // Business processes that start when a record is made.
+    crate::workflows_crm::on_record(state, auth, t.id, id, "create").await;
     Ok(id)
 }
 
 async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(body): Json<Map<String, Value>>) -> AppResult<Json<Detail>> {
     let t = entity_type(&state, &code).await?;
+    refuse_hidden(&body, &hidden_codes(&state, &auth, t.id).await?)?;
     let id = create_item(&state, &auth, &t, body, None).await?;
     Ok(Json(load_detail(&state, &auth, &t, id).await?))
 }
@@ -1181,9 +1213,10 @@ pub async fn update_item(state: &AppState, auth: &AuthUser, t: &EntityType, id: 
         // are distributed), so no further check here.
         let _ = new_owner;
     }
+    let hidden = hidden_codes(state, auth, t.id).await?;
     let before = super::collab::snapshot(state, &current).await?;
     let mut tx = state.db.begin().await?;
-    let ch = apply(state, &mut tx, t, id, Some(&current), &body, auth.id).await?;
+    let ch = apply(state, &mut tx, t, id, Some(&current), &body, auth.id, &hidden).await?;
     refresh_derived(state, &mut tx, t, id).await?;
     tx.commit().await?;
     let changes = super::collab::record_edit(state, t, &before, id, auth.id).await?;
@@ -1210,6 +1243,8 @@ pub async fn update_item(state: &AppState, auth: &AuthUser, t: &EntityType, id: 
             tracing::warn!(item = %id, error = ?e, "could not update the record's chat");
         }
     }
+    // Business processes that start when a record changes.
+    crate::workflows_crm::on_record(state, auth, t.id, id, "update").await;
     Ok(())
 }
 
@@ -1220,6 +1255,7 @@ async fn update(
     Json(body): Json<Map<String, Value>>,
 ) -> AppResult<Json<Detail>> {
     let t = entity_type(&state, &code).await?;
+    refuse_hidden(&body, &hidden_codes(&state, &auth, t.id).await?)?;
     update_item(&state, &auth, &t, id, body).await?;
     Ok(Json(load_detail(&state, &auth, &t, id).await?))
 }
@@ -1429,8 +1465,8 @@ pub async fn convert_lead(state: &AppState, auth: &AuthUser, id: Uuid, body: Con
         let d = create_item(&state, &auth, &dt, m, Some(id)).await?;
         // Product rows travel with the deal.
         sqlx::query(
-            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort)
-             SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort
+            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+             SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost
              FROM crm_item_products WHERE item_id = $2",
         )
         .bind(d)
@@ -1517,8 +1553,8 @@ async fn create_from(
     }
     let id = create_item(&state, &auth, &t, m, Some(source)).await?;
     sqlx::query(
-        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort)
-         SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort
+        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+         SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost
          FROM crm_item_products WHERE item_id = $2",
     )
     .bind(id)

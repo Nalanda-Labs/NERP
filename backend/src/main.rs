@@ -21,6 +21,8 @@ mod im;
 mod feed;
 mod guests;
 mod kb;
+mod kb_import;
+mod kb_collab;
 mod hr;
 mod site_tools;
 mod solutions;
@@ -29,6 +31,7 @@ mod accounting;
 mod calls;
 mod lists;
 mod workflows;
+mod workflows_crm;
 mod directory;
 mod drive;
 mod livekit;
@@ -42,6 +45,9 @@ mod state;
 mod support;
 mod tasks;
 mod training;
+mod tracking;
+mod video;
+mod mcp;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -133,13 +139,17 @@ async fn main() -> Result<()> {
 
     realtime::start_subscriber(state.clone(), redis_client);
     if config.worker_enabled {
+        video::resume(&state).await;
         jobs::start_worker(state.clone());
     }
 
     let mut app = Router::new()
         .nest("/api", routes::router(state.clone()).layer(api_compression()).layer(axum::middleware::map_response(api_cache_headers)))
         // Calendar apps (CalDAV), outside /api so their well-known address works.
+        // Short links of ads (posters, print): /go/{code}.
+        .route("/go/{code}", axum::routing::get(tracking::go))
         .route("/.well-known/caldav", axum::routing::any(calendar::dav::well_known))
+        .route("/.well-known/carddav", axum::routing::any(calendar::dav::well_known))
         .route("/dav", axum::routing::any(calendar::dav::handle))
         .route("/dav/", axum::routing::any(calendar::dav::handle))
         .route("/dav/{*rest}", axum::routing::any(calendar::dav::handle))

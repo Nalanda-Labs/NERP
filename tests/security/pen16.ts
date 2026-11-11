@@ -20,6 +20,9 @@ let swept = 0;
 for (const e of endpoints()) {
   if (isPublic(e.path)) continue;
   swept++;
+  // The MCP endpoint takes any key with a tool there; each tool is held to its own scope
+  // (api95, and the files-only key below).
+  if (e.path === '/api/mcp') continue;
   const path = fillPath(e.path, [NIL]);
   for (const [name, key, allowed] of keys) {
     if (allowed(e.method, e.path)) continue;
@@ -28,6 +31,8 @@ for (const e of endpoints()) {
   }
 }
 ok(`(${swept} endpoints tried with each key)`, swept > 800);
+const driveKey = await make(['files']);
+ok('a key with no MCP tools is refused there', (await call('POST', '/mcp', { token: driveKey.secret, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) })).status === 403);
 
 // ---- inside its area, a key acts as its owner only ----
 const [, crm] = keys[0];

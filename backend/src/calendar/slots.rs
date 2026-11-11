@@ -32,6 +32,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/calendar/slot-links", get(list).post(create))
         .route("/calendar/slot-links/{id}", patch(update).delete(remove))
+        .route("/calendar/slot-links/{id}/for-record", axum::routing::post(for_record))
         .route("/public/calendar/meet/{slug}", get(page).post(book))
         .route("/public/calendar/meet/{slug}/slots", get(slots))
 }
@@ -438,6 +439,9 @@ struct BookInput {
     /// A field people don't see: bots fill it in.
     #[serde(default)]
     website: String,
+    /// The CRM record the link was sent from (a signed token), if any.
+    #[serde(default)]
+    r: Option<String>,
 }
 
 async fn limited(state: &AppState, key: String, max: i64, secs: i64) -> AppResult<bool> {
@@ -504,6 +508,11 @@ async fn book_locked(state: &AppState, l: &Link, b: &BookInput, name: &str, gues
     for m in l.members.iter().filter(|m| **m != l.owner_id) {
         sqlx::query("INSERT INTO cal_attendees (event_id, user_id, status) VALUES ($1, $2, 'accepted')").bind(id).bind(m).execute(&mut *tx).await?;
     }
+    // Sent from a CRM record: the meeting is about it.
+    let item = b.r.as_deref().and_then(|t| record_of(state, l.id, t));
+    if let Some(i) = item {
+        sqlx::query("UPDATE cal_events SET item_id = (SELECT id FROM crm_items WHERE id = $2 AND deleted_at IS NULL) WHERE id = $1").bind(id).bind(i).execute(&mut *tx).await?;
+    }
     let gid: Uuid = sqlx::query_scalar("INSERT INTO cal_email_guests (event_id, email, name, status, answered_at) VALUES ($1, $2, $3, 'accepted', now()) RETURNING id")
         .bind(id)
         .bind(&guest.email)
@@ -511,6 +520,9 @@ async fn book_locked(state: &AppState, l: &Link, b: &BookInput, name: &str, gues
         .fetch_one(&mut *tx)
         .await?;
     tx.commit().await?;
+    if let Some(i) = item {
+        booked_for_record(state, l, i, id, name, b.starts_at, end).await?;
+    }
     let (e, _) = load_events(state, &[id]).await?.remove(0);
     let guests = super::invites::guests_of(state, id).await?;
     super::invites::send(state, &e, &guests, super::invites::Change::Invited).await;
@@ -523,4 +535,84 @@ async fn book_locked(state: &AppState, l: &Link, b: &BookInput, name: &str, gues
     })
     .await;
     Ok(Json(json!({ "starts_at": e.starts_at, "ends_at": e.ends_at, "timezone": e.timezone, "manage_url": super::invites::link(state, gid) })))
+}
+
+// ---------------------------------------------------------------------------
+// Links sent from a CRM record
+// ---------------------------------------------------------------------------
+
+fn record_sig(state: &AppState, link: Uuid, item: Uuid) -> String {
+    let s = crate::outbound::sign(&state.config.jwt_secret, format!("meet:{link}:{item}").as_bytes());
+    s.trim_start_matches("sha256=")[..32].to_string()
+}
+
+/// The record a booking token names, when it was made for this link.
+fn record_of(state: &AppState, link: Uuid, token: &str) -> Option<Uuid> {
+    let (item, sig) = token.split_once('.')?;
+    let item = Uuid::parse_str(item).ok()?;
+    let want = record_sig(state, link, item);
+    (sig.len() == want.len() && sig.bytes().zip(want.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0).then_some(item)
+}
+
+#[derive(Deserialize)]
+struct ForRecord {
+    item_id: Uuid,
+}
+
+/// The link's address for a client of a CRM record: what they book lands on the record as a
+/// meeting. For the link's owner or members, on a record they may read.
+async fn for_record(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<ForRecord>) -> AppResult<Json<Value>> {
+    let l = load(&state, id).await?;
+    if !l.people().contains(&auth.id) {
+        return Err(AppError::NotFound("slot link"));
+    }
+    if !l.is_active {
+        return Err(AppError::bad("this link is switched off"));
+    }
+    let row = crate::crm::items::load_row(&state, b.item_id, false).await?;
+    crate::crm::access::require_read(&state, &auth, row.entity_type, b.item_id, row.assigned_to).await?;
+    let token = format!("{}.{}", b.item_id.simple(), record_sig(&state, l.id, b.item_id));
+    Ok(Json(json!({ "url": format!("{}/meet/{}?r={token}", state.config.public_url, l.slug), "title": l.title })))
+}
+
+/// A booking made through a record's link: a meeting on the record, done or not like any other.
+async fn booked_for_record(state: &AppState, l: &Link, item: Uuid, event: Uuid, name: &str, starts: DateTime<Utc>, ends: DateTime<Utc>) -> AppResult<()> {
+    let Ok(row) = crate::crm::items::load_row(state, item, false).await else { return Ok(()) };
+    let subject = format!("{}: {name}", l.title);
+    let act: Uuid = sqlx::query_scalar(
+        "INSERT INTO crm_activities (item_id, kind, subject, description, starts_at, ends_at, deadline, responsible_id, cal_event_id, remind_before_minutes)
+         VALUES ($1, 'meeting', $2, $3, $4, $5, $4, $6, $7, $8) RETURNING id",
+    )
+    .bind(item)
+    .bind(&subject)
+    .bind(format!("Booked through “{}”.", l.title))
+    .bind(starts)
+    .bind(ends)
+    .bind(l.owner_id)
+    .bind(event)
+    .bind(l.remind_minutes)
+    .fetch_one(&state.db)
+    .await?;
+    sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(item).execute(&state.db).await?;
+    crate::crm::timeline(&state.db, item, "booking", None, None, json!({ "activity_id": act, "event_id": event, "name": name, "link": l.title, "starts_at": starts })).await?;
+    crate::crm::broadcast(state, row.entity_type, item, false).await;
+    Ok(())
+}
+
+/// The client cancelled a meeting booked from a record: its activity is closed as cancelled.
+pub async fn booking_cancelled(state: &AppState, event: Uuid, who: &str) {
+    let done: Result<Vec<(Uuid, Uuid)>, _> = sqlx::query_as(
+        "UPDATE crm_activities SET is_completed = TRUE, completed_at = now(), result = $2, cal_event_id = NULL, updated_at = now()
+         WHERE cal_event_id = $1 AND NOT is_completed RETURNING id, item_id",
+    )
+    .bind(event)
+    .bind(format!("Cancelled by {who}"))
+    .fetch_all(&state.db)
+    .await;
+    for (act, item) in done.unwrap_or_default() {
+        let _ = crate::crm::timeline(&state.db, item, "booking", None, None, json!({ "activity_id": act, "cancelled": true, "name": who })).await;
+        if let Ok(row) = crate::crm::items::load_row(state, item, false).await {
+            crate::crm::broadcast(state, row.entity_type, item, false).await;
+        }
+    }
 }

@@ -289,8 +289,11 @@ pub async fn build(state: &AppState, auth: &AuthUser, item: Uuid, entity_type: i
 
     // Custom fields as text.
     let mut uf = Map::new();
+    // Fields the person may not see stay blank.
+    let hidden = crate::crm::fields::hidden_codes(state, auth, t.id).await?;
     for f in custom_fields(state, t.id).await? {
-        uf.insert(f.code.clone(), json!(ufield_text(&f, r.uf.get(&f.code))));
+        let v = if hidden.contains(&f.code) { None } else { r.uf.get(&f.code) };
+        uf.insert(f.code.clone(), json!(ufield_text(&f, v)));
     }
 
     let today = chrono::Utc::now().date_naive();

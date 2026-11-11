@@ -68,6 +68,12 @@ fn moderator(auth: &AuthUser) -> bool {
     auth.can(perm::FEED_MODERATE) || auth.can(perm::SETTINGS_MANAGE)
 }
 
+/// Whether someone can see a post (for things attached to it).
+pub async fn can_see_post(state: &AppState, auth: &AuthUser, post: Uuid) -> AppResult<bool> {
+    let vis = visible(auth);
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS (SELECT 1 FROM feed_posts p WHERE p.id = $2 AND {vis})"))).bind(auth.id).bind(post).fetch_one(&state.db).await?)
+}
+
 /// Files on posts are readable by whoever can see the post.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
     let vis = visible(auth);
@@ -126,6 +132,8 @@ struct PostRow {
     /// An appreciation post: the badge and who got it.
     badge: Option<String>,
     badge_people: Value,
+    /// A board made for the post.
+    board: Option<Value>,
     /// A request started from the feed: its list item, how its process stands, and the
     /// approvals waiting for me.
     request: Option<Value>,
@@ -149,6 +157,7 @@ const POST_SELECT: &str = "SELECT p.id, p.author_id, trim(u.first_name || ' ' ||
     p.badge,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('id', bu.id, 'name', trim(bu.first_name || ' ' || bu.last_name), 'avatar_file_id', bu.avatar_file_id))
         FROM feed_badges b JOIN users bu ON bu.id = b.user_id WHERE b.post_id = p.id), '[]') AS badge_people,
+    (SELECT jsonb_build_object('id', bo.id, 'title', bo.title, 'level', bo.post_level) FROM boards bo WHERE bo.post_id = p.id LIMIT 1) AS board,
     (SELECT jsonb_build_object('item_id', i.id, 'list_id', l.id, 'list_name', l.name, 'title', i.title, 'number', i.number,
         'status', (SELECT w.status FROM wf_instances w WHERE w.item_id = i.id ORDER BY w.started_at DESC LIMIT 1),
         'approvals', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', a.id, 'title', a.title)) FROM wf_approvals a JOIN wf_instances w ON w.id = a.instance_id
@@ -264,6 +273,10 @@ struct PostInput {
     badge: Option<String>,
     #[serde(default)]
     badge_user_ids: Vec<Uuid>,
+    /// A board made for the post (its readers open it).
+    board_id: Option<Uuid>,
+    /// What the post's readers may do with the board: view or edit (default).
+    board_level: Option<String>,
 }
 fn yes() -> bool {
     true
@@ -333,6 +346,16 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
             return Err(AppError::bad("some of the people or departments don't exist"));
         }
     }
+    // A board: the author's own, not on another post yet.
+    if let Some(bid) = b.board_id {
+        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM boards WHERE id = $1 AND owner_id = $2 AND post_id IS NULL)").bind(bid).bind(auth.id).fetch_one(&state.db).await?;
+        if !ok {
+            return Err(AppError::bad("attach a board of your own"));
+        }
+        if b.board_level.as_deref().is_some_and(|l| l != "view" && l != "edit") {
+            return Err(AppError::bad("readers may view or edit the board"));
+        }
+    }
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar("INSERT INTO feed_posts (author_id, body, file_ids, to_all, important, poll, project_id, badge) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id")
         .bind(auth.id)
@@ -355,6 +378,9 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
         for d in &b.departments {
             sqlx::query("INSERT INTO feed_audience (post_id, department_id) VALUES ($1, $2)").bind(id).bind(d).execute(&mut *tx).await?;
         }
+    }
+    if let Some(bid) = b.board_id {
+        sqlx::query("UPDATE boards SET post_id = $2, post_level = $3 WHERE id = $1").bind(bid).bind(id).bind(b.board_level.as_deref().unwrap_or("edit")).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     let who = audience(&state, id).await?;

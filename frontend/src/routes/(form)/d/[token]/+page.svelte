@@ -5,7 +5,7 @@
 	import { formatBytes } from '#lib/format.ts';
 
 	type Item = { id: string; name: string; kind: 'file' | 'folder'; size_bytes: number; mime_type: string | null };
-	type Info = { kind: 'file' | 'folder'; name: string; size_bytes?: number; root?: string; path?: { id: string; name: string }[]; items?: Item[] };
+	type Info = { kind: 'file' | 'folder'; name: string; size_bytes?: number; root?: string; path?: { id: string; name: string }[]; items?: Item[]; can_edit?: boolean; office?: boolean };
 	const token = $derived(page.params.token ?? '');
 	let info = $state<Info | null>(null);
 	let missing = $state(false);
@@ -33,6 +33,18 @@
 		token;
 		load(null);
 	});
+	// Office files open in the browser editor (editing when the link allows it).
+	let opened = $state<{ url: string; token: string; token_ttl: number; can_edit: boolean } | null>(null);
+	let visitor = $state('');
+	let form: HTMLFormElement | undefined = $state();
+	async function openEditor(e: SubmitEvent) {
+		e.preventDefault();
+		error = '';
+		const r = await fetch(`${base}/office`, { method: 'POST', headers: { 'content-type': 'application/json', ...(headers() ?? {}) }, body: JSON.stringify({ name: visitor }) });
+		if (!r.ok) return void (error = (await r.json().catch(() => ({})))?.error?.message ?? 'It could not be opened');
+		opened = await r.json();
+		setTimeout(() => form?.submit(), 0);
+	}
 	async function download(item: string | null, name: string) {
 		const url = `${base}/download${item ? `?item=${item}` : ''}`;
 		if (!password) return void (location.href = url);
@@ -50,7 +62,7 @@
 <svelte:head><title>{info?.name ?? 'Shared file'}</title><meta name="robots" content="noindex" /></svelte:head>
 
 <main class="flex min-h-screen items-center justify-center bg-slate-50 p-4">
-	<div class="w-full {info?.kind === 'folder' ? 'max-w-2xl' : 'max-w-md text-center'} rounded-3xl bg-white p-8 shadow-g1">
+	<div class="w-full {opened ? 'max-w-6xl' : info?.kind === 'folder' ? 'max-w-2xl' : 'max-w-md text-center'} rounded-3xl bg-white p-8 shadow-g1">
 		{#if missing}
 			<h1 class="text-xl font-semibold text-slate-900">This link doesn't work</h1>
 			<p class="mt-2 text-sm text-slate-600">It may have expired or been removed.</p>
@@ -83,10 +95,23 @@
 				{:else}<li class="py-3 text-sm text-slate-400">This folder is empty.</li>{/each}
 			</ul>
 			{#if error}<p class="mt-2 text-sm text-red-600" role="alert">{error}</p>{/if}
+		{:else if opened}
+			<form bind:this={form} action={opened.url} method="post" target="office-frame" class="hidden">
+				<input type="hidden" name="access_token" value={opened.token} />
+				<input type="hidden" name="access_token_ttl" value={opened.token_ttl} />
+			</form>
+			<p class="mb-2 text-sm text-slate-600">{opened.can_edit ? 'Changes are saved for everyone.' : 'Read only.'}</p>
+			<iframe name="office-frame" title="Document editor" class="h-[80vh] w-full rounded-xl border border-slate-200" allow="clipboard-read; clipboard-write; fullscreen" data-office></iframe>
 		{:else if info}
 			<h1 class="text-xl font-semibold break-words text-slate-900" data-file-name>{info.name}</h1>
 			<p class="mt-1 text-sm text-slate-500">{formatBytes(info.size_bytes ?? 0)}</p>
 			<button class="btn btn-primary mt-6" onclick={() => download(null, info!.name)}>Download</button>
+			{#if info.office}
+				<form class="mt-6 space-y-2 border-t border-slate-100 pt-4 text-left" onsubmit={openEditor} data-open-editor>
+					<label class="label" for="visitor">{info.can_edit ? 'Edit it here' : 'Open it here'} — your name, as others will see it</label>
+					<div class="flex gap-2"><input id="visitor" class="input" maxlength="60" placeholder="Your name" bind:value={visitor} /><button class="btn btn-secondary">{info.can_edit ? 'Edit' : 'Open'}</button></div>
+				</form>
+			{/if}
 			{#if error}<p class="mt-2 text-sm text-red-600" role="alert">{error}</p>{/if}
 		{:else}
 			<p class="text-sm text-slate-400">Loading…</p>

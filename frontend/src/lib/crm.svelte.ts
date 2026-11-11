@@ -40,6 +40,9 @@ export interface FieldDef {
 	show_in_list: boolean;
 	settings: { options?: { id: string; label: string }[]; types?: string[] };
 	sort: number;
+	/** Who sees the field (CRM admins only get these); both empty: everyone. */
+	visible_user_ids?: string[];
+	visible_department_ids?: string[];
 }
 export interface CrmType {
 	id: number;

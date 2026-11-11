@@ -17,7 +17,7 @@ export const PUBLIC = [
   /^\/api\/public\//, /^\/api\/health$/, /^\/api\/openapi\.json$/, /^\/api\/setup$/,
   /^\/api\/auth\/(login|login\/2fa|login\/2fa-setup|login\/2fa-setup\/start|logout|refresh|forgot-password|reset-password|accept-invite|invite\/\{token\})$/,
   /^\/api\/auth\/sso(\/start|\/callback)?$/, /^\/api\/auth\/providers(\/\{id\}\/start|\/callback)?$/, /^\/api\/crm\/mailboxes\/oauth\/callback$/, /^\/api\/realtime\/ws$/,
-  /^\/api\/crm\/automation\/webhook\/\{token\}$/, /^\/api\/files\/\{id\}\/content$/, /^\/api\/wopi\//,
+  /^\/api\/crm\/automation\/webhook\/\{token\}$/, /^\/api\/files\/\{id\}\/(content|video|poster|video-status)$/, /^\/api\/wopi\//,
 ];
 export const isPublic = (path: string) => PUBLIC.some((p) => p.test(path));
 

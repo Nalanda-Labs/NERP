@@ -423,6 +423,9 @@ struct Submission {
     utm: Option<Map<String, Value>>,
     page_url: Option<String>,
     referrer: Option<String>,
+    /// The website visitor id from the tracking script, if any.
+    #[serde(default)]
+    visitor_id: Option<String>,
 }
 
 async fn limited(state: &AppState, key: String, max: i64, secs: u64) -> AppResult<bool> {
@@ -511,6 +514,8 @@ async fn submit(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(key)
     let referrer = b.referrer.map(|p| p.chars().take(2000).collect::<String>()).filter(|p| p.starts_with("http"));
 
     let (item, contact) = create_records(&state, &f, &values, utm.clone(), page.clone()).await?;
+    // The visitor's journey on the website leads to the person (or the record made).
+    crate::tracking::link_visitor(&state, b.visitor_id.as_deref(), contact.unwrap_or(item)).await;
     let data: Vec<Value> = values.iter().map(|(fl, v)| json!({ "key": fl.key, "label": fl.label, "value": v })).collect();
     sqlx::query("INSERT INTO crm_webform_submissions (form_id, item_id, contact_id, data, utm, page_url, referrer) VALUES ($1, $2, $3, $4, $5, $6, $7)")
         .bind(f.id)

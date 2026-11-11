@@ -349,10 +349,10 @@ mod guest_tests {
 
     #[test]
     fn guests_reach_only_their_areas() {
-        for p in ["/api/im/chats", "/api/calls/1/join", "/api/projects", "/api/tasks/5", "/api/auth/me", "/api/files/x/content", "/api/realtime/ticket", "/api/notifications"] {
+        for p in ["/api/im/chats", "/api/calls/1/join", "/api/projects", "/api/tasks/5", "/api/auth/me", "/api/files/x/content", "/api/realtime/ticket", "/api/notifications", "/api/drive/nodes", "/api/office/status"] {
             assert!(super::guest_may(p, &Method::GET), "{p}");
         }
-        for p in ["/api/users", "/api/crm/deal/items", "/api/hr/my-day", "/api/bi/dashboards", "/api/kb/spaces", "/api/drive/nodes", "/api/feedback", "/api/imx", "/api/tasksX"] {
+        for p in ["/api/users", "/api/crm/deal/items", "/api/hr/my-day", "/api/bi/dashboards", "/api/kb/spaces", "/api/driveX", "/api/feedback", "/api/imx", "/api/tasksX"] {
             assert!(!super::guest_may(p, &Method::GET), "{p}");
         }
         assert!(super::guest_may("/api/settings", &Method::GET) && !super::guest_may("/api/settings", &Method::PUT));

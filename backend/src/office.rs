@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/drive/nodes/{id}/preview", get(drive_preview))
         .route("/office/status", get(status))
         .route("/drive/nodes/{id}/office", post(open))
+        .route("/public/drive/{token}/office", post(open_link))
         .route("/wopi/files/{id}", get(check_file_info).post(lock_ops))
         .route("/wopi/files/{id}/contents", get(get_file).post(put_file))
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
@@ -176,7 +177,26 @@ fn token(state: &AppState, node: Uuid, user: Uuid, session: Uuid, exp: i64) -> S
 
 struct Token {
     node: Uuid,
+    /// The person; for a link, the person who made it (saves are made on their behalf).
     user: Uuid,
+    /// Opened from a link: the link, whether it lets people edit, and the visitor's name.
+    link: Option<(Uuid, bool, String)>,
+}
+
+/// A token for someone opening a file from its link: "node.L<link>.<name>.expiry.signature",
+/// the name in URL-safe base64. It stops working when the link is removed or expires.
+fn link_token(state: &AppState, node: Uuid, link: Uuid, name: &str, exp: i64) -> String {
+    use base64::Engine;
+    let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name.as_bytes());
+    let p = format!("{node}.L{}.{n}.{exp}", link.simple());
+    format!("{p}.{}", sign(state, &p))
+}
+
+/// Whether a file shared by link can be opened in the editor (Collabora set up and the kind
+/// of file one it opens).
+pub(crate) async fn link_office_status(state: &AppState, name: &str) -> bool {
+    let ext = ext_of(name);
+    state.config.collabora_url.is_some() && discovery(state).await.map(|d| d.iter().any(|(e, ..)| *e == ext)).unwrap_or(false)
 }
 
 async fn verify(state: &AppState, t: &str, node: Uuid) -> AppResult<Token> {
@@ -188,12 +208,32 @@ async fn verify(state: &AppState, t: &str, node: Uuid) -> AppResult<Token> {
     }
     let exp: i64 = exp.parse().map_err(|_| AppError::Unauthorized)?;
     let parse = |x: &str| Uuid::parse_str(x).map_err(|_| AppError::Unauthorized);
+    if exp < Utc::now().timestamp() {
+        return Err(AppError::Unauthorized);
+    }
+    // From a link: the link must still be there (and links allowed).
+    if let Some(l) = u.strip_prefix('L') {
+        use base64::Engine;
+        let (n, link) = (parse(n)?, parse(l)?);
+        let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sid).ok().and_then(|b| String::from_utf8(b).ok()).ok_or(AppError::Unauthorized)?;
+        if n != node || !crate::routes::settings::public_links_allowed(state).await? {
+            return Err(AppError::Unauthorized);
+        }
+        let row: Option<(Uuid, bool, Option<Uuid>)> = sqlx::query_as("SELECT node_id, can_edit, created_by FROM drive_links WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())")
+            .bind(link)
+            .fetch_optional(&state.db)
+            .await?;
+        return match row {
+            Some((ln, can_edit, Some(by))) if ln == n => Ok(Token { node: n, user: by, link: Some((link, can_edit, name)) }),
+            _ => Err(AppError::Unauthorized),
+        };
+    }
     let (n, u, sid) = (parse(n)?, parse(u)?, parse(sid)?);
-    if exp < Utc::now().timestamp() || n != node {
+    if n != node {
         return Err(AppError::Unauthorized);
     }
     match crate::auth::tokens::get_session(state, sid).await? {
-        Some(s) if s.user_id == u => Ok(Token { node: n, user: u }),
+        Some(s) if s.user_id == u => Ok(Token { node: n, user: u, link: None }),
         _ => Err(AppError::Unauthorized),
     }
 }
@@ -235,6 +275,53 @@ async fn open(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     })))
 }
 
+#[derive(Deserialize)]
+struct OpenLinkInput {
+    /// What to call the visitor in the editor.
+    #[serde(default)]
+    name: String,
+}
+
+/// Opening a file shared by link in the editor: editing when the link allows it, otherwise
+/// reading. The link's password (if any) comes in `X-Link-Password`.
+async fn open_link(
+    State(state): State<AppState>,
+    crate::auth::ClientIp(ip): crate::auth::ClientIp,
+    headers: HeaderMap,
+    Path(link_token_str): Path<String>,
+    Json(b): Json<OpenLinkInput>,
+) -> AppResult<Json<Value>> {
+    let (link, node, can_edit, by) = crate::drive::link_for_office(&state, &link_token_str, &headers, ip.as_deref()).await?;
+    let by = by.ok_or(AppError::NotFound("link"))?;
+    // The file as its link's maker sees it now (they may have lost access since).
+    let perms = crate::auth::load_permissions(&state, by).await?;
+    let maker = AuthUser { id: by, session_id: Uuid::nil(), permissions: perms.into_iter().collect() };
+    let f = crate::drive::office_file(&state, &maker, node).await.map_err(|_| AppError::NotFound("link"))?;
+    let ext = ext_of(&f.name);
+    let editors = discovery(&state).await?;
+    let edit = can_edit && f.can_edit;
+    let wanted = if edit { ["edit", "view"] } else { ["view", "edit"] };
+    let (_, action, url) = wanted
+        .iter()
+        .find_map(|w| editors.iter().find(|(e, a, _)| *e == ext && a == w))
+        .cloned()
+        .ok_or_else(|| AppError::bad(format!("this kind of file (.{ext}) can't be opened here")))?;
+    let name: String = b.name.trim().chars().filter(|c| !c.is_control()).take(60).collect();
+    let name = if name.is_empty() { "Guest".to_string() } else { name };
+    let exp = Utc::now().timestamp() + TOKEN_SECS;
+    let src = format!("{}/api/wopi/files/{node}", state.config.public_url);
+    let enc: String = src.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    let sep = if url.contains('?') { if url.ends_with('?') || url.ends_with('&') { "" } else { "&" } } else { "?" };
+    Ok(Json(json!({
+        "url": format!("{url}{sep}WOPISrc={enc}&lang=en"),
+        "token": link_token(&state, node, link, &name, exp),
+        "token_ttl": exp * 1000,
+        "action": action,
+        "name": f.name,
+        "can_edit": edit && action == "edit",
+    })))
+}
+
 // ---------------------------------------------------------------------------
 // WOPI (called by Collabora)
 // ---------------------------------------------------------------------------
@@ -265,13 +352,21 @@ fn stamp(t: DateTime<Utc>) -> String {
 async fn check_file_info(State(state): State<AppState>, Path(id): Path<Uuid>, Query(q): Query<TokenQuery>) -> AppResult<Json<Value>> {
     let t = verify(&state, q.token()?, id).await?;
     let (auth, name) = person(&state, &t).await?;
-    let f = crate::drive::office_file(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
+    let mut f = crate::drive::office_file(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
+    // From a link: as the visitor, editing only when the link allows it.
+    let (user_id, name) = match &t.link {
+        Some((link, can_edit, visitor)) => {
+            f.can_edit = f.can_edit && *can_edit;
+            (format!("link-{}-{}", link.simple(), hex::encode(&sha2::Digest::finalize(<sha2::Sha256 as sha2::Digest>::new_with_prefix(visitor.as_bytes()))[..6])), format!("{visitor} (link)"))
+        }
+        None => (auth.id.to_string(), name),
+    };
     Ok(Json(json!({
         "BaseFileName": f.name,
         "Size": f.size,
         "Version": f.version.to_string(),
         "OwnerId": f.owner.map(|o| o.to_string()).unwrap_or_default(),
-        "UserId": auth.id.to_string(),
+        "UserId": user_id,
         "UserFriendlyName": name,
         "UserCanWrite": f.can_edit,
         "UserCanNotWriteRelative": true,
@@ -301,7 +396,7 @@ async fn put_file(State(state): State<AppState>, Path(id): Path<Uuid>, Query(q):
     let t = verify(&state, q.token()?, id).await?;
     let (auth, _) = person(&state, &t).await?;
     let f = crate::drive::office_file(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
-    if !f.can_edit {
+    if !f.can_edit || t.link.as_ref().is_some_and(|l| !l.1) {
         return Err(AppError::Forbidden);
     }
     if let Some(ts) = headers.get("X-COOL-WOPI-Timestamp").or(headers.get("X-LOOL-WOPI-Timestamp")).and_then(|v| v.to_str().ok()) {

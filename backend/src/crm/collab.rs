@@ -263,6 +263,17 @@ pub async fn task_event(state: &AppState, task: Uuid, event: &str, actor: Uuid) 
         if let Ok(row) = load_row(state, item, false).await {
             broadcast(state, row.entity_type, item, false).await;
         }
+        // The last of the record's tasks done: triggers waiting for that move it on.
+        if event == "completed" {
+            let open: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM task_crm_links l JOIN tasks t ON t.id = l.task_id WHERE l.item_id = $1 AND t.status <> 'done')")
+                .bind(item)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(true);
+            if !open {
+                super::automation::fire(state, item, "tasks_done", |_| true).await;
+            }
+        }
     }
 }
 
@@ -470,6 +481,7 @@ async fn render_template(State(state): State<AppState>, auth: AuthUser, Path(id)
     let ctx = super::automation::context(&state, b.item_id).await?;
     // The sender is whoever writes, not the record's responsible person.
     let mut v = ctx.value;
+    super::fields::strip_uf(&mut v["uf"], &super::fields::hidden_codes(&state, &auth, row.entity_type).await?);
     let me: Option<(String, String)> = sqlx::query_as("SELECT first_name || ' ' || last_name, email FROM users WHERE id = $1").bind(auth.id).fetch_optional(&state.db).await?;
     if let Some((name, email)) = me {
         v["me"] = json!({ "name": name, "email": email });

@@ -205,6 +205,7 @@
 				</select>
 			{/if}
 			<div class="ml-auto flex flex-wrap gap-2">
+				{#if type.rights.write !== 'none'}<a href="/crm/{code}/duplicates" class="btn btn-secondary" data-find-duplicates><Icon name="structure" class="size-4" /> Duplicates</a>{/if}
 				{#if type.rights.import !== 'none'}<a href="/crm/{code}/import" class="btn btn-secondary"><Icon name="upload" class="size-4" /> Import</a>{/if}
 				{#if type.rights.export !== 'none'}
 					<div class="relative">

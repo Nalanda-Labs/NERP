@@ -92,6 +92,9 @@ struct Start {
     /// Agreed to the channel's consent text.
     #[serde(default)]
     consent: bool,
+    /// The website visitor id from the tracking script, if any.
+    #[serde(default)]
+    visitor_id: Option<String>,
 }
 
 fn opt(v: &str, max: usize) -> Option<String> {
@@ -121,8 +124,8 @@ async fn start(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(key):
         .execute(&state.db)
         .await?;
     sqlx::query(
-        "INSERT INTO chat_sessions (channel_id, token_hash, visitor_name, visitor_email, page_url, consent_at, offline)
-         VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, $7)",
+        "INSERT INTO chat_sessions (channel_id, token_hash, visitor_name, visitor_email, page_url, consent_at, offline, visitor_id)
+         VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, $7, $8)",
     )
         .bind(c.id)
         .bind(hash(&token))
@@ -131,6 +134,7 @@ async fn start(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(key):
         .bind(b.page_url.and_then(|p| opt(&p, 2000)).filter(|p| p.starts_with("http")))
         .bind(c.consent_text.is_some())
         .bind(!super::ops::online(&c.hours, &c.timezone, Utc::now()))
+        .bind(b.visitor_id.as_deref().and_then(|v| Uuid::parse_str(v.trim()).ok()))
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "token": token })))
@@ -296,6 +300,11 @@ async fn welcome(state: &AppState, c: &Channel, s: &Session, body: &str) -> AppR
         .bind(operator)
         .execute(&state.db)
         .await?;
+    // The visitor's journey on the website leads to this record.
+    if let Some(i) = item {
+        let vid: Option<Uuid> = sqlx::query_scalar("SELECT visitor_id FROM chat_sessions WHERE id = $1").bind(s.id).fetch_one(&state.db).await?;
+        crate::tracking::link_visitor(state, vid.map(|v| v.to_string()).as_deref(), i).await;
+    }
     let who = s.visitor_name.clone().unwrap_or_else(|| "A website visitor".into());
     let notify_to: Vec<Uuid> = operator.map(|o| vec![o]).unwrap_or(active_ops);
     notify(state, &notify_to, NewNotification {
