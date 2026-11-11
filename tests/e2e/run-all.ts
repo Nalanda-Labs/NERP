@@ -30,7 +30,8 @@ for (const f of chosen) {
   const ok = r.status === 0 && !fails.length;
   if (!ok) failedSuites++;
   if (ok && /^skipped:/m.test(out)) skipped++;
-  const last = out.trim().split('\n').at(-1) ?? '';
+  // The suite's summary line, or (after a crash) whatever it said last.
+  const last = out.split('\n').findLast((l) => /^\d+ passed, \d+ failed/.test(l) || /^skipped:/.test(l)) ?? out.trim().split('\n').at(-1) ?? '';
   console.log(`${!ok ? 'FAIL' : /^skipped:/m.test(out) ? 'skip' : 'ok  '} ${f.padEnd(10)} ${((Date.now() - started) / 1000).toFixed(0).padStart(4)}s  ${last}`);
   for (const l of fails.slice(0, 5)) console.log('       ' + l.slice(0, 300));
   // A crash (or timeout) ends without a summary line: show what it said on the way out.
