@@ -10,6 +10,8 @@ import { cleanupRun } from './cleanup.ts';
 let pass = 0, fail = 0;
 const ok = (name: string, cond: unknown, extra: unknown = '') => { cond ? pass++ : fail++; console.log(cond ? 'ok  ' : 'FAIL', name, cond ? '' : String(typeof extra === 'string' ? extra : JSON.stringify(extra)).slice(0, 700)); };
 const stamp = Date.now().toString(36);
+// Older poppler (Ubuntu 24.04) warns about "/Suspects false" in tagged PDFs, which is valid: keep it out of the output.
+const quiet = { stdio: ['ignore', 'pipe', 'ignore'] as any };
 const MP = 'http://localhost:8026/api/v1';
 const mailpit = async (q: string): Promise<any[]> => (await (await fetch(`${MP}/search?query=${encodeURIComponent(q)}`)).json()).messages ?? [];
 const linkIn = async (to: string, subject: string) => {
@@ -89,9 +91,9 @@ try {
   const signed = await fetch(`http://localhost:8080/api/public/sign/${anaToken}/document`);
   const sb = Buffer.from(await signed.arrayBuffer());
   writeFileSync(`nerp-signed-${stamp}.pdf`, sb);
-  const text = execSync(`pdftotext -layout nerp-signed-${stamp}.pdf -`).toString();
-  const pages = Number(execSync(`pdfinfo nerp-signed-${stamp}.pdf`).toString().match(/Pages:\s+(\d+)/)![1]);
-  const origPages = (() => { writeFileSync(`nerp-orig-${stamp}.pdf`, bytes); return Number(execSync(`pdfinfo nerp-orig-${stamp}.pdf`).toString().match(/Pages:\s+(\d+)/)![1]); })();
+  const text = execSync(`pdftotext -layout nerp-signed-${stamp}.pdf -`, quiet).toString();
+  const pages = Number(execSync(`pdfinfo nerp-signed-${stamp}.pdf`, quiet).toString().match(/Pages:\s+(\d+)/)![1]);
+  const origPages = (() => { writeFileSync(`nerp-orig-${stamp}.pdf`, bytes); return Number(execSync(`pdfinfo nerp-orig-${stamp}.pdf`, quiet).toString().match(/Pages:\s+(\d+)/)![1]); })();
   ok('the document plus a certificate page', pages === origPages + 1 && /Signature certificate/.test(text) && text.includes(`Ana Ruiz ${stamp}`) && text.includes(req.original_sha256) && /signer-browser\/1\.0/.test(text), [pages, origPages, text.slice(-1500)]);
   ok('staff can download it', (await sam.req('GET', `/files/${done.signed_file_id}/content`, undefined, true)).status === 200);
   const mails = await waitFor(async () => { const m = await mailpit(`subject:"${doc.number} is signed"`); return m.filter((x: any) => x.To[0].Address.endsWith(`${stamp}@example.com`)).length >= 2 ? m : null; }, 15000);
