@@ -10,10 +10,11 @@
 //! transaction for the database), the database is brought up to this version's schema, and
 //! the app carries on. Only this server instance pauses; run one instance while restoring.
 //!
-//! Point-in-time restore: when PostgreSQL archives its WAL (nerp-wal-archive.sh), backups
-//! carry a base backup and the database can be put back as it was at any moment since the
-//! oldest of them (`nerp-pitr-restore.sh`); the page shows the archive's state and the
-//! command, and, when restoring from the app is allowed, does it the same way as a restore.
+//! Point-in-time restore: while `nerp-wal-receive.sh` streams the database's WAL into the
+//! backup folder (through a replication slot, WAL_SLOT), backups carry a base backup and the
+//! database can be put back as it was at any moment since the oldest of them
+//! (`nerp-pitr-restore.sh`); the page shows whether WAL is being received and the command,
+//! and, when restoring from the app is allowed, does it the same way as a restore.
 //!
 //! BACKUP_DIR (default /var/backups/nerp) is where backups live; BACKUP_SCRIPTS (default
 //! ../deploy/backup, from where the server runs) holds the scripts.
@@ -115,10 +116,15 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
     let running: Option<String> = redis.get("backup:running").await?;
     let newest = items.first().and_then(|b| b["name"].as_str().map(String::from));
     let earliest = items.iter().rev().find(|b| b["manifest"]["base_backup"] == json!(1)).and_then(|b| b["name"].as_str().map(String::from));
-    let archiver: (String, Option<String>, Option<chrono::DateTime<chrono::Utc>>, i64, Option<chrono::DateTime<chrono::Utc>>, String) = sqlx::query_as(
-        "SELECT current_setting('archive_mode'), last_archived_wal, last_archived_time, failed_count, last_failed_time, current_setting('archive_timeout') FROM pg_stat_archiver",
+    let slot_name = std::env::var("WAL_SLOT").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "nerp_wal".into());
+    // The slot: whether something reads it now, when it last answered, and how much WAL the
+    // server keeps for it (grows without bound while nothing reads it).
+    let slot: Option<(bool, Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query_as(
+        "SELECT s.active, r.reply_time, pg_wal_lsn_diff(pg_current_wal_lsn(), s.restart_lsn)::bigint
+         FROM pg_replication_slots s LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid WHERE s.slot_name = $1",
     )
-    .fetch_one(&state.db)
+    .bind(&slot_name)
+    .fetch_optional(&state.db)
     .await?;
     Ok(Json(json!({
         "dir": d,
@@ -132,11 +138,11 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
         "restore_from_app": restore_allowed(),
         "last_restore": last(&state, "backup_restore_last").await?,
         "pitr": {
-            "archiving": archiver.0 == "on" || archiver.0 == "always",
-            "last_archived_at": archiver.2,
-            "failed_count": archiver.3,
-            "last_failed_at": archiver.4,
-            "archive_timeout": archiver.5,
+            "slot": slot_name,
+            "set_up": slot.is_some(),
+            "receiving": slot.as_ref().is_some_and(|s| s.0),
+            "last_reply_at": slot.as_ref().and_then(|s| s.1),
+            "retained_bytes": slot.as_ref().and_then(|s| s.2),
             "earliest": earliest.as_deref().and_then(backup_time),
             "command": format!("sudo systemctl stop nerp && {}/nerp-pitr-restore.sh --dest {} --to \"YYYY-MM-DD HH:MM:SS+00\" --into-live --yes && sudo systemctl start nerp", s.display(), d.display()),
         },

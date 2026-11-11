@@ -1,0 +1,18 @@
+# Point-in-time restores: streams the database's WAL into the backup folder all the time
+# (see deploy/backup/nerp-wal-receive.sh and BACKUP.md). Runs where the backups are kept,
+# not on the database server. Install: copy to /etc/systemd/system/, adjust paths and user, then
+#   systemctl enable --now nerp-wal-receive.service
+[Unit]
+Description=NERP: receive the database's WAL for point-in-time restores
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=nerp
+Group=nerp
+ExecStart=/opt/nerp/deploy/backup/nerp-wal-receive.sh --env /opt/nerp/backend/.env --dest /var/backups/nerp
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -62,40 +62,62 @@ unit that sends mail, or watch `systemctl --failed` in your monitoring.
 
 ## Layer 2 — continuous archiving and point-in-time recovery (production)
 
-The nightly dump loses up to a day. For production, have PostgreSQL archive its write-ahead
-log (WAL, its log of every change) continuously, so the database can be put back as it was at
-any moment — for example one minute before someone deleted the wrong records.
+The nightly dump loses up to a day. For production, keep PostgreSQL's write-ahead log (WAL,
+its log of every change) continuously, so the database can be put back as it was at any
+moment — for example one minute before someone deleted the wrong records.
 
 ### With NERP's scripts
 
-In `postgresql.conf` (then restart PostgreSQL):
+The database server is usually another machine. Nothing NERP-specific is installed there: the
+WAL is streamed over the network to the machine that keeps the backups (usually the NERP
+server), with PostgreSQL's own client `pg_receivewal`.
 
-```ini
-wal_level = replica
-archive_mode = on
-archive_command = '/opt/nerp/deploy/backup/nerp-wal-archive.sh %p %f /var/backups/nerp/wal'
-archive_timeout = 300          # archive at least every 5 minutes, even when quiet
+On the **database server**, once: let the `nerp` user stream WAL, and cap what a stalled
+receiver can make the server keep (`postgresql.conf`, then reload):
+
+```sql
+ALTER ROLE nerp REPLICATION;
 ```
 
-The archive folder must be writable by the `postgres` user (`sudo install -d -o postgres -g nerp
--m 750 /var/backups/nerp/wal`), and the `nerp` database user needs the `REPLICATION` right
-(`ALTER ROLE nerp REPLICATION;`, plus a `host replication nerp 127.0.0.1/32 scram-sha-256` line
-in `pg_hba.conf`). From then on:
+```ini
+# pg_hba.conf: the backup machine's address
+host  replication  nerp  10.0.0.5/32  scram-sha-256
+# postgresql.conf (the defaults wal_level = replica and max_wal_senders = 10 are fine)
+max_slot_wal_keep_size = 20GB   # never fill the disk if receiving stops for long
+```
 
-- `nerp-wal-archive.sh` keeps every finished WAL segment, compressed, in the archive folder
-  (never overwriting a segment with different contents);
-- the nightly `nerp-backup.sh` notices that archiving is on and also takes a **base backup**
-  (`pg_basebackup`) into the dated folder, and removes archived WAL older than the oldest base
-  backup it keeps (`WAL_ARCHIVE_DIR`, default `<backup folder>/wal`);
-- System → Backups shows whether archiving works (the last segment archived, failures) and the
-  earliest moment that can be restored.
+On the **backup machine** (with PostgreSQL's client programs of the server's version, e.g. the
+`postgresql-client-18` package):
 
-Restore with `deploy/backup/nerp-pitr-restore.sh` (see Restoring below): it starts a temporary
-PostgreSQL server on a private socket from the newest base backup before the moment, replays
-the archive up to that moment, and copies the result into a copy database or over the live
-one. It needs PostgreSQL's server programs of the same version (`PG_BIN`, or the usual places).
-Removed uploaded files are kept aside for `FILE_KEEP_DELETED_DAYS` days, so a restore to an
-earlier moment puts back the files the database points to.
+```sh
+sudo install -d -o nerp -g nerp -m 700 /var/backups/nerp/wal
+sudo cp deploy/systemd/nerp-wal-receive.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nerp-wal-receive.service
+journalctl -u nerp-wal-receive.service -n 20     # "receiving WAL into …"
+```
+
+From then on:
+
+- `nerp-wal-receive.sh` makes a replication slot (`WAL_SLOT`, default `nerp_wal`) on first
+  start and streams every change into `WAL_ARCHIVE_DIR` (default `<backup folder>/wal`) as it
+  is written — the segment being filled ends in `.partial`, so even the last seconds are kept.
+  The slot makes the server hold changes while the receiver is down (up to
+  `max_slot_wal_keep_size`), so nothing is lost across a restart;
+- the nightly `nerp-backup.sh` notices the slot and also takes a **base backup**
+  (`pg_basebackup`, over the network like `pg_dump`) into the dated folder, compresses
+  finished WAL segments, and removes those older than the oldest base backup it keeps;
+- System → Backups shows whether WAL is being received and the earliest moment that can be
+  restored, and warns when receiving has stopped (the server is then holding WAL for it).
+
+Restore with `deploy/backup/nerp-pitr-restore.sh` (see Restoring below), on the backup machine:
+it starts a temporary PostgreSQL server on a private socket from the newest base backup before
+the moment, replays the received WAL up to that moment, and copies the result over the network
+into a copy database or over the live one. Replaying WAL takes PostgreSQL itself, so **that
+machine needs PostgreSQL's server programs of the database's version installed** (e.g. the
+`postgresql-18` package; it doesn't have to run). Removed uploaded files are kept aside for
+`FILE_KEEP_DELETED_DAYS` days, so a restore to an earlier moment puts back the files the
+database points to.
 
 ### With pgBackRest
 
@@ -124,7 +146,7 @@ pg1-path=/var/lib/postgresql/18/main
 ```
 
 (Put the S3 access keys in `repo2-s3-key` / `repo2-s3-key-secret`, readable only by
-`postgres`.) In `postgresql.conf`, instead of NERP's archive script:
+`postgres`.) pgBackRest runs on the database server; in its `postgresql.conf`:
 
 ```ini
 wal_level = replica

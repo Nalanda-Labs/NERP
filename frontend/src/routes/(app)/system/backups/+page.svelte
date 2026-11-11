@@ -30,11 +30,11 @@
 		restore_from_app: boolean;
 		last_restore: (Run & { backup?: string }) | null;
 		pitr: {
-			archiving: boolean;
-			last_archived_at: string | null;
-			failed_count: number;
-			last_failed_at: string | null;
-			archive_timeout: string;
+			slot: string;
+			set_up: boolean;
+			receiving: boolean;
+			last_reply_at: string | null;
+			retained_bytes: number | null;
 			earliest: string | null;
 			command: string;
 		};
@@ -223,11 +223,11 @@
 		{/if}
 		<section class="card space-y-2 p-4 text-sm" aria-label="Point-in-time restore" data-pitr>
 			<h2 class="font-semibold text-slate-900">Point-in-time restore</h2>
-			{#if info.pitr.archiving}
-				<p data-archiving="on">
-					The database's changes are archived as they happen{info.pitr.last_archived_at
-						? `, last at ${formatDateTime(info.pitr.last_archived_at)}`
-						: ''}{info.pitr.archive_timeout !== '0' ? ` (at least every ${info.pitr.archive_timeout})` : ''}.
+			{#if info.pitr.receiving}
+				<p data-receiving="on">
+					The database's changes are received as they happen{info.pitr.last_reply_at
+						? ` (last at ${formatDateTime(info.pitr.last_reply_at)})`
+						: ''}.
 					{#if info.pitr.earliest}
 						It can be put back as it was at any moment since <strong
 							>{formatDateTime(info.pitr.earliest)}</strong
@@ -236,18 +236,17 @@
 						The next backup makes the first base backup to restore from.
 					{/if}
 				</p>
-				{#if info.pitr.failed_count > 0}
-					<p class="text-red-700" data-archive-failed>
-						Archiving failed {info.pitr.failed_count} time(s){info.pitr.last_failed_at
-							? `, last at ${formatDateTime(info.pitr.last_failed_at)}`
-							: ''}: check the archive folder and the database server's log.
-					</p>
-				{/if}
+			{:else if info.pitr.set_up}
+				<p class="text-red-700" data-receiving="stopped">
+					Receiving the database's changes has stopped: start <code>nerp-wal-receive</code> again.
+					Meanwhile the database server keeps them for it ({formatBytes(info.pitr.retained_bytes ?? 0)}
+					so far), which fills its disk if left.
+				</p>
 			{:else}
-				<p data-archiving="off" class="text-slate-600">
-					Off: only the backups themselves can be restored. To restore any moment in between, have
-					PostgreSQL archive its changes with <code>deploy/backup/nerp-wal-archive.sh</code> (see the
-					deploy guide); the next backups then include a base backup.
+				<p data-receiving="off" class="text-slate-600">
+					Off: only the backups themselves can be restored. To restore any moment in between, run
+					<code>deploy/backup/nerp-wal-receive.sh</code> where the backups are kept (see the deploy
+					guide); the next backups then include a base backup.
 				</p>
 			{/if}
 			<div class="flex items-start gap-2">

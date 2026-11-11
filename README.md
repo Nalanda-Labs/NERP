@@ -841,12 +841,12 @@ All settings are environment variables (see `backend/.env.example`):
 | `FILE_ENCRYPTION_KEY` | unset | encrypts uploaded files at rest (AES-256-GCM); 32+ characters. Existing files are encrypted in the background; keep the key with `.env`'s backup — without it the files can't be read. The server refuses to start when files are under a key it wasn't given |
 | `FILE_ENCRYPTION_OLD_KEYS` | empty | earlier file keys (comma-separated) while files move to a new `FILE_ENCRYPTION_KEY`; with no current key, files are decrypted back |
 | `FILE_KEEP_DELETED_DAYS` | `14` | removed files are kept aside in `UPLOAD_DIR/.deleted` this long, for point-in-time restores (`0`: removed at once) |
-| `WAL_ARCHIVE_DIR` | `<BACKUP_DIR>/wal` | where `nerp-wal-archive.sh` archives PostgreSQL's WAL, for the backup and restore scripts |
+| `WAL_ARCHIVE_DIR` | `<BACKUP_DIR>/wal` | where `nerp-wal-receive.sh` keeps the database's WAL for point-in-time restores (read by the backup and restore scripts) |
+| `WAL_SLOT` | `nerp_wal` | the replication slot `nerp-wal-receive.sh` streams through; System → Backups watches it |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | enables "Connect Gmail" (see Email → OAuth) |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | — / — / `common` | enables "Connect Microsoft 365" |
 | `PDF_FONT_DIR` | — | extra fonts for Typst, besides the system fonts |
 | `VIDEO_CONVERT_MAX_MB` | `2048` | larger videos aren't converted into a copy every browser plays |
-| `PG_BIN` | the usual places | PostgreSQL's server programs (`pg_basebackup`, `pg_ctl`) for the backup and point-in-time restore scripts |
 | `GOOGLE_OAUTH_AUTH_URL` / `GOOGLE_OAUTH_TOKEN_URL`, `MICROSOFT_OAUTH_AUTH_URL` / `MICROSOFT_OAUTH_TOKEN_URL` | the providers' own | tests or proxies only: other addresses for the OAuth endpoints |
 | `GOOGLE_CALDAV_URL` / `MICROSOFT_GRAPH_URL` | the providers' own | tests or proxies only: other addresses for calendar sync |
 | `LDAP_ENABLED` | `false` | `true` offers LDAP directory sign-in and sync (set up under Directory & sign-on) |

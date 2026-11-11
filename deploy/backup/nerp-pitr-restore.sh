@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Point-in-time restore: the database as it was at a given moment, from a base backup made by
-# nerp-backup.sh and the WAL archived by nerp-wal-archive.sh.
+# nerp-backup.sh and the WAL received by nerp-wal-receive.sh. Runs where the backups are (the
+# database server may be another machine: the result is copied over the network).
 #
 #   nerp-pitr-restore.sh --to "2026-11-12 10:30:00+01" [--env backend/.env] [--dest /var/backups/nerp]
 #       [--target-db postgres://…/nerp_copy | --into-live --yes] [--keep] [--port 5499]
@@ -14,7 +15,8 @@
 #   Stop the NERP server first (or restore from the app, which pauses itself);
 # - with neither: leaves the temporary server running and says how to connect (--keep too).
 # The temporary server is stopped and removed at the end unless --keep is given.
-# PostgreSQL's server programs of the same version are needed (PG_BIN, or the usual places).
+# Replaying WAL takes PostgreSQL itself: this machine needs the server programs of the
+# database's version installed (the postgresql-18 package or similar), but not running.
 set -euo pipefail
 
 ENV_FILE="$(cd "$(dirname "$0")/../.." && pwd)/backend/.env"
@@ -73,17 +75,17 @@ for b in $(find "$DEST" -mindepth 1 -maxdepth 1 -type d -name '20*' | sort -r); 
   name="$(basename "$b")"
   if [ -f "$b/base/base.tar.gz" ] && [[ "$name" < "$TO_STAMP" ]]; then BACKUP="$b"; break; fi
 done
-[ -n "$BACKUP" ] || { echo "no base backup from before $TO_UTC UTC in $DEST (they are made by nerp-backup.sh once WAL archiving is on)" >&2; exit 1; }
-[ -d "$WAL_ARCHIVE_DIR" ] || { echo "no WAL archive at $WAL_ARCHIVE_DIR" >&2; exit 1; }
+[ -n "$BACKUP" ] || { echo "no base backup from before $TO_UTC UTC in $DEST (they are made by nerp-backup.sh once nerp-wal-receive.sh runs)" >&2; exit 1; }
+[ -d "$WAL_ARCHIVE_DIR" ] || { echo "no WAL archive at $WAL_ARCHIVE_DIR (nerp-wal-receive.sh fills it)" >&2; exit 1; }
 
-# The replay stops at the first change after the moment, and the changes still in the live
-# server's current WAL segment aren't archived yet: make a change now and archive the
-# segment (needs the right to call pg_switch_wal; without it, recent moments may not be
-# reachable until the segment is archived on its own, at most archive_timeout later).
-SEG="$(psql "$LIVE_URL" -Atc "SELECT txid_current()" -c "SELECT pg_walfile_name(pg_switch_wal())" 2>/dev/null | tail -1 || true)"
-if [ -n "$SEG" ]; then
-  for _ in $(seq 1 120); do
-    { [ -f "$WAL_ARCHIVE_DIR/$SEG.gz" ] || [ -f "$WAL_ARCHIVE_DIR/$SEG" ]; } && break
+# The replay stops at the first change after the moment: make one now (a quiet database may
+# have none), and wait until it has been received.
+WAL_SLOT="$(setting WAL_SLOT)"
+WAL_SLOT="${WAL_SLOT:-nerp_wal}"
+LSN="$(psql "$LIVE_URL" -Atc "SELECT txid_current()" -c "SELECT pg_current_wal_lsn()" 2>/dev/null | tail -1 || true)"
+if [ -n "$LSN" ]; then
+  for _ in $(seq 1 60); do
+    [ "$(psql "$LIVE_URL" -Atc "SELECT coalesce(bool_or(restart_lsn >= '$LSN'), false) FROM pg_replication_slots WHERE slot_name = '$WAL_SLOT'" 2>/dev/null)" = t ] && break
     sleep 1
   done
 fi
@@ -91,10 +93,10 @@ fi
 pg_tool() {
   local major
   major="$(sed -n 's/^\([0-9]*\).*/\1/p' "$WORKDIR/data/PG_VERSION")"
-  for d in "$(setting PG_BIN)" "/usr/lib/postgresql/$major/bin" "/usr/pgsql-$major/bin" "$(pg_config --bindir 2>/dev/null || true)"; do
+  for d in "${PG_BIN:-}" "/usr/lib/postgresql/$major/bin" "/usr/pgsql-$major/bin" "$(pg_config --bindir 2>/dev/null || true)"; do
     [ -n "$d" ] && [ -x "$d/$1" ] && { echo "$d/$1"; return; }
   done
-  command -v "$1" || { echo "PostgreSQL's $1 (version $major) was not found; set PG_BIN" >&2; exit 1; }
+  command -v "$1" || { echo "PostgreSQL $major's $1 was not found: install its server programs on this machine (e.g. the postgresql-$major package)" >&2; exit 1; }
 }
 
 umask 077
@@ -129,7 +131,7 @@ unix_socket_directories = '$WORKDIR/socket'
 archive_mode = off
 hba_file = '$WORKDIR/data/pg_hba.conf'
 ident_file = '$WORKDIR/data/pg_ident.conf'
-restore_command = 'f="$WAL_ARCHIVE_DIR/%f"; if [ -f "\$f.gz" ]; then gzip -dc "\$f.gz" > "%p"; else cp "\$f" "%p"; fi'
+restore_command = 'f="$WAL_ARCHIVE_DIR/%f"; if [ -f "\$f.gz" ]; then gzip -dc "\$f.gz" > "%p"; elif [ -f "\$f" ]; then cp "\$f" "%p"; else cp "\$f.partial" "%p"; fi'
 recovery_target_time = '$TO_UTC+00'
 recovery_target_action = 'promote'
 recovery_target_inclusive = true
