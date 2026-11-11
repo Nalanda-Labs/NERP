@@ -55,9 +55,10 @@ try {
   ok('timeline entries', tl.some((e: any) => e.kind === 'recurring' && e.data.event === 'set') && tl.some((e: any) => e.kind === 'recurring' && e.data.event === 'made' && e.data.item_id === copy.id), tl.map((e: any) => e.kind));
 
   // ---- the job ----
+  // The job claims the schedule first and makes the copy right after: wait for both.
   const copies = async (id: string) => (await admin.get(`/crm/deal/items/${id}`)).data.children.length;
   await db.query("UPDATE crm_recurring SET next_run_at = now() - interval '1 minute' WHERE item_id = $1", [deal.id]);
-  const runs = await waitFor(async () => { const v = (await admin.get(`/crm/items/${deal.id}/recurring`)).data; return v.run_count === 1 ? v : null; }, 90000);
+  const runs = await waitFor(async () => { const v = (await admin.get(`/crm/items/${deal.id}/recurring`)).data; return v.run_count === 1 && (await copies(deal.id)) === 2 ? v : null; }, 90000);
   ok('due copy made by the job', runs && (await copies(deal.id)) === 2 && runs.is_active && new Date(runs.next_run_at) > new Date(), runs);
 
   // A limit of one run: the schedule finishes.
@@ -68,7 +69,7 @@ try {
   await admin.put(`/crm/items/${gone.id}/recurring`, { rule: monthly });
   await admin.req('DELETE', `/crm/deal/items/${gone.id}`);
   await db.query("UPDATE crm_recurring SET next_run_at = now() - interval '1 minute' WHERE item_id = ANY($1)", [[once.id, gone.id]]);
-  const fin = await waitFor(async () => { const v = (await admin.get(`/crm/items/${once.id}/recurring`)).data; return v.run_count === 1 ? v : null; }, 90000);
+  const fin = await waitFor(async () => { const v = (await admin.get(`/crm/items/${once.id}/recurring`)).data; return v.run_count === 1 && (await copies(once.id)) === 1 ? v : null; }, 90000);
   ok('run limit finishes the schedule', fin && !fin.is_active && fin.next_run_at === null && (await copies(once.id)) === 1, fin);
   const g = (await db.query('SELECT run_count FROM crm_recurring WHERE item_id = $1', [gone.id])).rows[0];
   ok('deleted pattern skipped', g?.run_count === 0, g);
