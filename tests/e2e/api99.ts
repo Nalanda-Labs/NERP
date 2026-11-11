@@ -38,7 +38,7 @@ const db = new pg.Client({ connectionString: dbUrl });
 await db.connect();
 const row = async (id: string) => (await db.query('SELECT storage_path, enc_key, size_bytes, sha256 FROM files WHERE id = $1', [id])).rows[0];
 const upload = async (data: Buffer, name: string, mime = 'application/octet-stream') => {
-  const fd = new FormData(); fd.append('file', new Blob([data], { type: mime }), name);
+  const fd = new FormData(); fd.append('file', new Blob([new Uint8Array(data)], { type: mime }), name);
   return (await ann.req('POST', '/files', fd)).data;
 };
 const legacyDir = join(uploads, 'legacy-test');

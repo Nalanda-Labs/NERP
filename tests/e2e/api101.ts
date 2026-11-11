@@ -22,7 +22,7 @@ const db = new pg.Client({ connectionString: dbUrl });
 await db.connect();
 const migrations: string[] = [];
 const csv = (rows: (string | number)[][]) => rows.map((r) => r.map((v) => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v)).join(',')).join('\r\n') + '\r\n';
-const upload = async (name: string, bytes: Uint8Array | string, type: string) => {
+const upload = async (name: string, bytes: Uint8Array<ArrayBuffer> | string, type: string) => {
   const fd = new FormData(); fd.append('file', new Blob([bytes], { type }), name);
   return (await admin.req('POST', '/files', fd)).data.id as string;
 };
