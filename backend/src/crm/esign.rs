@@ -68,25 +68,45 @@ struct SendBody {
     message: Option<String>,
 }
 
+/// Whether this person may send documents for signature at all: everyone with write access
+/// to the record, unless the company limits it to people with "Send for e-signature".
+pub(crate) async fn may_send(state: &AppState, auth: &AuthUser) -> AppResult<()> {
+    let restricted: bool = sqlx::query_scalar("SELECT value = 'true'::jsonb FROM settings WHERE key = 'esign_restricted'").fetch_optional(&state.db).await?.unwrap_or(false);
+    if restricted && !auth.can(crate::auth::permissions::ESIGN) && !auth.can(crate::auth::permissions::CRM_ADMIN) {
+        return Err(AppError::Forbidden);
+    }
+    Ok(())
+}
+
 async fn send(State(state): State<AppState>, auth: AuthUser, Path(doc): Path<Uuid>, Json(b): Json<SendBody>) -> AppResult<Json<Value>> {
+    may_send(&state, &auth).await?;
+    let item: Uuid = sqlx::query_scalar("SELECT item_id FROM crm_documents WHERE id = $1").bind(doc).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("document"))?;
+    let row = load_row(&state, item, false).await?;
+    require(&state, &auth, row.entity_type, "write", row.assigned_to).await?;
+    let signers = b.signers.into_iter().map(|s| (s.name, s.email)).collect();
+    let id = send_document(&state, auth.id, doc, signers, b.message, None).await?;
+    request_view(&state, id).await.map(Json)
+}
+
+/// Sends a ready document for signature (the caller checked the rights). Returns the request.
+pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers_in: Vec<(String, String)>, message: Option<String>, template: Option<Uuid>) -> AppResult<Uuid> {
     let (item, number, status, pdf): (Uuid, String, String, Option<Uuid>) =
         sqlx::query_as("SELECT item_id, number, status, pdf_file_id FROM crm_documents WHERE id = $1")
             .bind(doc)
             .fetch_optional(&state.db)
             .await?
             .ok_or(AppError::NotFound("document"))?;
-    let row = load_row(&state, item, false).await?;
-    require(&state, &auth, row.entity_type, "write", row.assigned_to).await?;
+    let row = load_row(state, item, false).await?;
     let pdf = pdf.filter(|_| status == "ready").ok_or_else(|| AppError::bad("the document is not ready yet"))?;
-    if b.signers.is_empty() || b.signers.len() > 10 {
+    if signers_in.is_empty() || signers_in.len() > 10 {
         return Err(AppError::bad("add one to ten signers"));
     }
     let mut signers = Vec::new();
-    for s in &b.signers {
-        let name = crate::routes::required("signer's name", &s.name, 200)?;
-        let email = s.email.trim().to_lowercase();
+    for (sname, semail) in &signers_in {
+        let name = crate::routes::required("signer's name", sname, 200)?;
+        let email = semail.trim().to_lowercase();
         if !email.contains('@') || email.contains(char::is_whitespace) || email.len() > 254 {
-            return Err(AppError::bad(format!("“{}” is not a valid email address", s.email)));
+            return Err(AppError::bad(format!("“{semail}” is not a valid email address")));
         }
         if signers.iter().any(|(_, e): &(String, String)| *e == email) {
             return Err(AppError::bad("each signer once"));
@@ -94,16 +114,17 @@ async fn send(State(state): State<AppState>, auth: AuthUser, Path(doc): Path<Uui
         signers.push((name, email));
     }
     let open: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sign_requests WHERE document_id = $1 AND status = 'sent')").bind(doc).fetch_one(&state.db).await?;
+    let state = state.clone();
     if open {
         return Err(AppError::bad("this document is already out for signature; cancel that first"));
     }
     // Freeze what is being signed.
     let (_, _, _, bytes) = read_bytes(&state, pdf).await?;
-    let frozen = store_bytes(&state, Some(auth.id), &format!("{number}.pdf"), "application/pdf", &bytes).await?;
-    let message = b.message.map(|m| m.trim().chars().take(2000).collect::<String>()).filter(|m| !m.is_empty());
+    let frozen = store_bytes(&state, Some(by), &format!("{number}.pdf"), "application/pdf", &bytes).await?;
+    let message = message.map(|m| m.trim().chars().take(2000).collect::<String>()).filter(|m| !m.is_empty());
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO sign_requests (document_id, item_id, title, message, original_file_id, original_sha256, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        "INSERT INTO sign_requests (document_id, item_id, title, message, original_file_id, original_sha256, created_by, template_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(doc)
     .bind(item)
@@ -111,7 +132,8 @@ async fn send(State(state): State<AppState>, auth: AuthUser, Path(doc): Path<Uui
     .bind(&message)
     .bind(frozen)
     .bind(hash(&bytes))
-    .bind(auth.id)
+    .bind(by)
+    .bind(template)
     .fetch_one(&mut *tx)
     .await?;
     let mut links = Vec::new();
@@ -128,14 +150,14 @@ async fn send(State(state): State<AppState>, auth: AuthUser, Path(doc): Path<Uui
         links.push((name.clone(), email.clone(), token));
     }
     tx.commit().await?;
-    let sender: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let sender: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(by).fetch_one(&state.db).await?;
     let company = company(&state).await;
     for (name, email, token) in &links {
         invite(&state, &company, &sender, &number, message.as_deref(), name, email, token).await;
     }
-    timeline(&state.db, item, "signature", Some(auth.id), None, json!({ "event": "sent", "request_id": id, "number": number, "signers": signers.iter().map(|(n, _)| n).collect::<Vec<_>>() })).await?;
+    timeline(&state.db, item, "signature", Some(by), None, json!({ "event": "sent", "request_id": id, "number": number, "signers": signers.iter().map(|(n, _)| n).collect::<Vec<_>>() })).await?;
     broadcast(&state, row.entity_type, item, false).await;
-    request_view(&state, id).await.map(Json)
+    Ok(id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -217,6 +239,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(item): Path<Uu
 }
 
 async fn writable(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(Uuid, i16, String, String)> {
+    may_send(state, auth).await?;
     let (item, status, title): (Uuid, String, String) = sqlx::query_as("SELECT item_id, CASE WHEN status = 'sent' AND expires_at < now() THEN 'expired' ELSE status END, title FROM sign_requests WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -420,6 +443,8 @@ async fn decline(State(state): State<AppState>, Path(token): Path<String>, Json(
     let (item, created_by): (Uuid, Option<Uuid>) = sqlx::query_as("SELECT item_id, created_by FROM sign_requests WHERE id = $1").bind(s.request_id).fetch_one(&state.db).await?;
     timeline(&state.db, item, "signature", None, None, json!({ "event": "declined", "request_id": s.request_id, "number": s.title, "name": s.name, "reason": reason })).await?;
     tell(&state, created_by, format!("{} declined to sign {}", s.name, s.title), item).await;
+    let tpl: Option<Uuid> = sqlx::query_scalar("SELECT template_id FROM sign_requests WHERE id = $1").bind(s.request_id).fetch_one(&state.db).await?;
+    super::automation::fire(&state, item, "signature_declined", |p| same_template(p, tpl)).await;
     signer_view(State(state), Path(token)).await
 }
 
@@ -560,7 +585,16 @@ async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
         mail.attachments = vec![file];
         let _ = crate::jobs::send_email(state, mail).await;
     }
-    let created_by: Option<Uuid> = sqlx::query_scalar("SELECT created_by FROM sign_requests WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (created_by, tpl): (Option<Uuid>, Option<Uuid>) = sqlx::query_as("SELECT created_by, template_id FROM sign_requests WHERE id = $1").bind(id).fetch_one(&state.db).await?;
     tell(state, created_by, format!("Everyone signed {}", r.title), r.item_id).await;
+    super::automation::fire(state, r.item_id, "signature_completed", |p| same_template(p, tpl)).await;
     Ok(())
+}
+
+/// A trigger limited to one signing template matches only requests from it.
+fn same_template(params: &Value, template: Option<Uuid>) -> bool {
+    match params.get("sign_template_id").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+        Some(t) => template.is_some_and(|x| x.to_string() == t),
+        None => true,
+    }
 }

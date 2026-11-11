@@ -532,6 +532,7 @@ async fn try_record_changed(state: &AppState, item: Uuid) -> AppResult<()> {
 
 /// A document finished rendering: an email robot waiting to attach it carries on.
 pub async fn document_finished(state: &AppState, item: Uuid, document: Uuid) {
+    crate::crm::sign_templates::document_ready(state, document).await;
     let runs: Result<Vec<Uuid>, _> = sqlx::query_scalar("SELECT id FROM crm_robot_runs WHERE item_id = $1 AND status = 'waiting' AND data->>'document_id' = $2")
         .bind(item)
         .bind(document.to_string())
@@ -686,7 +687,7 @@ pub struct Trigger {
 const TRIGGER_COLUMNS: &str = "id, entity_type, category_id, stage_id, name, event, params, conditions, allow_backwards, token, sort, is_active, created_at, updated_at";
 /// Events a robot can wait for.
 const WAIT_EVENTS: &[&str] = &["email_received", "activity_done"];
-const EVENTS: &[&str] = &["activity_done", "comment_added", "document_created", "email_received", "webform_submitted", "webhook"];
+const EVENTS: &[&str] = &["activity_done", "comment_added", "document_created", "email_received", "webform_submitted", "webhook", "signature_completed", "signature_declined"];
 
 /// An event happened on a record: the first matching trigger of its pipeline moves it.
 /// `matches` checks the trigger's event parameters. Never fails the caller.
@@ -1075,6 +1076,12 @@ fn check_trigger_params(event: &str, p: Value) -> AppResult<Value> {
             if let Some(t) = p.get("form_id").and_then(Value::as_str).filter(|t| !t.is_empty()) {
                 Uuid::parse_str(t).map_err(|_| AppError::bad("form_id must be a web form"))?;
                 out.insert("form_id".into(), json!(t));
+            }
+        }
+        "signature_completed" | "signature_declined" => {
+            if let Some(t) = p.get("sign_template_id").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                Uuid::parse_str(t).map_err(|_| AppError::bad("sign_template_id must be a signing template"))?;
+                out.insert("sign_template_id".into(), json!(t));
             }
         }
         "comment_added" | "email_received" | "webhook" => {}

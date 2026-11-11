@@ -26,6 +26,8 @@
 		last_backup: Run;
 		last_verify: Run;
 		restore_command: string | null;
+		restore_from_app: boolean;
+		last_restore: (Run & { backup?: string }) | null;
 	};
 	let info = $state<Info | null>(null);
 	let showOutput = $state<'' | 'backup' | 'verify'>('');
@@ -54,6 +56,32 @@
 	// 2026-11-10T020000Z → a date
 	const when = (n: string) =>
 		formatDateTime(`${n.slice(0, 13)}:${n.slice(13, 15)}:${n.slice(15, 17)}Z`);
+	// Restoring from here (when the server allows it): the password and the backup's name.
+	let restoreOf = $state<Backup | null>(null);
+	let restorePw = $state('');
+	let restoreName = $state('');
+	let restoring = $state(false);
+	async function restore(e: SubmitEvent) {
+		e.preventDefault();
+		try {
+			await api.post(`/admin/backups/${restoreOf!.name}/restore`, { password: restorePw, confirm: restoreName });
+			restoreOf = null;
+			restorePw = '';
+			restoring = true;
+			// The app pauses while it restores; the health check says when it is back.
+			await new Promise((r) => setTimeout(r, 3000));
+			for (let i = 0; i < 600; i++) {
+				const h = await fetch('/api/health').then((x) => x.json()).catch(() => null);
+				if (h?.status === 'ok') break;
+				await new Promise((r) => setTimeout(r, 2000));
+			}
+			restoring = false;
+			await load();
+			toasts[info?.last_restore?.ok ? 'success' : 'error'](info?.last_restore?.ok ? 'The backup is restored' : 'Restoring did not work; see the output');
+		} catch (err) {
+			toasts.error(err);
+		}
+	}
 	const copy = (t: string) =>
 		navigator.clipboard?.writeText(t).then(() => toasts.success('Copied'));
 </script>
@@ -133,7 +161,7 @@
 							<td>{b.manifest.upload_files ?? '—'}</td>
 							<td>{b.manifest.last_migration ?? '—'}</td>
 							<td class="pr-4 text-right"
-								>{#if b.has_dump}<button
+								>{#if b.has_dump && info.restore_from_app}<button class="mr-3 text-red-600 hover:underline" onclick={() => ((restoreOf = b), (restoreName = ''))} data-restore-backup={b.name}>Restore</button>{/if}{#if b.has_dump}<button
 										class="text-brand-600 hover:underline"
 										onclick={() =>
 											downloadUrl(
@@ -171,7 +199,32 @@
 				</p>
 			</section>
 		{/if}
+		{#if info.last_restore}
+			<section class="card space-y-1 p-4 text-sm" aria-label="Last restore" data-last-restore>
+				<h2 class="font-semibold text-slate-900">Last restore from here</h2>
+				<p class={info.last_restore.ok ? 'text-emerald-700' : 'text-red-700'}>{info.last_restore.ok ? 'Restored' : 'Failed'}: {info.last_restore.backup ? when(info.last_restore.backup) : ''} · {formatDateTime(info.last_restore.finished_at)}</p>
+				<details><summary class="cursor-pointer text-slate-500">Output</summary><pre class="mt-1 max-h-64 overflow-auto rounded bg-slate-50 p-2 text-xs whitespace-pre-wrap">{info.last_restore.output}</pre></details>
+			</section>
+		{/if}
 	{:else}
 		<p class="text-sm text-slate-400">Loading…</p>
 	{/if}
 </div>
+
+{#if restoring}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" role="alertdialog" aria-label="Restoring">
+		<div class="max-w-sm rounded-2xl bg-white p-6 text-center shadow-g2"><p class="font-semibold text-slate-900">Restoring the backup…</p><p class="mt-1 text-sm text-slate-500">NERP is paused for everyone until it is done. This page continues by itself.</p></div>
+	</div>
+{/if}
+
+{#if restoreOf}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true" aria-label="Restore a backup">
+		<form class="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 text-sm shadow-g2" onsubmit={restore}>
+			<h2 class="text-lg font-semibold text-slate-900">Restore the backup of {when(restoreOf.name)}?</h2>
+			<p class="text-red-700">Everything in NERP goes back to that moment: whatever was added or changed since is lost, for everyone. NERP pauses while it restores.</p>
+			<div><label class="label" for="rs-name">Type <code>{restoreOf.name}</code> to confirm</label><input id="rs-name" class="input font-mono" required bind:value={restoreName} autocomplete="off" /></div>
+			<div><label class="label" for="rs-pw">Your password</label><input id="rs-pw" class="input" type="password" required bind:value={restorePw} autocomplete="current-password" /></div>
+			<div class="flex justify-end gap-2"><button type="button" class="btn btn-secondary" onclick={() => (restoreOf = null)}>Cancel</button><button class="btn bg-red-600 text-white hover:bg-red-700" disabled={restoreName !== restoreOf.name}>Restore</button></div>
+		</form>
+	</div>
+{/if}

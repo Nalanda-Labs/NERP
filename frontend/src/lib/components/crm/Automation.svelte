@@ -37,7 +37,9 @@
 		['set_field', 'Change a field', 'edit'],
 		['assign', 'Change the responsible person', 'user'],
 		['move_stage', 'Move to another stage', 'chevronRight'],
+		['tunnel', 'Tunnel to another pipeline', 'chevronRight'],
 		['document', 'Create a document', 'file'],
+		['sign', 'Send for signature', 'edit'],
 		['comment', 'Add a comment', 'message'],
 		['webhook', 'Call a webhook', 'send'],
 		['create_record', 'Create a linked record', 'plus'],
@@ -50,7 +52,9 @@
 		['document_created', 'A document is created'],
 		['email_received', 'An email arrives from the client'],
 		['webform_submitted', 'A web form is submitted'],
-		['webhook', 'An external system calls a webhook']
+		['webhook', 'An external system calls a webhook'],
+		['signature_completed', 'Everyone signs a document'],
+		['signature_declined', 'Someone declines to sign']
 	];
 	const WAITS: [Wait['until'], string][] = [
 		['conditions', 'the conditions below hold'],
@@ -112,15 +116,18 @@
 	}
 	let templates = $state<{ id: string; name: string; entity_types: number[] }[]>([]);
 	let projects = $state<{ id: string; name: string }[]>([]);
+	let signTemplates = $state<{ id: string; name: string; entity_types: number[] }[]>([]);
 	let extrasLoaded = false;
 	async function loadExtras() {
 		if (extrasLoaded) return;
 		extrasLoaded = true;
-		[templates, projects] = await Promise.all([
+		[templates, projects, signTemplates] = await Promise.all([
 			api.get<{ items: typeof templates }>('/crm/doc-templates').then((r) => r.items),
-			api.get<typeof projects>('/projects?mine=true').catch(() => [])
+			api.get<typeof projects>('/projects?mine=true').catch(() => []),
+			api.get<{ items: typeof signTemplates }>('/crm/sign-templates').then((r) => r.items).catch(() => [])
 		]);
 	}
+	const typeSignTemplates = $derived(signTemplates.filter((t) => type && (!t.entity_types.length || t.entity_types.includes(type.id))));
 	const typeTemplates = $derived(templates.filter((t) => type && t.entity_types.includes(type.id)));
 	// Record types a robot can create: leads, deals and smart processes.
 	const creatable = $derived((crm.config?.types ?? []).filter((t) => t.code === 'deal' || t.code === 'lead' || !t.is_system) as CrmType[]);
@@ -177,6 +184,11 @@
 			case 'assign': return { users: [], mode: 'round_robin' };
 			case 'move_stage': return { stage_id: category?.stages.find((s) => s.semantics === 'process')?.id ?? '' };
 			case 'document': return { template_id: typeTemplates[0]?.id ?? '' };
+			case 'sign': return { sign_template_id: typeSignTemplates[0]?.id ?? '' };
+			case 'tunnel': {
+				const other = type?.categories.find((c) => c.id !== categoryId);
+				return { stage_id: other?.stages.find((s) => s.semantics === 'process')?.id ?? '', mode: 'copy' };
+			}
 			case 'webhook': return { url: 'https://', method: 'POST', headers: [], body: '', secret: '' };
 			case 'create_record': return { entity_type: creatable.find((t) => t.code === 'deal')?.id ?? creatable[0]?.id, category_id: '', title: 'Follow-up: {{title}}', responsible: 'assigned', copy_client: true, copy_amount: false };
 			case 'convert_lead': return { create_contact: true, create_company: false, create_deal: true, deal_category_id: '' };
@@ -389,6 +401,11 @@
 			case 'assign': return `${p.users.length} employee${p.users.length === 1 ? '' : 's'}, ${p.mode === 'random' ? 'random' : p.mode === 'least_busy' ? 'least busy' : 'in turn'}`;
 			case 'move_stage': return `→ ${stageName(p.stage_id)}`;
 			case 'document': return templates.find((t) => t.id === p.template_id)?.name ?? 'Template';
+			case 'sign': return signTemplates.find((t) => t.id === p.sign_template_id)?.name ?? 'Signing template';
+			case 'tunnel': {
+				const c = type?.categories.find((x) => x.stages.some((s) => s.id === p.stage_id));
+				return `${p.mode === 'move' ? 'Move' : 'Copy'} to ${c?.name ?? '?'}: ${c?.stages.find((s) => s.id === p.stage_id)?.name ?? '?'}`;
+			}
 			case 'webhook': return `${p.method} ${p.url}`;
 			case 'create_record': return `${(crm.config?.types ?? []).find((t) => t.id === p.entity_type)?.name ?? 'Record'}: ${p.title}`;
 			case 'convert_lead': return [p.create_contact && 'contact', p.create_company && 'company', p.create_deal && 'deal'].filter(Boolean).join(' + ');
@@ -542,6 +559,25 @@
 			<div>
 				<label class="label" for="au-tpl">Template</label>
 				<select id="au-tpl" class="input" bind:value={p.template_id}>{#each typeTemplates as t (t.id)}<option value={t.id}>{t.name}</option>{/each}</select>
+			</div>
+		{:else if action === 'tunnel'}
+			<div class="grid gap-3 sm:grid-cols-[1fr_9rem]">
+				<div>
+					<label class="label" for="au-tun">To</label>
+					<select id="au-tun" class="input" bind:value={p.stage_id}>
+						{#each (type?.categories ?? []).filter((c) => c.id !== categoryId) as c (c.id)}
+							<optgroup label={c.name}>{#each c.stages as s (s.id)}<option value={s.id}>{s.name}</option>{/each}</optgroup>
+						{/each}
+					</select>
+				</div>
+				<div><label class="label" for="au-tunm">How</label><select id="au-tunm" class="input" bind:value={p.mode}><option value="copy">Copy it there</option><option value="move">Move it there</option></select></div>
+			</div>
+			<p class="text-xs text-slate-500">A copy is linked to this record and keeps its client, amount, products and custom fields.</p>
+		{:else if action === 'sign'}
+			<div>
+				<label class="label" for="au-stpl">Signing template</label>
+				<select id="au-stpl" class="input" bind:value={p.sign_template_id}>{#each typeSignTemplates as t (t.id)}<option value={t.id}>{t.name}</option>{/each}</select>
+				<p class="mt-1 text-xs text-slate-500">Sent in the name of the record's responsible person. Set up signing templates under Documents.</p>
 			</div>
 		{:else if action === 'webhook'}
 			<div class="grid gap-3 sm:grid-cols-[8rem_1fr]">
@@ -875,6 +911,14 @@
 						<select id="au-dtpl" class="input" value={draft.params.template_id ?? ''} onchange={(e) => (draft!.params.template_id = e.currentTarget.value || undefined)}>
 							<option value="">Any</option>
 							{#each typeTemplates as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
+						</select>
+					</div>
+				{:else if draft.event === 'signature_completed' || draft.event === 'signature_declined'}
+					<div>
+						<label class="label" for="au-sgt">Signing template</label>
+						<select id="au-sgt" class="input" value={draft.params.sign_template_id ?? ''} onchange={(e) => (draft!.params.sign_template_id = e.currentTarget.value || undefined)}>
+							<option value="">Any</option>
+							{#each typeSignTemplates as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
 						</select>
 					</div>
 				{:else if draft.event === 'webhook'}

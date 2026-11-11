@@ -67,6 +67,8 @@ export interface CrmConfig {
 	currencies: { code: string; rate: string; is_base: boolean }[];
 	base_currency: string;
 	options: Record<string, string[]>;
+	/** Names of the company's own traffic sources, by code. */
+	source_labels?: Record<string, string>;
 	is_admin: boolean;
 	can_manage_products: boolean;
 }
@@ -312,6 +314,8 @@ export function formatAddress(a: Address | null | undefined): string {
 /** "web_form" → "Web form". */
 export function optionLabel(v: string | null | undefined): string {
 	if (!v) return '';
+	const own = crm.config?.source_labels?.[v];
+	if (own) return own;
 	const special: Record<string, string> = { it: 'IT', x: 'X (Twitter)', im: 'Messenger', web_form: 'Web form', real_estate: 'Real estate' };
 	return special[v] ?? v.charAt(0).toUpperCase() + v.slice(1).replace(/_/g, ' ');
 }

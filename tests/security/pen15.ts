@@ -9,7 +9,8 @@ import { endpoints, isPublic, SELF_HARM, fillPath, params, reach, ok2xx, NIL } f
 const { ann, bob, ids } = await world();
 const { guest, chat } = await makeGuest(ann, [bob.id]);
 ok('the guest is signed in', !!guest.token);
-const AREAS = /^\/api\/(auth\/|me\/|profile|notifications|realtime\/|files|download-links|im\/|calls|projects|tasks|feed|boards|settings$|users\/me)/;
+// Their workgroups' files are theirs too (the drive keeps them to those).
+const AREAS = /^\/api\/(auth\/|me\/|profile|notifications|realtime\/|files|download-links|im\/|calls|projects|tasks|feed|boards|drive|office\/status|settings$|users\/me)/;
 const SECRETS = [`Ann private task ${stamp}`, `just between us ${stamp}`, `Only for Cat ${stamp}`, `Vault plan ${stamp}`, `Ann private event ${stamp}`, `Ann board ${stamp}`, `Ann dash ${stamp}`, 'secret handbook', `Ann item ${stamp}`, ann.email, bob.email];
 const values = [NIL, ...Object.values(ids), chat.id, ann.id];
 let swept = 0;

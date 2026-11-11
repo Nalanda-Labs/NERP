@@ -27,6 +27,8 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/crm/config", get(config))
+        .route("/crm/traffic-sources", get(list_sources).post(create_source))
+        .route("/crm/traffic-sources/{id}", axum::routing::patch(update_source).delete(delete_source))
         .route("/crm/{type}/categories", post(create_category))
         .route("/crm/categories/{id}", patch(update_category).delete(delete_category))
         .route("/crm/categories/{id}/stages", post(create_stage))
@@ -129,6 +131,12 @@ async fn config(State(state): State<AppState>, auth: AuthUser, Query(_): Query<C
             "rights": rights(&state, &auth, t.id).await?,
         }));
     }
+    let own_sources: Vec<(String, String)> = sqlx::query_as("SELECT code, name FROM crm_traffic_sources ORDER BY lower(name)").fetch_all(&state.db).await?;
+    let mut options = system_options();
+    if let Some(list) = options["source"].as_array_mut() {
+        list.extend(own_sources.iter().map(|(c, _)| json!(c)));
+    }
+    let source_labels: serde_json::Map<String, Value> = own_sources.iter().map(|(c, n)| (c.clone(), json!(n))).collect();
     let currencies: Vec<(String, String, bool)> = sqlx::query_as("SELECT code, rate::text, is_base FROM crm_currencies ORDER BY is_base DESC, sort, code")
         .fetch_all(&state.db)
         .await?;
@@ -137,7 +145,8 @@ async fn config(State(state): State<AppState>, auth: AuthUser, Query(_): Query<C
         "currencies": currencies.iter().map(|(c, r, b)| json!({ "code": c, "rate": r, "is_base": b })).collect::<Vec<_>>(),
         "doc_engines": super::docs::engines(),
         "base_currency": currencies.iter().find(|c| c.2).map(|c| c.0.clone()),
-        "options": system_options(),
+        "options": options,
+        "source_labels": source_labels,
         "is_admin": is_crm_admin(&auth),
         "can_manage_products": auth.can(crate::auth::permissions::CRM_PRODUCTS) || is_crm_admin(&auth),
     })))
@@ -398,4 +407,70 @@ async fn delete_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
     sqlx::query("DELETE FROM crm_stages WHERE id = $1").bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(json!({ "categories": categories(&state, t).await? })))
+}
+
+// ---------------------------------------------------------------------------
+// The company's own traffic sources
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SourceInput {
+    name: Option<String>,
+    /// utm_source values that mean this source.
+    utm: Option<Vec<String>>,
+}
+
+async fn sources_json(state: &AppState) -> AppResult<Json<Value>> {
+    let rows: Vec<(Uuid, String, String, Vec<String>)> = sqlx::query_as("SELECT id, code, name, utm FROM crm_traffic_sources ORDER BY lower(name)").fetch_all(&state.db).await?;
+    Ok(Json(json!({ "items": rows.into_iter().map(|(id, c, n, u)| json!({ "id": id, "code": c, "name": n, "utm": u })).collect::<Vec<_>>() })))
+}
+
+fn clean_utm(list: &[String]) -> AppResult<Vec<String>> {
+    let mut out: Vec<String> = list.iter().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    out.sort();
+    out.dedup();
+    if out.len() > 50 || out.iter().any(|s| s.len() > 100) {
+        return Err(AppError::bad("up to 50 utm_source values of up to 100 characters"));
+    }
+    Ok(out)
+}
+
+async fn list_sources(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
+    sources_json(&state).await
+}
+
+async fn create_source(State(state): State<AppState>, auth: AuthUser, Json(b): Json<SourceInput>) -> AppResult<Json<Value>> {
+    require_admin(&auth)?;
+    let name = crate::routes::required("name", b.name.as_deref().unwrap_or(""), 60)?;
+    let slug: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().split('_').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("_");
+    let code = format!("c_{}", if slug.is_empty() { "source".into() } else { slug.chars().take(40).collect::<String>() });
+    if system_options()["source"].as_array().is_some_and(|a| a.iter().any(|x| x == &json!(code))) {
+        return Err(AppError::bad("that source is built in"));
+    }
+    sqlx::query("INSERT INTO crm_traffic_sources (code, name, utm) VALUES ($1, $2, $3)")
+        .bind(&code)
+        .bind(&name)
+        .bind(clean_utm(&b.utm.unwrap_or_default())?)
+        .execute(&state.db)
+        .await
+        .map_err(|e| if crate::error::is_unique_violation(&e) { AppError::Conflict("a source with that name exists".into()) } else { e.into() })?;
+    sources_json(&state).await
+}
+
+async fn update_source(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<SourceInput>) -> AppResult<Json<Value>> {
+    require_admin(&auth)?;
+    let name = b.name.as_deref().map(|n| crate::routes::required("name", n, 60)).transpose()?;
+    let utm = b.utm.as_deref().map(clean_utm).transpose()?;
+    let n = sqlx::query("UPDATE crm_traffic_sources SET name = COALESCE($2, name), utm = COALESCE($3, utm) WHERE id = $1").bind(id).bind(name).bind(utm).execute(&state.db).await?.rows_affected();
+    if n == 0 {
+        return Err(AppError::NotFound("source"));
+    }
+    sources_json(&state).await
+}
+
+/// Records keep the source's code; it shows as the code once the source is gone.
+async fn delete_source(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    require_admin(&auth)?;
+    sqlx::query("DELETE FROM crm_traffic_sources WHERE id = $1").bind(id).execute(&state.db).await?;
+    sources_json(&state).await
 }

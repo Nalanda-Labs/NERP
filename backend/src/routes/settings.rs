@@ -30,6 +30,8 @@ fn defaults() -> Map<String, Value> {
     m.insert("public_links".into(), json!(true));
     // Chat messages older than this are deleted (null: kept).
     m.insert("chat_retention_days".into(), Value::Null);
+    // Only people with "Send for e-signature" (or CRM admins) send documents for signature.
+    m.insert("esign_restricted".into(), json!(false));
     // Seller details printed on quotes and invoices.
     for k in SELLER_KEYS {
         m.insert((*k).into(), json!(""));
@@ -66,7 +68,7 @@ fn validate(key: &str, value: &Value) -> AppResult<()> {
             _ => Err(AppError::bad("keep chat messages 1 to 3650 days, or always")),
         };
     }
-    if matches!(key, "require_two_factor" | "ip_allow_admins_exempt" | "public_links") {
+    if matches!(key, "require_two_factor" | "ip_allow_admins_exempt" | "public_links" | "esign_restricted") {
         return if value.is_boolean() { Ok(()) } else { Err(AppError::bad(format!("{key} must be true or false"))) };
     }
     if SELLER_KEYS.contains(&key) {

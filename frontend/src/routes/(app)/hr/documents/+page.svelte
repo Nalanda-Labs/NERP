@@ -6,14 +6,15 @@
 	import { api } from '#lib/api.ts';
 	import { formatDate } from '#lib/format.ts';
 	import Modal from '#lib/components/Modal.svelte';
-	import MultiUserPicker from '#lib/components/MultiUserPicker.svelte';
+	import MultiUserPicker, { type PickedUser } from '#lib/components/MultiUserPicker.svelte';
 	import UserPicker from '#lib/components/UserPicker.svelte';
 	import { session } from '#lib/session.svelte.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
 	import { PERM } from '#lib/types.ts';
 
 	type Doc = { id: string; title: string; employee_name: string; status: string; overdue: boolean; due_on: string | null; created_at: string; my_turn: string | null };
-	type Tpl = { id: string; name: string; body: string };
+	type After = { notify?: string[]; task?: { title: string; responsible: string }; list_id?: string };
+	type Tpl = { id: string; name: string; body: string; after_signing?: After };
 	type Person = { id: string; name: string; avatar_file_id: string | null };
 	const hr = $derived(session.can(PERM.HR));
 	let tab = $state<'todo' | 'mine' | 'all' | 'templates'>('todo');
@@ -72,12 +73,29 @@
 		}
 	}
 	// Templates.
-	let tplForm = $state<{ id: string | null; name: string; body: string } | null>(null);
+	type TplForm = { id: string | null; name: string; body: string; notify: PickedUser[]; taskTitle: string; taskTo: string; listId: string };
+	let tplForm = $state<TplForm | null>(null);
+	let addableLists = $state<{ id: string; name: string }[]>([]);
+	async function openTpl(t: Tpl | null, fresh = '') {
+		const a = t?.after_signing ?? {};
+		const notify: PickedUser[] = [];
+		for (const id of a.notify ?? []) {
+			const u = await api.get<{ id: string; first_name: string; last_name: string; avatar_file_id: string | null }>(`/users/${id}`).catch(() => null);
+			if (u) notify.push({ id: u.id, name: `${u.first_name} ${u.last_name}`, avatar_file_id: u.avatar_file_id });
+		}
+		addableLists = ((await api.get<{ items: { id: string; name: string; level: string }[] }>('/lists').catch(() => ({ items: [] }))).items).filter((l) => l.level === 'add' || l.level === 'manage');
+		tplForm = { id: t?.id ?? null, name: t?.name ?? '', body: t?.body ?? fresh, notify, taskTitle: a.task?.title ?? '', taskTo: a.task?.responsible ?? 'hr', listId: a.list_id ?? '' };
+	}
 	async function saveTpl(e: SubmitEvent) {
 		e.preventDefault();
 		try {
 			const t = tplForm!;
-			templates = (t.id ? await api.patch<{ items: Tpl[] }>(`/hr/doc-templates/${t.id}`, { name: t.name, body: t.body }) : await api.post<{ items: Tpl[] }>('/hr/doc-templates', { name: t.name, body: t.body })).items;
+			const after_signing: After = {};
+			if (t.notify.length) after_signing.notify = t.notify.map((u) => u.id);
+			if (t.taskTitle.trim()) after_signing.task = { title: t.taskTitle, responsible: t.taskTo };
+			if (t.listId) after_signing.list_id = t.listId;
+			const body = { name: t.name, body: t.body, after_signing };
+			templates = (t.id ? await api.patch<{ items: Tpl[] }>(`/hr/doc-templates/${t.id}`, body) : await api.post<{ items: Tpl[] }>('/hr/doc-templates', body)).items;
 			tplForm = null;
 		} catch (err) {
 			toasts.error(err);
@@ -105,9 +123,9 @@
 	{#if tab === 'templates'}
 		<div class="space-y-2">
 			{#each templates as t (t.id)}
-				<div class="card flex items-start gap-3 p-4" data-template={t.name}><div class="min-w-0 flex-1"><p class="font-medium">{t.name}</p><p class="truncate text-sm text-slate-500">{t.body.slice(0, 160)}</p></div><button class="btn btn-ghost px-2 py-1" onclick={() => (tplForm = { ...t })}>Edit</button><button class="btn btn-ghost px-2 py-1 hover:text-red-600" onclick={() => dropTpl(t)}>Delete</button></div>
+				<div class="card flex items-start gap-3 p-4" data-template={t.name}><div class="min-w-0 flex-1"><p class="font-medium">{t.name}</p><p class="truncate text-sm text-slate-500">{t.body.slice(0, 160)}</p></div><button class="btn btn-ghost px-2 py-1" onclick={() => openTpl(t)}>Edit</button><button class="btn btn-ghost px-2 py-1 hover:text-red-600" onclick={() => dropTpl(t)}>Delete</button></div>
 			{:else}<p class="text-sm text-slate-500">No templates yet.</p>{/each}
-			<button class="btn btn-secondary" onclick={() => (tplForm = { id: null, name: '', body: '# Title\n\n{{company}} and {{name}} ({{position}}) agree that …\n\nDate: {{date}}' })}>New template</button>
+			<button class="btn btn-secondary" onclick={() => openTpl(null, '# Title\n\n{{company}} and {{name}} ({{position}}) agree that …\n\nDate: {{date}}')}>New template</button>
 		</div>
 	{:else}
 		<ul class="card divide-y divide-slate-100">
@@ -144,6 +162,19 @@
 			<div><label class="label" for="tp-name">Name</label><input id="tp-name" class="input" required maxlength="200" bind:value={tplForm.name} /></div>
 			<div><label class="label" for="tp-body">Text</label><textarea id="tp-body" class="input font-mono" rows="12" required bind:value={tplForm.body}></textarea>
 				<p class="mt-1 text-xs text-slate-500">Paragraphs are separated by a blank line; a line starting with “# ” is a heading. Fields: {'{{name}}'}, {'{{first_name}}'}, {'{{last_name}}'}, {'{{position}}'}, {'{{department}}'}, {'{{email}}'}, {'{{date}}'}, {'{{company}}'}.</p></div>
+			<fieldset class="space-y-3 rounded-xl border border-slate-200 p-3" data-after-signing>
+				<legend class="px-1 text-sm font-medium text-slate-700">When everyone has signed</legend>
+				<div><span class="label">Tell <span class="font-normal text-slate-400">(optional)</span></span><MultiUserPicker bind:value={tplForm.notify} placeholder="Add people…" /></div>
+				<div class="grid gap-2 sm:grid-cols-[1fr_12rem]">
+					<div><label class="label" for="tp-task">Make a task <span class="font-normal text-slate-400">(optional; {'{{name}}'} and {'{{document}}'} work)</span></label><input id="tp-task" class="input" maxlength="300" bind:value={tplForm.taskTitle} placeholder="e.g. Order a laptop for {'{{name}}'}" /></div>
+					<div><label class="label" for="tp-taskto">For</label><select id="tp-taskto" class="input" bind:value={tplForm.taskTo}><option value="hr">Whoever sent it</option><option value="employee">The employee</option></select></div>
+				</div>
+				<div>
+					<label class="label" for="tp-list">Add an item to a list <span class="font-normal text-slate-400">(starts its processes)</span></label>
+					<select id="tp-list" class="input" bind:value={tplForm.listId}><option value="">—</option>{#each addableLists as l (l.id)}<option value={l.id}>{l.name}</option>{/each}</select>
+					<p class="mt-1 text-xs text-slate-500">The item gets the employee in its first person field, today in its first date field and the document's title in its first text field.</p>
+				</div>
+			</fieldset>
 		</form>
 	{/if}
 	{#snippet footer()}

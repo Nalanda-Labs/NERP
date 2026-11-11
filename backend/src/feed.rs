@@ -37,6 +37,8 @@ pub fn router() -> Router<AppState> {
         .route("/users/{id}/badges", get(badges_of))
         .route("/feed/{id}/read", post(read))
         .route("/feed/{id}/vote", post(vote))
+        .route("/feed/processes", get(processes))
+        .route("/feed/requests", post(new_request))
 }
 
 /// SQL: can user $1 see post p? Workgroup posts: its members, and everyone for an open group
@@ -124,6 +126,9 @@ struct PostRow {
     /// An appreciation post: the badge and who got it.
     badge: Option<String>,
     badge_people: Value,
+    /// A request started from the feed: its list item, how its process stands, and the
+    /// approvals waiting for me.
+    request: Option<Value>,
 }
 
 const POST_SELECT: &str = "SELECT p.id, p.author_id, trim(u.first_name || ' ' || u.last_name) AS author_name, u.avatar_file_id AS author_avatar, p.body,
@@ -143,7 +148,12 @@ const POST_SELECT: &str = "SELECT p.id, p.author_id, trim(u.first_name || ' ' ||
     (SELECT l.reaction FROM feed_likes l WHERE l.post_id = p.id AND l.user_id = $1) AS my_reaction,
     p.badge,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('id', bu.id, 'name', trim(bu.first_name || ' ' || bu.last_name), 'avatar_file_id', bu.avatar_file_id))
-        FROM feed_badges b JOIN users bu ON bu.id = b.user_id WHERE b.post_id = p.id), '[]') AS badge_people
+        FROM feed_badges b JOIN users bu ON bu.id = b.user_id WHERE b.post_id = p.id), '[]') AS badge_people,
+    (SELECT jsonb_build_object('item_id', i.id, 'list_id', l.id, 'list_name', l.name, 'title', i.title, 'number', i.number,
+        'status', (SELECT w.status FROM wf_instances w WHERE w.item_id = i.id ORDER BY w.started_at DESC LIMIT 1),
+        'approvals', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', a.id, 'title', a.title)) FROM wf_approvals a JOIN wf_instances w ON w.id = a.instance_id
+            WHERE w.item_id = i.id AND a.status = 'pending' AND $1 = ANY(a.approvers) AND NOT a.decisions @> jsonb_build_array(jsonb_build_object('user_id', $1::text))), '[]'))
+     FROM list_items i JOIN lists l ON l.id = i.list_id WHERE i.id = p.list_item_id) AS request
     FROM feed_posts p LEFT JOIN users u ON u.id = p.author_id";
 
 #[derive(Deserialize)]
@@ -563,4 +573,73 @@ async fn vote(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
         .execute(&state.db)
         .await?;
     get_post(State(state), auth, Path(id)).await
+}
+
+// ---------------------------------------------------------------------------
+// Requests: starting a process from the feed
+// ---------------------------------------------------------------------------
+
+/// Lists I may add to whose processes start on a new item: what "Request" offers.
+async fn processes(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Ok(Json(json!({ "items": [] })));
+    }
+    let lists: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT l.id, l.name, l.description FROM lists l
+         WHERE EXISTS (SELECT 1 FROM wf_templates t WHERE t.list_id = l.id AND t.trigger = 'create' AND t.is_active
+                       AND (cardinality(t.test_users) = 0 OR $1 = ANY(t.test_users)))
+         ORDER BY lower(l.name)",
+    )
+    .bind(auth.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut items = Vec::new();
+    for (id, name, description) in lists {
+        if crate::lists::may_add(&state, &auth, id).await {
+            items.push(json!({ "id": id, "name": name, "description": description }));
+        }
+    }
+    Ok(Json(json!({ "items": items })))
+}
+
+#[derive(Deserialize)]
+struct RequestInput {
+    list_id: Uuid,
+    title: String,
+    #[serde(default)]
+    values: serde_json::Map<String, Value>,
+    /// A few words for the post.
+    note: Option<String>,
+}
+
+/// Adds the item (its processes start) and posts it to the feed, for the author and whoever
+/// is asked to approve it (later approvers join as the process reaches them).
+async fn new_request(State(state): State<AppState>, auth: AuthUser, Json(b): Json<RequestInput>) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Err(AppError::Forbidden);
+    }
+    let note = b.note.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(|n| n.chars().take(2000).collect::<String>());
+    let item = crate::lists::add_item(&state, auth.clone(), b.list_id, b.title, b.values).await?;
+    let item_id = item["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::Internal(anyhow::anyhow!("no item id")))?;
+    let list_name: String = sqlx::query_scalar("SELECT name FROM lists WHERE id = $1").bind(b.list_id).fetch_one(&state.db).await?;
+    let body = match note {
+        Some(n) => n,
+        None => format!("New request: {list_name}"),
+    };
+    let post: Uuid = sqlx::query_scalar("INSERT INTO feed_posts (author_id, body, to_all, list_item_id) VALUES ($1, $2, FALSE, $3) RETURNING id")
+        .bind(auth.id)
+        .bind(&body)
+        .bind(item_id)
+        .fetch_one(&state.db)
+        .await?;
+    let approvers: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT u FROM wf_approvals a JOIN wf_instances w ON w.id = a.instance_id, UNNEST(a.approvers) u WHERE w.item_id = $1 AND a.status = 'pending'",
+    )
+    .bind(item_id)
+    .fetch_all(&state.db)
+    .await?;
+    for u in std::iter::once(auth.id).chain(approvers) {
+        sqlx::query("INSERT INTO feed_audience (post_id, user_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM feed_audience WHERE post_id = $1 AND user_id = $2)").bind(post).bind(u).execute(&state.db).await?;
+    }
+    get_post(State(state), auth, Path(post)).await
 }

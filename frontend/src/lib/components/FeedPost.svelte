@@ -27,6 +27,8 @@
 		readers?: { id: string; name: string; read_at: string | null }[];
 		project_id: string | null;
 		project_name: string | null;
+		/** A request started from the feed (a list item and its process). */
+		request?: { item_id: string; list_id: string; list_name: string; title: string; number: number; status: string | null; approvals: { id: string; title: string }[] } | null;
 	};
 </script>
 
@@ -139,6 +141,24 @@
 		showReaders = !showReaders;
 		if (showReaders) post = await api.get<Post>(`/feed/${post.id}`);
 	}
+	const REQUEST_STATUS: Record<string, [string, string]> = {
+		running: ['In progress', 'bg-sky-50 text-sky-800'],
+		waiting: ['Waiting', 'bg-amber-50 text-amber-800'],
+		completed: ['Done', 'bg-emerald-50 text-emerald-800'],
+		rejected: ['Rejected', 'bg-red-50 text-red-700'],
+		cancelled: ['Cancelled', 'bg-slate-100 text-slate-600'],
+		failed: ['Stopped', 'bg-red-50 text-red-700']
+	};
+	async function decide(approval: string, approve: boolean) {
+		const comment = approve ? null : prompt('Why? (optional)');
+		try {
+			await api.patch(`/approvals/${approval}`, { approve, comment });
+			post = await api.get<Post>(`/feed/${post.id}`);
+			toasts.success(approve ? 'Approved' : 'Rejected');
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
 </script>
 
 <article
@@ -197,6 +217,24 @@
 					><Icon name="paperclip" class="size-4" />{f.name}
 					<span class="text-xs text-slate-400">{formatBytes(f.size)}</span></button
 				>{/each}
+		</div>
+	{/if}
+
+	{#if post.request}
+		{@const rq = post.request}
+		<div class="mt-4 space-y-2 rounded-xl border border-slate-200 p-4" data-request>
+			<div class="flex flex-wrap items-center gap-2">
+				<span class="text-xs font-medium tracking-wide text-slate-500 uppercase">{rq.list_name}</span>
+				<a class="font-medium text-slate-900 hover:underline" href="/lists/{rq.list_id}?item={rq.item_id}">#{rq.number} {rq.title}</a>
+				{#if rq.status}<span class="badge {REQUEST_STATUS[rq.status]?.[1] ?? 'bg-slate-100 text-slate-600'}" data-request-status={rq.status}>{REQUEST_STATUS[rq.status]?.[0] ?? rq.status}</span>{/if}
+			</div>
+			{#each rq.approvals as a (a.id)}
+				<div class="flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm" data-my-approval>
+					<span class="flex-1 text-amber-900">{a.title}</span>
+					<button class="btn btn-primary px-3 py-1 text-xs" onclick={() => decide(a.id, true)}>Approve</button>
+					<button class="btn btn-secondary px-3 py-1 text-xs" onclick={() => decide(a.id, false)}>Reject</button>
+				</div>
+			{/each}
 		</div>
 	{/if}
 

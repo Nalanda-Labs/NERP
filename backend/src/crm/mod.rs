@@ -8,6 +8,7 @@ pub mod collab;
 pub mod recurring;
 pub mod catalog;
 pub mod esign;
+pub mod sign_templates;
 pub mod automation;
 mod config;
 pub mod docs;
@@ -60,6 +61,7 @@ pub fn router() -> Router<AppState> {
         .merge(recurring::router())
         .merge(catalog::router())
         .merge(esign::router())
+        .merge(sign_templates::router())
 }
 
 pub async fn run_reminders(state: &AppState) -> anyhow::Result<()> {

@@ -292,6 +292,40 @@ pub(super) fn can_manage_products(auth: &AuthUser) -> AppResult<()> {
     if auth.can(perm::CRM_PRODUCTS) || is_crm_admin(auth) { Ok(()) } else { Err(AppError::Forbidden) }
 }
 
+/// Catalog managers edit every product; a section's editors (people, or members of its
+/// departments and their sub-departments) edit the products in that section.
+pub(super) async fn may_edit_section(state: &AppState, auth: &AuthUser, section: Option<Uuid>) -> AppResult<()> {
+    if can_manage_products(auth).is_ok() {
+        return Ok(());
+    }
+    let Some(section) = section else { return Err(AppError::Forbidden) };
+    let ok: bool = sqlx::query_scalar(
+        "WITH RECURSIVE mine AS (
+             SELECT department_id AS id FROM user_departments WHERE user_id = $2
+             UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
+         SELECT EXISTS (SELECT 1 FROM catalog_section_editors e WHERE e.category_id = $1 AND (e.user_id = $2 OR e.department_id IN (SELECT id FROM mine)))",
+    )
+    .bind(section)
+    .bind(auth.id)
+    .fetch_one(&state.db)
+    .await?;
+    if ok { Ok(()) } else { Err(AppError::Forbidden) }
+}
+
+/// The section a product (or a variant, through its product) belongs to.
+pub(super) async fn section_of(state: &AppState, product: Uuid) -> AppResult<Option<Uuid>> {
+    let r: Option<Option<Uuid>> = sqlx::query_scalar("SELECT COALESCE(p.shop_category_id, parent.shop_category_id) FROM crm_products p LEFT JOIN crm_products parent ON parent.id = p.parent_id WHERE p.id = $1")
+        .bind(product)
+        .fetch_optional(&state.db)
+        .await?;
+    r.ok_or(AppError::NotFound("product"))
+}
+
+pub(super) async fn may_edit_product(state: &AppState, auth: &AuthUser, product: Uuid) -> AppResult<()> {
+    let section = section_of(state, product).await?;
+    may_edit_section(state, auth, section).await
+}
+
 fn tax(s: &Option<String>) -> AppResult<Option<Decimal>> {
     match clean(s.clone()) {
         None => Ok(None),
@@ -474,14 +508,18 @@ async fn get_product(State(state): State<AppState>, _auth: AuthUser, Path(id): P
 }
 
 async fn create_product(State(state): State<AppState>, auth: AuthUser, Json(b): Json<ProductInput>) -> AppResult<Json<Product>> {
-    can_manage_products(&auth)?;
+    may_edit_section(&state, &auth, b.shop_category_id.flatten()).await?;
     let id = save_product(&state, &auth, None, b).await?;
     Ok(Json(load_product(&state, id).await?))
 }
 
 async fn update_product(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<ProductInput>) -> AppResult<Json<Product>> {
-    can_manage_products(&auth)?;
     load_product(&state, id).await?;
+    may_edit_product(&state, &auth, id).await?;
+    // Moving it to another section needs the right to that section too.
+    if let Some(to) = b.shop_category_id {
+        may_edit_section(&state, &auth, to).await?;
+    }
     save_product(&state, &auth, Some(id), b).await?;
     Ok(Json(load_product(&state, id).await?))
 }
@@ -489,7 +527,7 @@ async fn update_product(State(state): State<AppState>, auth: AuthUser, Path(id):
 /// Products already used on deals or stock documents are deactivated rather than deleted, so
 /// history stays intact.
 async fn delete_product(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    can_manage_products(&auth)?;
+    may_edit_product(&state, &auth, id).await?;
     // The product and its variants.
     let used: bool = sqlx::query_scalar(
         "WITH ids AS (SELECT id FROM crm_products WHERE id = $1 OR parent_id = $1)

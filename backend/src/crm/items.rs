@@ -720,8 +720,23 @@ pub async fn apply(
                 qb.push(", close_date = ").push_bind(date(v, "close date")?);
                 ch.fields.push(k.clone());
             }
-            "company_kind" | "industry" | "employees" | "source" => {
+            "company_kind" | "industry" | "employees" => {
                 qb.push(format!(", {k} = ")).push_bind(option(v, k, k)?);
+            }
+            "source" => {
+                // A built-in source, or one of the company's own traffic sources.
+                let s = match option(v, k, k) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let s = text(v, k, 60)?;
+                        let own: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_traffic_sources WHERE code = $1)").bind(&s).fetch_one(&mut **tx).await?;
+                        if !own {
+                            return Err(e);
+                        }
+                        s
+                    }
+                };
+                qb.push(", source = ").push_bind(s);
             }
             "annual_revenue" => {
                 qb.push(", annual_revenue = ").push_bind(decimal(v, "annual revenue")?);
@@ -1069,6 +1084,14 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
     if t.has_amount && !body.contains_key("currency") {
         body.insert("currency".into(), json!(base_currency(state).await?));
     }
+    // No source given, but a utm_source that one of the company's traffic sources claims.
+    if !body.contains_key("source")
+        && let Some(u) = body.get("utm").and_then(|u| u.get("source")).and_then(Value::as_str) {
+            let own: Option<String> = sqlx::query_scalar("SELECT code FROM crm_traffic_sources WHERE lower($1) = ANY(utm) LIMIT 1").bind(u.trim()).fetch_optional(&state.db).await?;
+            if let Some(code) = own {
+                body.insert("source".into(), json!(code));
+            }
+        }
     let mut tx = state.db.begin().await?;
     let number = next_number(&mut tx, t.id).await?;
     let id: Uuid = sqlx::query_scalar(
@@ -1180,6 +1203,12 @@ pub async fn update_item(state: &AppState, auth: &AuthUser, t: &EntityType, id: 
         Some((_, stage)) => super::automation::stage_entered(state, id, stage).await,
         // Robots timed from a date, or waiting for conditions, look at the new values.
         None => super::automation::record_changed(state, id).await,
+    }
+    // The record's chat (if it has one) follows a new responsible person or title.
+    if body.contains_key("assigned_to") || body.contains_key("title") {
+        if let Err(e) = crate::im::sync_linked_chat(state, crate::im::Link::CrmItem(id)).await {
+            tracing::warn!(item = %id, error = ?e, "could not update the record's chat");
+        }
     }
     Ok(())
 }

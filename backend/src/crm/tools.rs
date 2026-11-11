@@ -46,6 +46,8 @@ pub fn router() -> Router<AppState> {
         .route("/crm/{type}/import", post(start_import))
         .route("/crm/imports/{job}", get(import_status))
         .route("/crm/{type}/export", get(export))
+        .route("/crm/{type}/export.xlsx", get(export_xlsx))
+        .route("/crm/{type}/export.vcf", get(export_vcf))
         .route("/crm/recycle-bin", get(recycle_list))
         .route("/crm/recycle-bin/{id}/restore", post(restore))
         .route("/crm/recycle-bin/{id}", delete(purge_one))
@@ -567,6 +569,131 @@ async fn export(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
     res.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/csv; charset=utf-8"));
     res.headers_mut().insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")).unwrap());
     Ok(res)
+}
+
+/// The same records as the CSV export (at most 100,000), in one list.
+async fn export_rows(state: &AppState, auth: &AuthUser, code: &str, f: &Filter) -> AppResult<(super::EntityType, Vec<super::fields::FieldDef>, Vec<ExportRow>)> {
+    let t = entity_type(state, code).await?;
+    let scope = visible(state, auth, t.id, "export").await?;
+    if matches!(scope, Visible::Nothing) {
+        return Err(AppError::Forbidden);
+    }
+    let read = visible(state, auth, t.id, "read").await?;
+    let defs = custom_fields(state, t.id).await?;
+    let mut out: Vec<ExportRow> = Vec::new();
+    let mut last: Option<Uuid> = None;
+    loop {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+            "SELECT i.id, i.number, i.title, i.first_name, i.last_name, i.job_title, co.title AS company, s.name AS stage,
+                    i.opportunity::text AS amount, i.currency, i.source, u.first_name || ' ' || u.last_name AS responsible,
+                    i.created_at, i.updated_at, i.uf,
+                    (SELECT string_agg(value, '; ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'phone') AS phones,
+                    (SELECT string_agg(value, '; ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'email') AS emails
+             FROM crm_items i LEFT JOIN crm_items co ON co.id = i.company_id LEFT JOIN crm_stages s ON s.id = i.stage_id
+             LEFT JOIN users u ON u.id = i.assigned_to WHERE TRUE",
+        );
+        push_filter(&mut qb, &t, f, auth.id)?;
+        scope.push(&mut qb);
+        read.push(&mut qb);
+        if let Some(l) = last {
+            qb.push(" AND i.id > ").push_bind(l);
+        }
+        qb.push(" ORDER BY i.id LIMIT 2000");
+        let rows: Vec<ExportRow> = qb.build_query_as().fetch_all(&state.db).await?;
+        let n = rows.len();
+        last = rows.last().map(|r| r.id);
+        out.extend(rows);
+        if n < 2000 || out.len() >= 100_000 {
+            break;
+        }
+    }
+    out.sort_by_key(|r| r.number);
+    Ok((t, defs, out))
+}
+
+fn attachment(name: String, kind: &'static str, body: Vec<u8>) -> Response {
+    let mut res = body.into_response();
+    res.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(kind));
+    res.headers_mut().insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")).unwrap());
+    res
+}
+
+/// The export as an Excel workbook: a header row, numbers and dates as such.
+async fn export_xlsx(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Query(f): Query<Filter>) -> AppResult<Response> {
+    use rust_xlsxwriter::{Format, Workbook};
+    let (t, defs, rows) = export_rows(&state, &auth, &code, &f).await?;
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    let _ = ws.set_name(&t.name_plural.chars().take(31).collect::<String>());
+    let bold = Format::new().set_bold();
+    let date = Format::new().set_num_format("yyyy-mm-dd hh:mm");
+    let mut header: Vec<String> = ["Number", "Title", "First name", "Last name", "Position", "Company", "Phones", "Emails", "Stage", "Amount", "Currency", "Source", "Responsible", "Created", "Updated"].iter().map(|s| s.to_string()).collect();
+    header.extend(defs.iter().map(|d| d.label.clone()));
+    let x = |e: rust_xlsxwriter::XlsxError| AppError::Internal(anyhow!(e.to_string()));
+    for (c, h) in header.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, h, &bold).map_err(x)?;
+    }
+    for (i, r) in rows.iter().enumerate() {
+        let row = (i + 1) as u32;
+        ws.write_number(row, 0, r.number as f64).map_err(x)?;
+        for (c, v) in [&r.title, r.first_name.as_deref().unwrap_or(""), r.last_name.as_deref().unwrap_or(""), r.job_title.as_deref().unwrap_or(""), r.company.as_deref().unwrap_or(""), r.phones.as_deref().unwrap_or(""), r.emails.as_deref().unwrap_or(""), r.stage.as_deref().unwrap_or("")].iter().enumerate() {
+            // Strings are written as text, never as formulas.
+            ws.write_string(row, (c + 1) as u16, *v).map_err(x)?;
+        }
+        if let Ok(a) = r.amount.parse::<f64>() {
+            ws.write_number(row, 9, a).map_err(x)?;
+        }
+        ws.write_string(row, 10, r.currency.as_deref().unwrap_or("")).map_err(x)?;
+        ws.write_string(row, 11, r.source.as_deref().unwrap_or("")).map_err(x)?;
+        ws.write_string(row, 12, r.responsible.as_deref().unwrap_or("")).map_err(x)?;
+        for (c, at) in [(13u16, r.created_at), (14, r.updated_at)] {
+            let dt = rust_xlsxwriter::ExcelDateTime::parse_from_str(&at.format("%Y-%m-%dT%H:%M:%S").to_string()).map_err(x)?;
+            ws.write_datetime_with_format(row, c, &dt, &date).map_err(x)?;
+        }
+        for (k, d) in defs.iter().enumerate() {
+            let col = 15 + k as u16;
+            match &r.uf[&d.code] {
+                Value::Null => {}
+                Value::Number(n) => { ws.write_number(row, col, n.as_f64().unwrap_or(0.0)).map_err(x)?; }
+                Value::String(s) => { ws.write_string(row, col, s).map_err(x)?; }
+                v => { ws.write_string(row, col, v.to_string()).map_err(x)?; }
+            }
+        }
+    }
+    let _ = ws.autofit();
+    let bytes = wb.save_to_buffer().map_err(x)?;
+    Ok(attachment(format!("{}-{}.xlsx", code, Utc::now().format("%Y%m%d-%H%M")), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes))
+}
+
+/// Contacts, leads and companies as vCards (3.0), which Outlook, Gmail and phones import.
+async fn export_vcf(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Query(f): Query<Filter>) -> AppResult<Response> {
+    let (t, _, rows) = export_rows(&state, &auth, &code, &f).await?;
+    if ![super::CONTACT, super::LEAD, super::COMPANY].contains(&t.id) {
+        return Err(AppError::bad("vCards are for contacts, leads and companies"));
+    }
+    let esc = |s: &str| s.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace(['\r', '\n'], " ");
+    let mut out = String::new();
+    for r in &rows {
+        let (first, last) = (r.first_name.clone().unwrap_or_default(), r.last_name.clone().unwrap_or_default());
+        let full = if t.id == super::COMPANY || (first.is_empty() && last.is_empty()) { r.title.clone() } else { format!("{first} {last}").trim().to_string() };
+        out.push_str("BEGIN:VCARD\r\nVERSION:3.0\r\n");
+        out.push_str(&format!("N:{};{};;;\r\nFN:{}\r\n", esc(&last), esc(&first), esc(&full)));
+        let org = if t.id == super::COMPANY { Some(r.title.clone()) } else { r.company.clone() };
+        if let Some(o) = org.filter(|o| !o.is_empty()) {
+            out.push_str(&format!("ORG:{}\r\n", esc(&o)));
+        }
+        if let Some(j) = r.job_title.as_deref().filter(|j| !j.is_empty()) {
+            out.push_str(&format!("TITLE:{}\r\n", esc(j)));
+        }
+        for e in r.emails.as_deref().unwrap_or("").split("; ").filter(|e| !e.is_empty()) {
+            out.push_str(&format!("EMAIL;TYPE=INTERNET:{}\r\n", esc(e)));
+        }
+        for p in r.phones.as_deref().unwrap_or("").split("; ").filter(|p| !p.is_empty()) {
+            out.push_str(&format!("TEL;TYPE=VOICE:{}\r\n", esc(p)));
+        }
+        out.push_str(&format!("UID:nerp-{}\r\nEND:VCARD\r\n", r.id));
+    }
+    Ok(attachment(format!("{}-{}.vcf", code, Utc::now().format("%Y%m%d-%H%M")), "text/vcard; charset=utf-8", out.into_bytes()))
 }
 
 #[derive(FromRow)]

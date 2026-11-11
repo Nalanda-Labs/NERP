@@ -178,9 +178,12 @@
 		load();
 	}
 
-	async function exportCsv() {
+	let exportOpen = $state(false);
+	async function exportAs(kind: 'csv' | 'xlsx' | 'vcf') {
+		exportOpen = false;
 		try {
-			await downloadUrl(`/api/crm/${code}/export` + params(), `${code}-${new Date().toISOString().slice(0, 10)}.csv`);
+			const path = kind === 'csv' ? `/api/crm/${code}/export` : `/api/crm/${code}/export.${kind}`;
+			await downloadUrl(path + params(), `${code}-${new Date().toISOString().slice(0, 10)}.${kind}`);
 		} catch (e) {
 			toasts.error(e);
 		}
@@ -203,8 +206,19 @@
 			{/if}
 			<div class="ml-auto flex flex-wrap gap-2">
 				{#if type.rights.import !== 'none'}<a href="/crm/{code}/import" class="btn btn-secondary"><Icon name="upload" class="size-4" /> Import</a>{/if}
-				{#if type.rights.export !== 'none'}<button class="btn btn-secondary" onclick={exportCsv}><Icon name="download" class="size-4" /> Export</button>{/if}
-				{#if type.rights.add !== 'none'}<a href="/crm/{code}/new{f.category_id ? `?category_id=${f.category_id}` : ''}" class="btn btn-primary"><Icon name="plus" class="size-4" /> New {type.name.toLowerCase()}</a>{/if}
+				{#if type.rights.export !== 'none'}
+					<div class="relative">
+						<button class="btn btn-secondary" data-tour="crm-export" aria-haspopup="menu" aria-expanded={exportOpen} onclick={() => (exportOpen = !exportOpen)}><Icon name="download" class="size-4" /> Export</button>
+						{#if exportOpen}
+							<div class="absolute right-0 z-20 mt-1 w-56 rounded-xl border border-slate-200 bg-white p-1 shadow-lg" role="menu" data-export-menu>
+								<button role="menuitem" class="block w-full rounded-lg px-3 py-1.5 text-left text-sm hover:bg-slate-50" onclick={() => exportAs('xlsx')}>Excel (.xlsx)</button>
+								<button role="menuitem" class="block w-full rounded-lg px-3 py-1.5 text-left text-sm hover:bg-slate-50" onclick={() => exportAs('csv')}>CSV</button>
+								{#if ['contact', 'lead', 'company'].includes(type.code)}<button role="menuitem" class="block w-full rounded-lg px-3 py-1.5 text-left text-sm hover:bg-slate-50" onclick={() => exportAs('vcf')}>vCard (Outlook, Gmail, phones)</button>{/if}
+							</div>
+						{/if}
+					</div>
+				{/if}
+				{#if type.rights.add !== 'none'}<a href="/crm/{code}/new{f.category_id ? `?category_id=${f.category_id}` : ''}" class="btn btn-primary" data-tour="crm-new"><Icon name="plus" class="size-4" /> New {type.name.toLowerCase()}</a>{/if}
 			</div>
 		</div>
 
@@ -230,7 +244,7 @@
 				<option value="planned">Has planned</option>
 				<option value="none">Nothing planned</option>
 			</select>
-			<button class="btn btn-ghost" onclick={() => (showFilters = !showFilters)}>
+			<button class="btn btn-ghost" data-tour="crm-filters" onclick={() => (showFilters = !showFilters)}>
 				<Icon name="settings" class="size-4" /> Filters{activeFilters ? ` (${activeFilters})` : ''}
 			</button>
 			{#if saved.length}

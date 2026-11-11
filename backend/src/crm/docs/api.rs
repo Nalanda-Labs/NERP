@@ -195,6 +195,9 @@ pub struct Template {
     number_prefix: String,
     builtin_key: Option<String>,
     is_active: bool,
+    /// Who may make documents with it (both empty: everyone who may for the record).
+    user_ids: Vec<Uuid>,
+    department_ids: Vec<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[sqlx(skip)]
@@ -202,7 +205,38 @@ pub struct Template {
 }
 
 const TEMPLATE_COLUMNS: &str =
-    "id, name, engine, entity_types, doc_title, locale, source, file_id, number_prefix, builtin_key, is_active, created_at, updated_at";
+    "id, name, engine, entity_types, doc_title, locale, source, file_id, number_prefix, builtin_key, is_active, user_ids, department_ids, created_at, updated_at";
+
+/// Whether this person may make documents with the template: CRM admins and automation
+/// always; else everyone when it names nobody, or the people and departments it names (a
+/// department includes its sub-departments).
+async fn may_use(state: &AppState, auth: &AuthUser, t: &Template) -> AppResult<bool> {
+    if is_crm_admin(auth) || (t.user_ids.is_empty() && t.department_ids.is_empty()) || t.user_ids.contains(&auth.id) {
+        return Ok(true);
+    }
+    if t.department_ids.is_empty() {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar(
+        "WITH RECURSIVE mine AS (
+             SELECT department_id AS id FROM user_departments WHERE user_id = $1
+             UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
+         SELECT EXISTS (SELECT 1 FROM mine WHERE id = ANY($2))",
+    )
+    .bind(auth.id)
+    .bind(&t.department_ids)
+    .fetch_one(&state.db)
+    .await?)
+}
+
+async fn check_people(state: &AppState, users: &[Uuid], deps: &[Uuid]) -> AppResult<()> {
+    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND NOT is_guest").bind(users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(deps).fetch_one(&state.db).await?;
+    if u as usize != users.len() || d as usize != deps.len() || users.len() + deps.len() > 200 {
+        return Err(AppError::bad("choose employees and existing departments"));
+    }
+    Ok(())
+}
 
 async fn load_template(state: &AppState, id: Uuid) -> AppResult<Template> {
     let mut t: Template = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {TEMPLATE_COLUMNS} FROM crm_doc_templates WHERE id = $1")))
@@ -242,6 +276,13 @@ async fn list_templates(State(state): State<AppState>, auth: AuthUser, Query(q):
     }
     if t.is_some() {
         items.retain(|i| i.available);
+        let mut usable = Vec::new();
+        for i in items {
+            if may_use(&state, &auth, &i).await? {
+                usable.push(i);
+            }
+        }
+        items = usable;
     }
     Ok(Json(json!({ "items": items, "engines": engines() })))
 }
@@ -277,6 +318,8 @@ struct TemplateBody {
     file_id: Option<Uuid>,
     number_prefix: Option<String>,
     is_active: Option<bool>,
+    user_ids: Option<Vec<Uuid>>,
+    department_ids: Option<Vec<Uuid>>,
 }
 
 async fn type_ids(state: &AppState, codes: &[String]) -> AppResult<Vec<i16>> {
@@ -359,9 +402,11 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Json(b):
         ("office", Some(f)) => Some(office_template_file(&state, &auth, f).await?),
         _ => None,
     };
+    let (users, deps) = (b.user_ids.clone().unwrap_or_default(), b.department_ids.clone().unwrap_or_default());
+    check_people(&state, &users, &deps).await?;
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_doc_templates (name, engine, entity_types, doc_title, locale, source, file_id, number_prefix, is_active, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+        "INSERT INTO crm_doc_templates (name, engine, entity_types, doc_title, locale, source, file_id, number_prefix, is_active, created_by, user_ids, department_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
     )
     .bind(&name)
     .bind(&engine)
@@ -373,6 +418,8 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Json(b):
     .bind(check_prefix(b.number_prefix.as_deref().unwrap_or("INV-{YYYY}-"))?)
     .bind(b.is_active.unwrap_or(true))
     .bind(auth.id)
+    .bind(&users)
+    .bind(&deps)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(load_template(&state, id).await?))
@@ -398,9 +445,12 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
         Some(f) if cur.engine == "office" && Some(f) != cur.file_id => Some(office_template_file(&state, &auth, f).await?),
         _ => cur.file_id,
     };
+    let users = b.user_ids.clone().unwrap_or(cur.user_ids.clone());
+    let deps = b.department_ids.clone().unwrap_or(cur.department_ids.clone());
+    check_people(&state, &users, &deps).await?;
     sqlx::query(
         "UPDATE crm_doc_templates SET name = $2, entity_types = $3, doc_title = $4, locale = $5, source = $6, file_id = $7,
-             number_prefix = $8, is_active = $9, updated_at = now() WHERE id = $1",
+             number_prefix = $8, is_active = $9, user_ids = $10, department_ids = $11, updated_at = now() WHERE id = $1",
     )
     .bind(id)
     .bind(match &b.name { Some(n) => required("name", n, 200)?, None => cur.name })
@@ -411,6 +461,8 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
     .bind(file_id)
     .bind(match &b.number_prefix { Some(p) => check_prefix(p)?, None => cur.number_prefix })
     .bind(b.is_active.unwrap_or(cur.is_active))
+    .bind(&users)
+    .bind(&deps)
     .execute(&state.db)
     .await?;
     Ok(Json(load_template(&state, id).await?))
@@ -704,6 +756,9 @@ pub async fn generate(state: &AppState, auth: &AuthUser, item: Uuid, template_id
     let t = load_template(&state, template_id).await?;
     if !t.is_active || !t.entity_types.contains(&et) {
         return Err(AppError::bad("this template is not available for this record"));
+    }
+    if !may_use(&state, &auth, &t).await? {
+        return Err(AppError::Forbidden);
     }
     if !t.available {
         return Err(AppError::bad(format!("{} is not installed on this server", engine_label(&t.engine))));

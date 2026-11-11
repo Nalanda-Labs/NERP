@@ -159,12 +159,12 @@
 			{/if}
 		</div>
 		<div class="flex gap-2">
-			<a href="/flows" class="btn btn-ghost">Flows</a>
-			<a href="/tasks/reports" class="btn btn-ghost">Reports</a>
+			<a href="/flows" class="btn btn-ghost" data-tour="task-flows">Flows</a>
+			<a href="/tasks/reports" class="btn btn-ghost" data-tour="task-reports">Reports</a>
 			<a href="/tasks/trash" class="btn btn-ghost" title="Recycle bin"><Icon name="trash" class="size-4" /> Bin</a>
 			{#if session.can(PERM.TASKS_MANAGE_ALL)}<a href="/tasks/fields" class="btn btn-ghost">Fields</a>{/if}
 			<a href="/tasks/templates" class="btn btn-secondary"><Icon name="refresh" class="size-4" /> Templates</a>
-			<button class="btn btn-primary" onclick={() => (formOpen = true)}><Icon name="plus" class="size-4" /> New task</button>
+			<button class="btn btn-primary" data-tour="task-new" onclick={() => (formOpen = true)}><Icon name="plus" class="size-4" /> New task</button>
 		</div>
 	</div>
 

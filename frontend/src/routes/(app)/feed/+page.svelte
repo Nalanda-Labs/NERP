@@ -1,4 +1,5 @@
 <script lang="ts">
+	import RequestDialog from '#lib/components/RequestDialog.svelte';
 	// News feed: post to everyone or to chosen people and departments; important posts first.
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
@@ -63,6 +64,7 @@
 	let poll = $state({ question: '', options: ['', ''] });
 	let files = $state<{ id: string; name: string }[]>([]);
 	let busy = $state(false);
+	let requestOpen = $state(false);
 	onMount(() => {
 		api.get<{ id: string; name: string }[]>('/departments').then((d) => (departments = d)).catch(() => {});
 	});
@@ -154,6 +156,7 @@
 			<label class="btn btn-ghost cursor-pointer px-2" aria-label="Attach files"><Icon name="paperclip" class="size-4" /><input type="file" multiple class="sr-only" onchange={upload} /></label>
 			<button type="button" class="btn btn-ghost px-2 {withPoll ? 'text-brand-700' : ''}" aria-pressed={withPoll} onclick={() => (withPoll = !withPoll)}>Poll</button>
 			<button type="button" class="btn btn-ghost px-2 {withBadge ? 'text-brand-700' : ''}" aria-pressed={withBadge} onclick={() => (withBadge = !withBadge)}>Give a badge</button>
+			<button type="button" class="btn btn-ghost px-2" onclick={() => (requestOpen = true)} data-new-request>Request…</button>
 			<label class="flex items-center gap-2 text-slate-600"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={isImportant} /> Important</label>
 			<button class="btn btn-primary ml-auto" disabled={busy || !body.trim()}>Post</button>
 		</div>
@@ -177,3 +180,5 @@
 	{/each}
 	{#if more}<button class="btn btn-secondary w-full justify-center" onclick={older}>Older posts</button>{/if}
 </div>
+
+<RequestDialog bind:open={requestOpen} onposted={(p) => (posts = [p, ...posts])} />

@@ -193,6 +193,7 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
         crate::crm::REMIND_JOB => crate::crm::run_reminders(state).await,
         crate::crm::PURGE_JOB => crate::crm::run_purge(state).await,
         crate::crm::automation::JOB => crate::crm::automation::run_job(state, payload).await,
+        crate::crm::sign_templates::JOB => crate::crm::sign_templates::run_job(state, payload).await,
         crate::api::webhooks::JOB => crate::api::webhooks::run_job(state, payload).await,
         crate::marketing::JOB => crate::marketing::run_job(state, payload).await,
         crate::marketing::DUE_JOB => crate::marketing::run_due(state).await,

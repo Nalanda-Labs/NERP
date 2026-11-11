@@ -502,6 +502,22 @@ struct ItemInput {
     values: Map<String, Value>,
 }
 
+/// Adds an item for someone (automation acting for them): their rights apply, and the list's
+/// processes start as for any new item.
+pub(crate) async fn add_item(state: &AppState, auth: AuthUser, list: Uuid, title: String, values: Map<String, Value>) -> AppResult<Value> {
+    create_item(State(state.clone()), auth, Path(list), Json(ItemInput { title: Some(title), values })).await.map(|j| j.0)
+}
+
+/// Whether this person may add items to the list.
+pub(crate) async fn may_add(state: &AppState, auth: &AuthUser, list: Uuid) -> bool {
+    need(state, auth, list, "add").await.is_ok()
+}
+
+/// The list's fields as (code, kind), in order.
+pub(crate) async fn field_kinds(state: &AppState, list: Uuid) -> AppResult<Vec<(String, String)>> {
+    Ok(fields(state, list).await?.into_iter().map(|f| (f.code, f.kind)).collect())
+}
+
 async fn create_item(State(state): State<AppState>, auth: AuthUser, Path(list): Path<Uuid>, Json(b): Json<ItemInput>) -> AppResult<Json<Value>> {
     need(&state, &auth, list, "add").await?;
     let title = required("title", b.title.as_deref().unwrap_or(""), 300)?;
