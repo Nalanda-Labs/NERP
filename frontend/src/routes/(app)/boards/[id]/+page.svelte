@@ -6,7 +6,7 @@
 	import { page } from '$app/state';
 	import { onDestroy, onMount } from 'svelte';
 	import { publicLinksAllowed } from '#lib/companyRules.ts';
-	import { api, requestBlob } from '#lib/api.ts';
+	import { api, query, requestBlob } from '#lib/api.ts';
 	import { BoardSync, type BoardFile, type El } from '#lib/boards.svelte.ts';
 	import ChatCallButtons from '#lib/components/ChatCallButtons.svelte';
 	import Excalidraw from '#lib/components/boards/Excalidraw.svelte';
@@ -104,6 +104,32 @@
 	const boardChat = async () => (await api.post<{ chat_id: string }>(`/boards/${id}/chat`)).chat_id;
 
 	// Sharing.
+	// Documents from the drive, placed on the board as cards that open them.
+	let docsOpen = $state(false);
+	let docQ = $state('');
+	let docHits = $state<{ id: string; name: string; mime_type: string | null; board_id?: string | null }[]>([]);
+	let docTimer: ReturnType<typeof setTimeout>;
+	function findDocs() {
+		clearTimeout(docTimer);
+		docTimer = setTimeout(async () => {
+			docHits = docQ.trim().length < 2 ? [] : (await api.get<{ items: typeof docHits }>('/drive/search' + query({ q: docQ.trim() })).catch(() => ({ items: [] }))).items.filter((d: any) => d.kind !== 'folder');
+		}, 200);
+	}
+	function placeDoc(d: (typeof docHits)[number]) {
+		if (!exApi || !exLib) return;
+		const st = exApi.getAppState();
+		const z = st.zoom?.value ?? 1;
+		const x = -st.scrollX + st.width / 2 / z - 150;
+		const y = -st.scrollY + st.height / 2 / z - 40;
+		const href = d.board_id ? `${location.origin}/boards/${d.board_id}` : `${location.origin}/drive?file=${d.id}`;
+		const els = exLib.convertToExcalidrawElements([
+			{ type: 'rectangle', x, y, width: 300, height: 80, backgroundColor: '#f8fafc', fillStyle: 'solid', roundness: { type: 3 }, link: href, label: { text: `📄 ${d.name}`, fontSize: 18 } }
+		]);
+		exApi.updateScene({ elements: [...exApi.getSceneElementsIncludingDeleted(), ...els], captureUpdate: exLib.CaptureUpdateAction.IMMEDIATELY });
+		docsOpen = false;
+		docQ = '';
+		docHits = [];
+	}
 	let shareOpen = $state(false);
 	let grants = $state<Grant[]>([]);
 	let departments = $state<{ id: string; name: string }[]>([]);
@@ -166,6 +192,7 @@
 			<div class="ml-auto flex flex-wrap items-center gap-2">
 				{#if sync?.viewers.length}<span class="text-xs text-slate-500" data-viewers title="Looking at it now">👀 {sync.viewers.map((v) => v.name).join(', ')}</span>{/if}
 				{#if selectedText && board.level !== 'view'}<button class="btn btn-secondary" onclick={makeTask}>Make a task</button>{/if}
+				{#if board.level !== 'view'}<button class="btn btn-secondary" onclick={() => (docsOpen = true)} data-add-document>Add a document</button>{/if}
 				<ChatCallButtons chat={boardChat} call={false} />
 				{#if board.level === 'owner'}
 					<button class="btn btn-secondary" onclick={openShare}>Share</button>
@@ -180,6 +207,20 @@
 		</div>
 	</div>
 {/if}
+
+<Modal bind:open={docsOpen} title="Add a document from the drive">
+	<div class="space-y-3">
+		<input class="input" type="search" placeholder="Find a file by name…" aria-label="Find a file" bind:value={docQ} oninput={findDocs} />
+		<ul class="max-h-80 divide-y divide-slate-50 overflow-auto">
+			{#each docHits as d (d.id)}
+				<li><button class="flex w-full items-center gap-2 px-2 py-2 text-left text-sm hover:bg-slate-50" onclick={() => placeDoc(d)} data-doc-hit>📄 <span class="truncate">{d.name}</span></button></li>
+			{:else}
+				{#if docQ.trim().length >= 2}<li class="px-2 py-4 text-sm text-slate-500">Nothing found.</li>{/if}
+			{/each}
+		</ul>
+		<p class="text-xs text-slate-500">It goes on the board as a card that opens the document; people see it if the drive lets them.</p>
+	</div>
+</Modal>
 
 <Modal bind:open={shareOpen} title="Share the board">
 	<div class="space-y-4 text-sm">

@@ -226,9 +226,11 @@ pub struct Product {
     props: Value,
     /// A service: sold like a product, never kept in stock.
     is_service: bool,
+    /// What a unit costs the company (in `currency`), for gross profit; None = unknown.
+    cost: Option<Decimal>,
 }
 
-const PRODUCT_COLUMNS: &str = "id, name, sku, description, price, currency, tax_rate, tax_included, unit, is_active, updated_at, in_shop, slug, shop_category_id, image_file_id, stock, parent_id, props, is_service";
+const PRODUCT_COLUMNS: &str = "id, name, sku, description, price, currency, tax_rate, tax_included, unit, is_active, updated_at, in_shop, slug, shop_category_id, image_file_id, stock, parent_id, props, is_service, cost";
 
 #[derive(Deserialize)]
 struct ProductQuery {
@@ -286,6 +288,9 @@ struct ProductInput {
     #[serde(default, deserialize_with = "crate::routes::double_option")]
     stock: Option<Option<String>>,
     is_service: Option<bool>,
+    /// Left out = unchanged, null or "" = unknown.
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    cost: Option<Option<String>>,
 }
 
 pub(super) fn can_manage_products(auth: &AuthUser) -> AppResult<()> {
@@ -359,6 +364,19 @@ async fn save_product(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: Pr
     let stock = if b.is_service == Some(true) { None } else { b.stock };
     let shop = ShopFields { in_shop: b.in_shop, shop_category_id: b.shop_category_id, image_file_id: b.image_file_id, stock };
     let is_service = b.is_service;
+    let cost = match &b.cost {
+        None => None,
+        Some(c) => Some(match c.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            None => None,
+            Some(c) => {
+                let d = Decimal::from_str(c).map_err(|_| AppError::bad("cost must be a number"))?;
+                if d.is_sign_negative() {
+                    return Err(AppError::bad("cost cannot be negative"));
+                }
+                Some(d)
+            }
+        }),
+    };
     let id = match id {
         Some(id) => {
             sqlx::query(
@@ -406,8 +424,46 @@ async fn save_product(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: Pr
         }
         sqlx::query("UPDATE crm_products SET is_service = $2 WHERE id = $1").bind(id).bind(sv).execute(&state.db).await?;
     }
+    if let Some(c) = cost {
+        sqlx::query("UPDATE crm_products SET cost = $2 WHERE id = $1").bind(id).bind(c).execute(&state.db).await?;
+    }
     save_shop_fields(state, auth, id, shop).await?;
     Ok(id)
+}
+
+/// A unit's cost of a catalogue product in `currency`: its cost price, or else the average
+/// purchase price of its posted receipts. None when neither is known.
+pub(crate) async fn unit_cost(state: &AppState, product: Uuid, currency: &str) -> AppResult<Option<Decimal>> {
+    let own: Option<(Option<Decimal>, String)> = sqlx::query_as("SELECT cost, currency FROM crm_products WHERE id = $1").bind(product).fetch_optional(&state.db).await?;
+    let (amount, from) = match own {
+        Some((Some(c), cur)) => (c, cur),
+        Some((None, _)) => {
+            let avg: Option<(Decimal, String)> = sqlx::query_as(
+                "SELECT SUM(l.price * l.quantity) / NULLIF(SUM(l.quantity), 0), COALESCE(d.currency, (SELECT code FROM crm_currencies WHERE is_base))
+                 FROM inv_document_lines l JOIN inv_documents d ON d.id = l.document_id
+                 WHERE l.product_id = $1 AND d.kind = 'receipt' AND d.status = 'posted' AND l.price IS NOT NULL AND l.quantity > 0
+                 GROUP BY 2 ORDER BY SUM(l.quantity) DESC LIMIT 1",
+            )
+            .bind(product)
+            .fetch_optional(&state.db)
+            .await?
+            .and_then(|(a, c): (Option<Decimal>, String)| a.map(|a| (a, c)));
+            match avg {
+                Some(x) => x,
+                None => return Ok(None),
+            }
+        }
+        None => return Ok(None),
+    };
+    if from == currency {
+        return Ok(Some(round4(amount)));
+    }
+    let (Some(rf), Some(rt)) = (rate_of(state, &from).await?, rate_of(state, currency).await?) else { return Ok(None) };
+    Ok(if rt.is_zero() { None } else { Some(round4(amount * rf / rt)) })
+}
+
+fn round4(d: Decimal) -> Decimal {
+    d.round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero)
 }
 
 struct ShopFields {
@@ -566,6 +622,9 @@ pub struct ProductRow {
     pub tax_rate: Option<Decimal>,
     #[serde(default)]
     pub tax_included: bool,
+    /// Unit cost in the record's currency (gross profit); filled from the catalogue when left out.
+    #[serde(default)]
+    pub cost: Option<Decimal>,
 }
 
 fn pcs() -> String {
@@ -635,7 +694,7 @@ pub fn sum(rows: &[ProductRow]) -> Totals {
 
 pub(crate) async fn rows_of(state: &AppState, item: Uuid) -> AppResult<Vec<ProductRow>> {
     Ok(sqlx::query_as(
-        "SELECT id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included
+        "SELECT id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, cost
          FROM crm_item_products WHERE item_id = $1 ORDER BY sort",
     )
     .bind(item)
@@ -697,13 +756,26 @@ async fn put_rows(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         if r.tax_rate.is_some_and(|t| t.is_sign_negative() || t > HUNDRED) {
             return Err(AppError::bad("tax rate must be between 0 and 100"));
         }
+        if r.cost.is_some_and(|c| c.is_sign_negative()) {
+            return Err(AppError::bad("cost cannot be negative"));
+        }
+    }
+    // Rows from the catalogue without a cost take the product's.
+    let currency = row.currency.clone().unwrap_or(base_currency(&state).await?);
+    let mut costs = Vec::with_capacity(body.rows.len());
+    for r in &body.rows {
+        costs.push(match (r.cost, r.product_id) {
+            (Some(c), _) => Some(c),
+            (None, Some(p)) => unit_cost(&state, p, &currency).await?,
+            _ => None,
+        });
     }
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM crm_item_products WHERE item_id = $1").bind(id).execute(&mut *tx).await?;
     for (i, r) in body.rows.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(id)
         .bind(r.product_id)
@@ -716,6 +788,7 @@ async fn put_rows(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         .bind(r.tax_rate)
         .bind(r.tax_included)
         .bind(i as i32)
+        .bind(costs[i])
         .execute(&mut *tx)
         .await?;
     }
@@ -746,6 +819,7 @@ mod tests {
             discount_value: d(disc),
             tax_rate: tax.map(d),
             tax_included: incl,
+            cost: None,
         }
     }
 

@@ -35,7 +35,8 @@ use crate::{
 
 pub(crate) const DAV: &str = "DAV:";
 pub(crate) const CAL: &str = "urn:ietf:params:xml:ns:caldav";
-const CS: &str = "http://calendarserver.org/ns/";
+pub(crate) const CS: &str = "http://calendarserver.org/ns/";
+pub(crate) const CARD: &str = "urn:ietf:params:xml:ns:carddav";
 const APPLE: &str = "http://apple.com/ns/ical/";
 const MAX_BODY: usize = 2 * 1024 * 1024;
 /// Sync tokens: `urn:nerp:sync:<number>`.
@@ -162,6 +163,7 @@ fn tag(ns: &str, name: &str, inner: Option<&str>) -> String {
         DAV => (format!("d:{name}"), format!("d:{name}")),
         CAL => (format!("c:{name}"), format!("c:{name}")),
         CS => (format!("cs:{name}"), format!("cs:{name}")),
+        CARD => (format!("card:{name}"), format!("card:{name}")),
         APPLE => (format!("a:{name}"), format!("a:{name}")),
         "" => (format!("{name} xmlns=\"\""), name.to_string()),
         other => (format!("x:{name} xmlns:x=\"{}\"", xml_esc(other)), format!("x:{name}")),
@@ -173,20 +175,20 @@ fn tag(ns: &str, name: &str, inner: Option<&str>) -> String {
 }
 
 const XML_HEAD: &str = r#"<?xml version="1.0" encoding="utf-8"?>"#;
-const NS_DECL: &str = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:a="http://apple.com/ns/ical/""#;
+const NS_DECL: &str = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:a="http://apple.com/ns/ical/" xmlns:card="urn:ietf:params:xml:ns:carddav""#;
 
-fn xml_response(status: StatusCode, body: String) -> Response {
+pub(crate) fn xml_response(status: StatusCode, body: String) -> Response {
     let mut r = (status, body).into_response();
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/xml; charset=utf-8"));
     r
 }
 
-fn multistatus(responses: &[String], extra: &str) -> Response {
+pub(crate) fn multistatus(responses: &[String], extra: &str) -> Response {
     xml_response(StatusCode::MULTI_STATUS, format!("{XML_HEAD}<d:multistatus {NS_DECL}>{}{extra}</d:multistatus>", responses.concat()))
 }
 
 /// A `<d:response>` with the props found (200) and not found (404).
-fn prop_response(href: &str, found: &[(String, String, String)], missing: &[(String, String)]) -> String {
+pub(crate) fn prop_response(href: &str, found: &[(String, String, String)], missing: &[(String, String)]) -> String {
     let mut s = format!("<d:response><d:href>{}</d:href>", xml_esc(href));
     if !found.is_empty() {
         s.push_str("<d:propstat><d:prop>");
@@ -206,7 +208,7 @@ fn prop_response(href: &str, found: &[(String, String, String)], missing: &[(Str
     s
 }
 
-fn status_response(href: &str, status: &str) -> String {
+pub(crate) fn status_response(href: &str, status: &str) -> String {
     format!("<d:response><d:href>{}</d:href><d:status>HTTP/1.1 {status}</d:status></d:response>", xml_esc(href))
 }
 
@@ -214,7 +216,7 @@ fn error(status: StatusCode, ns: &str, name: &str) -> Response {
     xml_response(status, format!("{XML_HEAD}<d:error {NS_DECL}>{}</d:error>", tag(ns, name, None)))
 }
 
-fn plain(status: StatusCode, text: &str) -> Response {
+pub(crate) fn plain(status: StatusCode, text: &str) -> Response {
     (status, text.to_string()).into_response()
 }
 
@@ -224,7 +226,7 @@ fn plain(status: StatusCode, text: &str) -> Response {
 
 fn unauthorized() -> Response {
     let mut r = plain(StatusCode::UNAUTHORIZED, "Sign in with your email and an app password (Profile → App passwords).");
-    r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Basic realm=\"NERP calendar\", charset=\"UTF-8\""));
+    r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Basic realm=\"NERP\", charset=\"UTF-8\""));
     r
 }
 
@@ -237,7 +239,7 @@ pub(crate) struct Me {
 
 /// The person signing in with Basic auth and an app password; too many failures from one
 /// address make it wait.
-async fn sign_in(state: &AppState, headers: &HeaderMap, ip: Option<&str>) -> Result<Me, Response> {
+pub(crate) async fn sign_in(state: &AppState, headers: &HeaderMap, ip: Option<&str>) -> Result<Me, Response> {
     let mut redis = state.redis.clone();
     let key = format!("dav:fail:{}", ip.unwrap_or("unknown"));
     let fails: i64 = redis.get(&key).await.unwrap_or(0);
@@ -303,7 +305,7 @@ fn target(path: &str) -> Option<Target> {
     })
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -327,7 +329,7 @@ fn percent_encode(s: &str) -> String {
         .collect()
 }
 
-fn principal_href(u: Uuid) -> String {
+pub(crate) fn principal_href(u: Uuid) -> String {
     format!("/dav/principals/{u}/")
 }
 fn home_href(u: Uuid) -> String {
@@ -475,6 +477,8 @@ fn prop(me: &Me, state: &AppState, r: &Res, ns: &str, name: &str) -> Option<Stri
         (DAV, "getcontenttype", Res::Object(..)) => "text/calendar; charset=utf-8; component=vevent".into(),
         (CAL, "calendar-data", Res::Object(_, Some(data))) => xml_esc(data),
         (CAL, "calendar-home-set", Res::Principal) => format!("<d:href>{}</d:href>", home_href(me.id)),
+        (CARD, "addressbook-home-set", Res::Principal) => format!("<d:href>{}</d:href>", super::carddav::home_href(me.id)),
+        (CARD, "principal-address", Res::Principal) => String::new(),
         (CAL, "calendar-user-address-set", Res::Principal) => format!("<d:href>mailto:{}</d:href><d:href>{}</d:href>", xml_esc(&me.email), principal_href(me.id)),
         (CS, "email-address-set", Res::Principal) => format!("<cs:email-address>{}</cs:email-address>", xml_esc(&me.email)),
         (CAL, "supported-calendar-component-set", Res::Calendar(_)) => "<c:comp name=\"VEVENT\"/>".into(),
@@ -494,7 +498,7 @@ fn prop(me: &Me, state: &AppState, r: &Res, ns: &str, name: &str) -> Option<Stri
 fn default_props(r: &Res) -> Vec<(&'static str, &'static str)> {
     let mut p = vec![(DAV, "resourcetype"), (DAV, "displayname"), (DAV, "current-user-principal")];
     match r {
-        Res::Principal => p.extend([(CAL, "calendar-home-set"), (CAL, "calendar-user-address-set"), (DAV, "principal-URL")]),
+        Res::Principal => p.extend([(CAL, "calendar-home-set"), (CARD, "addressbook-home-set"), (CAL, "calendar-user-address-set"), (DAV, "principal-URL")]),
         Res::Calendar(_) => p.extend([(CS, "getctag"), (DAV, "sync-token"), (CAL, "supported-calendar-component-set"), (DAV, "current-user-privilege-set"), (APPLE, "calendar-color")]),
         Res::Object(..) => p = vec![(DAV, "resourcetype"), (DAV, "getetag"), (DAV, "getcontenttype")],
         _ => {}
@@ -503,7 +507,7 @@ fn default_props(r: &Res) -> Vec<(&'static str, &'static str)> {
 }
 
 /// The props a PROPFIND or REPORT asks for (None: all of the defaults).
-fn wanted(body: Option<&El>) -> Option<Vec<(String, String)>> {
+pub(crate) fn wanted(body: Option<&El>) -> Option<Vec<(String, String)>> {
     let prop = body.and_then(|b| b.child(DAV, "prop"))?;
     Some(prop.children.iter().map(|c| (c.ns.clone(), c.name.clone())).collect())
 }
@@ -542,7 +546,7 @@ pub async fn handle(State(state): State<AppState>, ClientIp(ip): ClientIp, req: 
     if method == Method::OPTIONS {
         let mut r = StatusCode::OK.into_response();
         let h = r.headers_mut();
-        h.insert("DAV", HeaderValue::from_static("1, 3, calendar-access, extended-mkcol"));
+        h.insert("DAV", HeaderValue::from_static("1, 3, calendar-access, addressbook, extended-mkcol"));
         h.insert(header::ALLOW, HeaderValue::from_static("OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT"));
         return r;
     }
@@ -550,6 +554,17 @@ pub async fn handle(State(state): State<AppState>, ClientIp(ip): ClientIp, req: 
         Ok(m) => m,
         Err(r) => return r,
     };
+    // Address books (CardDAV) have their own module.
+    if path.strip_prefix("/dav").unwrap_or(&path).starts_with("/addressbooks") {
+        let body = match axum::body::to_bytes(req.into_body(), MAX_BODY).await {
+            Ok(b) => b,
+            Err(_) => return plain(StatusCode::PAYLOAD_TOO_LARGE, "Too large"),
+        };
+        return super::carddav::handle(&state, &me, method.as_str(), &path, &headers, &body).await.unwrap_or_else(|e| {
+            tracing::warn!("carddav {method} {path}: {e}");
+            plain(StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong")
+        });
+    }
     let Some(t) = target(&path) else {
         return plain(StatusCode::NOT_FOUND, "Not found");
     };

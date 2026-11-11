@@ -265,6 +265,7 @@ async fn rsvp_answer(State(state): State<AppState>, Path(token): Path<String>, J
         let mut people: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM cal_attendees WHERE event_id = $1").bind(e.id).fetch_all(&state.db).await?;
         people.push(e.owner_id);
         let chat = crate::im::linked_chat_people(&state, crate::im::Link::Event(e.id)).await?;
+        super::slots::booking_cancelled(&state, e.id, &who).await;
         sqlx::query("DELETE FROM cal_events WHERE id = $1").bind(e.id).execute(&state.db).await?;
         crate::im::linked_chat_gone(&state, chat).await;
         notify(&state, &people, NewNotification { kind: "calendar.cancelled", title: format!("{who} cancelled “{}” on {}", e.title, super::when(&e, e.starts_at)), body: None, link: Some("/calendar".into()), actor: None }).await;

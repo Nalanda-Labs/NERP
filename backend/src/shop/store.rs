@@ -118,6 +118,7 @@ fn row_of(p: &Listed, quantity: Decimal) -> ProductRow {
         discount_value: Decimal::ZERO,
         tax_rate: p.tax_rate,
         tax_included: p.tax_included,
+        cost: None,
     }
 }
 
@@ -514,6 +515,7 @@ async fn checkout(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b)
             discount_value: Decimal::ZERO,
             tax_rate: None,
             tax_included: true,
+            cost: None,
         });
     }
     if let Some(c) = quote.coupon_id {
@@ -619,9 +621,13 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
     body.insert("assigned_to".into(), json!(handler));
     let id = create_item(state, &auth, &t, body, None).await?;
     for (i, r) in rows.iter().enumerate() {
+        let cost = match r.product_id {
+            Some(p) => match s.currency.as_deref() { Some(c) => crate::crm::money::unit_cost(state, p, c).await?, None => None },
+            None => None,
+        };
         sqlx::query(
-            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort)
-             VALUES ($1, $2, $3, $4, $5, $6, $10, $11, $7, $8, $9)",
+            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+             VALUES ($1, $2, $3, $4, $5, $6, $10, $11, $7, $8, $9, $12)",
         )
         .bind(id)
         .bind(r.product_id)
@@ -634,6 +640,7 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
         .bind(i as i32)
         .bind(&r.discount_kind)
         .bind(r.discount_value)
+        .bind(cost)
         .execute(&state.db)
         .await?;
     }

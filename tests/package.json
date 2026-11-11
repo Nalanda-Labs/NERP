@@ -10,9 +10,12 @@
     "security": "node security/run.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "pg": "^8.23.1",
     "playwright": "^1.65.0",
-    "tsdav": "^2.5.0"
+    "tsdav": "^2.5.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

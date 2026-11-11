@@ -14,6 +14,7 @@ mod config;
 pub mod docs;
 pub mod email;
 mod fields;
+pub(crate) use fields::custom_fields as fields_custom;
 pub(crate) mod items;
 pub(crate) mod money;
 mod permissions;
@@ -21,6 +22,7 @@ pub mod requisites;
 mod timeline;
 mod tools;
 mod types;
+pub(crate) mod vcard;
 mod webforms;
 
 use axum::Router;

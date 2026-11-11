@@ -61,7 +61,7 @@
 			const r = await fetch(`/api/public/calendar/meet/${encodeURIComponent(slug)}`, {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ starts_at: chosen, name: details.name, email: details.email, note: details.note || null, website: details.website })
+				body: JSON.stringify({ starts_at: chosen, name: details.name, email: details.email, note: details.note || null, website: details.website, r: page.url.searchParams.get('r') ?? undefined })
 			});
 			const data = await r.json();
 			if (!r.ok) {

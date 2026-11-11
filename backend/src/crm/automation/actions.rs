@@ -154,8 +154,8 @@ async fn tunnel_copy(state: &AppState, et: &crate::crm::EntityType, source: Uuid
     }
     let id = create_item(state, &system_auth(), et, m, Some(source)).await?;
     sqlx::query(
-        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort)
-         SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort FROM crm_item_products WHERE item_id = $2",
+        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+         SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost FROM crm_item_products WHERE item_id = $2",
     )
     .bind(id)
     .bind(source)

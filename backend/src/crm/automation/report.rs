@@ -60,6 +60,7 @@ struct RunRow {
     item_title: String,
     item_number: i64,
     type_code: String,
+    is_test: bool,
 }
 
 #[derive(Serialize, FromRow)]
@@ -118,7 +119,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
 
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
         "SELECT r.id, r.robot_id, r.schedule_id, r.robot_name, r.action, r.status, r.run_at, r.finished_at, r.wait_until, r.result, r.attempts, r.created_at,
-                r.item_id, i.title AS item_title, i.number AS item_number, t.code AS type_code",
+                r.item_id, i.title AS item_title, i.number AS item_number, t.code AS type_code, r.is_test",
     );
     qb.push(FROM);
     push_filters(&mut qb, &q, from, to, true);
@@ -172,8 +173,8 @@ async fn retry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
         return Err(AppError::bad("the robot of this run was deleted"));
     }
     let run: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_robot_runs (robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, data)
-         SELECT robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, now(), 0, '{\"waited\": true}' FROM crm_robot_runs WHERE id = $1 RETURNING id",
+        "INSERT INTO crm_robot_runs (robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, data, is_test)
+         SELECT robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, now(), 0, '{\"waited\": true}', is_test FROM crm_robot_runs WHERE id = $1 RETURNING id",
     )
     .bind(id)
     .fetch_one(&state.db)

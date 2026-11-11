@@ -1,5 +1,7 @@
 // Every API route, read from the backend's source: `.route("/path", get(a).post(b))` in
-// backend/src (all mounted under /api). Used by the sweeps so new routes are attacked too.
+// backend/src (all mounted under /api, except main.rs's own top-level routes such as /dav and
+// the ads' short links /go/{code}, which aren't API routes). Used by the sweeps so new routes
+// are attacked too.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -26,6 +28,7 @@ function files(dir: string): string[] {
 export function routes(): Route[] {
   const out = new Map<string, Route>();
   for (const file of files(SRC)) {
+    if (file.slice(SRC.length) === 'main.rs') continue;
     const src = readFileSync(file, 'utf8');
     let i = 0;
     while ((i = src.indexOf('.route("', i)) !== -1) {

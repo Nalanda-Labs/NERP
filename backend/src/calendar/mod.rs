@@ -11,6 +11,7 @@
 
 mod access;
 pub mod dav;
+pub mod carddav;
 mod ical;
 mod ics;
 mod invites;
@@ -280,7 +281,7 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
         let acts: Vec<(Uuid, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Uuid, String)> = sqlx::query_as(
             "SELECT a.id, a.kind, a.subject, COALESCE(a.starts_at, a.deadline), a.ends_at, a.item_id, t.code
              FROM crm_activities a JOIN crm_items i ON i.id = a.item_id JOIN crm_entity_types t ON t.id = i.entity_type
-             WHERE a.responsible_id = $1 AND NOT a.is_completed AND a.kind IN ('call', 'meeting')
+             WHERE a.responsible_id = $1 AND NOT a.is_completed AND a.kind IN ('call', 'meeting') AND a.cal_event_id IS NULL
                AND COALESCE(a.starts_at, a.deadline) >= $2 AND COALESCE(a.starts_at, a.deadline) < $3 AND i.deleted_at IS NULL",
         )
         .bind(auth.id)

@@ -123,16 +123,67 @@ pub struct FieldDef {
     pub show_in_list: bool,
     pub settings: Value,
     pub sort: i32,
+    /// Who sees the field's values; both empty means everyone.
+    pub visible_user_ids: Vec<Uuid>,
+    pub visible_department_ids: Vec<Uuid>,
+}
+
+impl FieldDef {
+    pub fn restricted(&self) -> bool {
+        !self.visible_user_ids.is_empty() || !self.visible_department_ids.is_empty()
+    }
 }
 
 pub async fn custom_fields(state: &AppState, entity_type: i16) -> AppResult<Vec<FieldDef>> {
     Ok(sqlx::query_as(
-        "SELECT id, code, label, kind, is_multiple, is_required, show_in_list, settings, sort
+        "SELECT id, code, label, kind, is_multiple, is_required, show_in_list, settings, sort, visible_user_ids, visible_department_ids
          FROM crm_field_defs WHERE entity_type = $1 ORDER BY sort, created_at",
     )
     .bind(entity_type)
     .fetch_all(&state.db)
     .await?)
+}
+
+/// The codes of the type's custom fields this person may not see (restricted to other people
+/// or departments). CRM administrators and the system see everything.
+pub async fn hidden_codes(state: &AppState, auth: &AuthUser, entity_type: i16) -> AppResult<Vec<String>> {
+    let defs = custom_fields(state, entity_type).await?;
+    hidden_among(state, auth, &defs).await
+}
+
+pub async fn hidden_among(state: &AppState, auth: &AuthUser, defs: &[FieldDef]) -> AppResult<Vec<String>> {
+    if is_crm_admin(auth) || !defs.iter().any(FieldDef::restricted) {
+        return Ok(vec![]);
+    }
+    // The person's departments and those above them.
+    let mine: Vec<Uuid> = sqlx::query_scalar(
+        "WITH RECURSIVE mine AS (
+             SELECT department_id AS id FROM user_departments WHERE user_id = $1
+             UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
+         SELECT id FROM mine",
+    )
+    .bind(auth.id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(defs
+        .iter()
+        .filter(|d| d.restricted() && !d.visible_user_ids.contains(&auth.id) && !d.visible_department_ids.iter().any(|x| mine.contains(x)))
+        .map(|d| d.code.clone())
+        .collect())
+}
+
+/// Takes hidden fields' values out of a record's `uf`.
+pub fn strip_uf(uf: &mut Value, hidden: &[String]) {
+    if let Value::Object(m) = uf {
+        m.retain(|k, _| !hidden.contains(k));
+    }
+}
+
+/// The custom fields this person may see.
+pub async fn visible_fields(state: &AppState, auth: &AuthUser, entity_type: i16) -> AppResult<Vec<FieldDef>> {
+    let defs = custom_fields(state, entity_type).await?;
+    let hidden = hidden_among(state, auth, &defs).await?;
+    Ok(defs.into_iter().filter(|d| !hidden.contains(&d.code)).collect())
 }
 
 const KINDS: &[&str] = &["string", "text", "number", "money", "date", "datetime", "boolean", "list", "user", "crm", "url", "file", "address"];
@@ -236,7 +287,8 @@ pub fn clean_address(o: &Map<String, Value>) -> AppResult<Map<String, Value>> {
 
 /// Validates a full or partial `uf` object against the type's custom fields.
 /// `partial`: only the keys present are checked (PATCH); otherwise required fields must be set.
-pub async fn validate_uf(state: &AppState, entity_type: i16, uf: &Map<String, Value>, partial: bool) -> AppResult<Map<String, Value>> {
+/// `hidden`: fields the person can't see, so they aren't asked to fill them in.
+pub async fn validate_uf(state: &AppState, entity_type: i16, uf: &Map<String, Value>, partial: bool, hidden: &[String]) -> AppResult<Map<String, Value>> {
     let defs = custom_fields(state, entity_type).await?;
     // Collect user references once.
     let mut user_refs: Vec<Uuid> = Vec::new();
@@ -262,7 +314,7 @@ pub async fn validate_uf(state: &AppState, entity_type: i16, uf: &Map<String, Va
     }
     for d in &defs {
         let Some(v) = uf.get(&d.code) else {
-            if !partial && d.is_required {
+            if !partial && d.is_required && !hidden.contains(&d.code) {
                 return Err(invalid(&d.label, "is required"));
             }
             continue;
@@ -290,9 +342,9 @@ pub async fn validate_uf(state: &AppState, entity_type: i16, uf: &Map<String, Va
 // Field management (crm.admin)
 // ---------------------------------------------------------------------------
 
-async fn list(State(state): State<AppState>, _auth: AuthUser, Path(code): Path<String>) -> AppResult<Json<Vec<FieldDef>>> {
+async fn list(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>) -> AppResult<Json<Vec<FieldDef>>> {
     let t = entity_type(&state, &code).await?;
-    Ok(Json(custom_fields(&state, t.id).await?))
+    Ok(Json(visible_fields(&state, &auth, t.id).await?))
 }
 
 #[derive(Deserialize)]
@@ -307,6 +359,27 @@ struct NewField {
     show_in_list: bool,
     #[serde(default)]
     settings: Value,
+    #[serde(default)]
+    visible_user_ids: Vec<Uuid>,
+    #[serde(default)]
+    visible_department_ids: Vec<Uuid>,
+}
+
+/// Who may see a field: employees (not guests) and existing departments.
+async fn check_audience(state: &AppState, users: &mut Vec<Uuid>, deps: &mut Vec<Uuid>) -> AppResult<()> {
+    users.sort();
+    users.dedup();
+    deps.sort();
+    deps.dedup();
+    if users.len() + deps.len() > 200 {
+        return Err(AppError::bad("choose at most 200 people and departments"));
+    }
+    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND NOT is_guest").bind(&*users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(&*deps).fetch_one(&state.db).await?;
+    if u as usize != users.len() || d as usize != deps.len() {
+        return Err(AppError::bad("choose employees and existing departments"));
+    }
+    Ok(())
 }
 
 fn validate_settings(kind: &str, settings: &Value) -> AppResult<Value> {
@@ -353,7 +426,7 @@ fn slug(label: &str) -> String {
     if s.is_empty() { "field".into() } else { s }
 }
 
-async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(body): Json<NewField>) -> AppResult<Json<FieldDef>> {
+async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(mut body): Json<NewField>) -> AppResult<Json<FieldDef>> {
     if !is_crm_admin(&auth) {
         return Err(AppError::Forbidden);
     }
@@ -363,6 +436,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
         return Err(AppError::bad("unknown field type"));
     }
     let settings = validate_settings(&body.kind, &body.settings)?;
+    check_audience(&state, &mut body.visible_user_ids, &mut body.visible_department_ids).await?;
     // Unique code derived from the label: uf_<slug>, uf_<slug>_2, …
     let base = format!("uf_{}", slug(&label));
     let mut code = base.clone();
@@ -378,9 +452,9 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
         code = format!("{base}_{n}");
     }
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_field_defs (entity_type, code, label, kind, is_multiple, is_required, show_in_list, settings, sort)
+        "INSERT INTO crm_field_defs (entity_type, code, label, kind, is_multiple, is_required, show_in_list, settings, sort, visible_user_ids, visible_department_ids)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                 COALESCE((SELECT MAX(sort) FROM crm_field_defs WHERE entity_type = $1), 0) + 10) RETURNING id",
+                 COALESCE((SELECT MAX(sort) FROM crm_field_defs WHERE entity_type = $1), 0) + 10, $9, $10) RETURNING id",
     )
     .bind(t.id)
     .bind(&code)
@@ -390,6 +464,8 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
     .bind(body.is_required)
     .bind(body.show_in_list)
     .bind(settings)
+    .bind(&body.visible_user_ids)
+    .bind(&body.visible_department_ids)
     .fetch_one(&state.db)
     .await?;
     let def = custom_fields(&state, t.id).await?.into_iter().find(|d| d.id == id).unwrap();
@@ -403,6 +479,8 @@ struct UpdateField {
     show_in_list: Option<bool>,
     settings: Option<Value>,
     sort: Option<i32>,
+    visible_user_ids: Option<Vec<Uuid>>,
+    visible_department_ids: Option<Vec<Uuid>>,
 }
 
 async fn update(
@@ -420,8 +498,12 @@ async fn update(
         Some(s) => validate_settings(&def.kind, s)?,
         None => def.settings.clone(),
     };
+    let mut users = body.visible_user_ids.clone().unwrap_or(def.visible_user_ids.clone());
+    let mut deps = body.visible_department_ids.clone().unwrap_or(def.visible_department_ids.clone());
+    check_audience(&state, &mut users, &mut deps).await?;
     sqlx::query(
-        "UPDATE crm_field_defs SET label = $1, is_required = $2, show_in_list = $3, settings = $4, sort = $5 WHERE id = $6",
+        "UPDATE crm_field_defs SET label = $1, is_required = $2, show_in_list = $3, settings = $4, sort = $5,
+             visible_user_ids = $7, visible_department_ids = $8 WHERE id = $6",
     )
     .bind(match &body.label {
         Some(l) => required("label", l, 100)?,
@@ -432,6 +514,8 @@ async fn update(
     .bind(settings)
     .bind(body.sort.unwrap_or(def.sort))
     .bind(id)
+    .bind(&users)
+    .bind(&deps)
     .execute(&state.db)
     .await?;
     Ok(Json(custom_fields(&state, t.id).await?.into_iter().find(|d| d.id == id).unwrap()))

@@ -51,8 +51,27 @@ async fn readable(state: &AppState, auth: &AuthUser, item: Uuid) -> AppResult<(i
     Ok((r.entity_type, r.assigned_to))
 }
 
+/// Takes changes to fields the person may not see out of edit entries (and drops entries
+/// left with none).
+fn hide_changes(entries: &mut Vec<Entry>, hidden: &[String]) {
+    if hidden.is_empty() {
+        return;
+    }
+    entries.retain_mut(|e| {
+        if e.kind != "edit" {
+            return true;
+        }
+        if let Some(ch) = e.data.get_mut("changes").and_then(Value::as_array_mut) {
+            ch.retain(|c| !c["field"].as_str().and_then(|f| f.strip_prefix("uf.")).is_some_and(|f| hidden.iter().any(|h| h == f)));
+            return !ch.is_empty();
+        }
+        true
+    });
+}
+
 async fn list(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Query(q): Query<ListQuery>) -> AppResult<Json<Value>> {
-    readable(&state, &auth, id).await?;
+    let (t, _) = readable(&state, &auth, id).await?;
+    let hidden = super::fields::hidden_codes(&state, &auth, t).await?;
     const SELECT: &str = "SELECT t.id, t.kind, t.author_id,
         CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS author_name,
         u.avatar_file_id AS author_avatar_file_id, t.body, t.data, t.is_pinned, t.edited_at, t.created_at
@@ -73,6 +92,9 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     .fetch_all(&state.db)
     .await?;
     let more = items.len() == 50;
+    let (mut pinned, mut items) = (pinned, items);
+    hide_changes(&mut pinned, &hidden);
+    hide_changes(&mut items, &hidden);
     Ok(Json(json!({ "pinned": pinned, "items": items, "has_more": more })))
 }
 

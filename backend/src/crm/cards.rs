@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use super::{
     access::{is_crm_admin, require_any},
     entity_type,
-    fields::{custom_fields, system_fields_for, FieldDef},
+    fields::{system_fields_for, FieldDef},
     EntityType,
 };
 use crate::{
@@ -163,7 +163,7 @@ async fn stored(state: &AppState, t: i16, user: Option<uuid::Uuid>) -> AppResult
 }
 
 async fn payload(state: &AppState, auth: &AuthUser, t: &EntityType) -> AppResult<Value> {
-    let fields = catalogue(t, &custom_fields(state, t.id).await?);
+    let fields = catalogue(t, &super::fields::visible_fields(state, auth, t.id).await?);
     let (layout, scope) = match stored(state, t.id, Some(auth.id)).await? {
         Some(l) => (l, "mine"),
         None => match stored(state, t.id, None).await? {
@@ -203,7 +203,7 @@ async fn put_layout(State(state): State<AppState>, auth: AuthUser, Path(code): P
         "common" => return Err(AppError::Forbidden),
         _ => return Err(AppError::bad("scope must be mine or common")),
     };
-    let fields = catalogue(&t, &custom_fields(&state, t.id).await?);
+    let fields = catalogue(&t, &super::fields::visible_fields(&state, &auth, t.id).await?);
     let layout = serde_json::to_value(normalize(&b.layout, &fields, true)?).unwrap();
     let user = if common { None } else { Some(auth.id) };
     let mut tx = state.db.begin().await?;

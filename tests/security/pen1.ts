@@ -13,7 +13,7 @@ const PUBLIC = [
   /^\/api\/public\//, /^\/api\/health$/, /^\/api\/openapi\.json$/, /^\/api\/setup$/,
   /^\/api\/auth\/(login|login\/2fa|login\/2fa-setup|login\/2fa-setup\/start|logout|refresh|forgot-password|reset-password|accept-invite|invite\/\{token\})$/,
   /^\/api\/auth\/sso(\/start|\/callback)?$/, /^\/api\/auth\/providers(\/\{id\}\/start|\/callback)?$/, /^\/api\/crm\/mailboxes\/oauth\/callback$/, /^\/api\/realtime\/ws$/,
-  /^\/api\/crm\/automation\/webhook\/\{token\}$/, /^\/api\/files\/\{id\}\/content$/,
+  /^\/api\/crm\/automation\/webhook\/\{token\}$/, /^\/api\/files\/\{id\}\/(content|video|poster|video-status)$/,
 ];
 const open: string[] = [];
 for (const r of routes()) for (const m of r.methods) {

@@ -14,6 +14,7 @@
 	import Icon from '../Icon.svelte';
 	import Modal from '../Modal.svelte';
 	import UserPicker from '../UserPicker.svelte';
+	import MultiUserPicker, { type PickedUser } from '../MultiUserPicker.svelte';
 	import AutomationLog from './AutomationLog.svelte';
 	import StageTimes from './StageTimes.svelte';
 
@@ -54,7 +55,8 @@
 		['webform_submitted', 'A web form is submitted'],
 		['webhook', 'An external system calls a webhook'],
 		['signature_completed', 'Everyone signs a document'],
-		['signature_declined', 'Someone declines to sign']
+		['signature_declined', 'Someone declines to sign'],
+		['tasks_done', 'All its tasks are done']
 	];
 	const WAITS: [Wait['until'], string][] = [
 		['conditions', 'the conditions below hold'],
@@ -86,10 +88,23 @@
 	let schedules = $state<Schedule[]>([]);
 	let dateFields = $state<{ code: string; label: string }[]>([]);
 	let webhookBase = $state('');
+	// Test mode: the pipeline's automation runs only for the testers' records.
+	let testMode = $state({ enabled: false, users: [] as PickedUser[] });
+	let testSaved = $state({ enabled: false, ids: '' });
+	const testDirty = $derived(testMode.enabled !== testSaved.enabled || testMode.users.map((u) => u.id).sort().join() !== testSaved.ids);
+	async function saveTestMode() {
+		try {
+			const r = await api.put<{ enabled: boolean; user_ids: string[] }>('/crm/automation/test-mode', { category_id: categoryId, enabled: testMode.enabled, user_ids: testMode.users.map((u) => u.id) });
+			testSaved = { enabled: r.enabled, ids: [...r.user_ids].sort().join() };
+			toasts.success(r.enabled ? 'Test mode on: automation runs only for the testers’ records' : 'Test mode off: automation runs for every record');
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
 	async function load() {
 		if (!categoryId) return;
 		const [r, s] = await Promise.all([
-			api.get<{ robots: Robot[]; triggers: Trigger[]; webhook_base: string; date_fields: typeof dateFields }>(`/crm/automation?category_id=${categoryId}`),
+			api.get<{ robots: Robot[]; triggers: Trigger[]; webhook_base: string; date_fields: typeof dateFields; test_mode: { enabled: boolean; user_ids: string[] } }>(`/crm/automation?category_id=${categoryId}`),
 			api.get<{ items: Schedule[] }>(`/crm/schedules?category_id=${categoryId}`)
 		]);
 		robots = r.robots;
@@ -97,6 +112,11 @@
 		webhookBase = r.webhook_base;
 		dateFields = r.date_fields;
 		schedules = s.items;
+		const testers = await Promise.all(
+			r.test_mode.user_ids.map((id) => api.get<{ id: string; first_name: string; last_name: string; avatar_file_id: string | null }>(`/users/${id}`).catch(() => null))
+		);
+		testMode = { enabled: r.test_mode.enabled, users: testers.filter((u) => !!u).map((u) => ({ id: u.id, name: `${u.first_name} ${u.last_name}`, avatar_file_id: u.avatar_file_id })) };
+		testSaved = { enabled: r.test_mode.enabled, ids: [...r.test_mode.user_ids].sort().join() };
 	}
 	$effect(() => {
 		categoryId;
@@ -691,6 +711,12 @@
 
 	{#if view === 'rules'}
 		<p class="text-sm text-slate-500">Robots run when a record enters their stage, or relative to one of its dates. Triggers move records forward when something happens.</p>
+		<section class="flex flex-wrap items-center gap-3 rounded-xl px-4 py-3 text-sm {testSaved.enabled ? 'bg-amber-50 ring-1 ring-amber-200' : 'bg-slate-50'}" data-test-mode aria-label="Test mode">
+			<label class="flex items-center gap-2 font-medium text-slate-800"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={testMode.enabled} /> Test mode</label>
+			<span class="text-slate-500">{testMode.enabled ? 'Only records whose responsible person is a tester run this pipeline’s robots, triggers and schedules.' : 'Try new rules on a few people’s records before everyone’s.'}</span>
+			{#if testMode.enabled}<div class="w-full max-w-md"><MultiUserPicker bind:value={testMode.users} placeholder="Testers" /></div>{/if}
+			{#if testDirty}<button class="btn btn-primary ml-auto" onclick={saveTestMode} disabled={testMode.enabled && !testMode.users.length}>Save</button>{/if}
+		</section>
 		{#if category}
 			<div class="flex gap-3 overflow-x-auto pb-3">
 				{#each category.stages as s (s.id)}

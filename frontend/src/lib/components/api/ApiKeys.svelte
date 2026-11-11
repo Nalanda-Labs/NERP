@@ -78,6 +78,15 @@
 	{#if data && !data.can_create}
 		<p class="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900">Making API keys needs the “Use the API” permission; ask an administrator.</p>
 	{/if}
+	<details class="card px-4 py-3 text-sm" data-mcp-help>
+		<summary class="cursor-pointer font-medium text-slate-800">Connect an AI assistant (MCP)</summary>
+		<div class="mt-2 space-y-2 text-slate-600">
+			<p>AI assistants and agents that speak the Model Context Protocol can work with the CRM, tasks and the employee list through NERP's MCP server, with a key's access. Add a remote (Streamable HTTP) server with:</p>
+			<pre class="overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-xs text-slate-100" data-mcp-url>{`URL:    ${origin}/api/mcp
+Header: Authorization: Bearer nerp_…`}</pre>
+			<p>The assistant sees only the tools the key's areas allow, and does only what you could do yourself.</p>
+		</div>
+	</details>
 
 	<div class="card overflow-x-auto">
 		<table class="w-full text-sm">
@@ -145,6 +154,7 @@
 			<p class="text-slate-600">Try it:</p>
 			<pre class="overflow-x-auto rounded-lg bg-slate-900 px-3 py-2 text-xs text-slate-100">curl -H "Authorization: Bearer {c.secret}" \
   {origin}/api/crm/deal/items?limit=5</pre>
+			<p class="text-slate-600">For an AI assistant (MCP): <code class="rounded bg-slate-100 px-1">{origin}/api/mcp</code> with the same header.</p>
 		</div>
 		{#snippet footer()}<button class="btn btn-primary" onclick={() => (created = null)}>Done</button>{/snippet}
 	</Modal>

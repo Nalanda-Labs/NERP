@@ -16,13 +16,12 @@ use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sqlx::{FromRow, Postgres, QueryBuilder};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::{
     access::{is_crm_admin, require, require_any, visible, Visible},
     broadcast, entity_type, entity_type_by_id,
-    fields::custom_fields,
     items::{create_item, load_row, normalize, push_filter, refresh_derived, update_item, Filter},
     timeline, EntityType, COMPANY,
 };
@@ -43,6 +42,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/crm/{type}/duplicates", get(duplicates))
         .route("/crm/{type}/merge", post(merge))
+        .route("/crm/{type}/duplicate-groups", get(duplicate_groups))
+        .route("/crm/{type}/duplicate-groups/ignore", post(ignore_group))
+        .route("/crm/{type}/duplicate-groups/merge", post(merge_groups))
         .route("/crm/{type}/import", post(start_import))
         .route("/crm/imports/{job}", get(import_status))
         .route("/crm/{type}/export", get(export))
@@ -119,6 +121,12 @@ struct Merge {
 /// and contact details, links, timeline and activities move over. Sources are removed.
 async fn merge(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(b): Json<Merge>) -> AppResult<Json<Value>> {
     let t = entity_type(&state, &code).await?;
+    merge_records(&state, &auth, &t, &b).await?;
+    Ok(Json(json!({ "ok": true, "id": b.target_id })))
+}
+
+async fn merge_records(state: &AppState, auth: &AuthUser, t: &EntityType, b: &Merge) -> AppResult<()> {
+    let (state, auth) = (state.clone(), auth.clone());
     if b.source_ids.is_empty() || b.source_ids.len() > 20 || b.source_ids.contains(&b.target_id) {
         return Err(AppError::bad("choose between 1 and 20 other records to merge into the target"));
     }
@@ -214,13 +222,219 @@ async fn merge(State(state): State<AppState>, auth: AuthUser, Path(code): Path<S
         sqlx::query("DELETE FROM crm_item_contacts WHERE item_id = $1 OR contact_id = $1").bind(s).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM crm_items WHERE id = $1").bind(s).execute(&mut *tx).await?;
     }
-    refresh_derived(&state, &mut tx, &t, b.target_id).await?;
+    refresh_derived(&state, &mut tx, t, b.target_id).await?;
     tx.commit().await?;
     for s in &b.source_ids {
         broadcast(&state, t.id, *s, true).await;
     }
     broadcast(&state, t.id, b.target_id, false).await;
-    Ok(Json(json!({ "ok": true, "id": b.target_id })))
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate search over a whole record type
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GroupQuery {
+    /// Comma-separated: phone, email, name (all three when left out).
+    by: Option<String>,
+    /// Only groups whose shared value contains this.
+    q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct GroupRow {
+    kind: String,
+    value: String,
+    shown: String,
+    ids: Vec<Uuid>,
+    total: i64,
+}
+
+#[derive(Serialize, FromRow)]
+struct GroupItem {
+    id: Uuid,
+    number: i64,
+    title: String,
+    assigned_to: Option<Uuid>,
+    assigned_name: Option<String>,
+    created_at: DateTime<Utc>,
+    phones: Option<String>,
+    emails: Option<String>,
+    deals: i64,
+}
+
+fn dup_kinds(by: &Option<String>) -> AppResult<Vec<String>> {
+    let v: Vec<String> = by.as_deref().unwrap_or("phone,email,name").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if v.is_empty() || v.iter().any(|k| !["phone", "email", "name"].contains(&k.as_str())) {
+        return Err(AppError::bad("search by phone, email and/or name"));
+    }
+    Ok(v)
+}
+
+/// Groups of records of a type that share a phone, an email or a name, among the records the
+/// person may read (largest groups first). Groups marked "not duplicates" stay out until
+/// another record joins them.
+async fn duplicate_groups(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Query(q): Query<GroupQuery>) -> AppResult<Json<Value>> {
+    let t = entity_type(&state, &code).await?;
+    let scope = visible(&state, &auth, t.id, "read").await?;
+    if matches!(scope, Visible::Nothing) {
+        return Err(AppError::Forbidden);
+    }
+    let kinds = dup_kinds(&q.by)?;
+    let limit = q.limit.unwrap_or(25).clamp(1, 100);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("WITH v AS (SELECT i.id, i.title, i.created_at FROM crm_items i WHERE i.entity_type = ");
+    qb.push_bind(t.id).push(" AND i.deleted_at IS NULL");
+    scope.push(&mut qb);
+    qb.push("), g AS (");
+    let mut first = true;
+    for k in ["phone", "email"] {
+        if kinds.iter().any(|x| x == k) {
+            if !first {
+                qb.push(" UNION ALL ");
+            }
+            first = false;
+            qb.push("SELECT m.kind, m.normalized AS value, MIN(m.value) AS shown, array_agg(DISTINCT v.id) AS ids
+                     FROM crm_multifields m JOIN v ON v.id = m.item_id WHERE m.kind = ")
+                .push_bind(k)
+                .push(" AND length(m.normalized) >= 3 GROUP BY m.kind, m.normalized HAVING COUNT(DISTINCT v.id) > 1");
+        }
+    }
+    if kinds.iter().any(|x| x == "name") {
+        if !first {
+            qb.push(" UNION ALL ");
+        }
+        qb.push("SELECT 'name' AS kind, lower(btrim(v.title)) AS value, MIN(v.title) AS shown, array_agg(v.id ORDER BY v.created_at) AS ids
+                 FROM v WHERE length(btrim(v.title)) >= 2 GROUP BY lower(btrim(v.title)) HAVING COUNT(*) > 1");
+    }
+    qb.push(") SELECT g.kind, g.value, g.shown, g.ids, COUNT(*) OVER () AS total FROM g
+              WHERE NOT EXISTS (SELECT 1 FROM crm_duplicate_ignores x WHERE x.entity_type = ")
+        .push_bind(t.id)
+        .push(" AND x.kind = g.kind AND x.value = g.value AND g.ids <@ x.item_ids)");
+    if let Some(term) = clean(q.q.clone()) {
+        let like = format!("%{}%", term.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        qb.push(" AND (g.shown ILIKE ").push_bind(like.clone()).push(" OR g.value ILIKE ").push_bind(like).push(")");
+    }
+    qb.push(" ORDER BY cardinality(g.ids) DESC, g.kind, g.value LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let groups: Vec<GroupRow> = qb.build_query_as().fetch_all(&state.db).await?;
+    let total = groups.first().map(|g| g.total).unwrap_or(0);
+    let all: Vec<Uuid> = groups.iter().flat_map(|g| g.ids.iter().copied()).collect();
+    let items: Vec<GroupItem> = sqlx::query_as(
+        "SELECT i.id, i.number, i.title, i.assigned_to,
+                CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS assigned_name, i.created_at,
+                (SELECT string_agg(value, ', ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'phone') AS phones,
+                (SELECT string_agg(value, ', ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'email') AS emails,
+                (SELECT COUNT(*) FROM crm_items d WHERE d.deleted_at IS NULL AND (d.company_id = i.id OR EXISTS (SELECT 1 FROM crm_item_contacts c WHERE c.item_id = d.id AND c.contact_id = i.id)))::int8 AS deals
+         FROM crm_items i LEFT JOIN users u ON u.id = i.assigned_to WHERE i.id = ANY($1)",
+    )
+    .bind(&all)
+    .fetch_all(&state.db)
+    .await?;
+    let by_id: HashMap<Uuid, &GroupItem> = items.iter().map(|i| (i.id, i)).collect();
+    let out: Vec<Value> = groups
+        .iter()
+        .map(|g| {
+            let mut members: Vec<&&GroupItem> = g.ids.iter().filter_map(|id| by_id.get(id)).collect();
+            // The oldest first: it's the one others merge into.
+            members.sort_by_key(|m| m.created_at);
+            json!({ "kind": g.kind, "value": g.value, "shown": g.shown, "count": g.ids.len(), "items": members.into_iter().take(50).collect::<Vec<_>>() })
+        })
+        .collect();
+    Ok(Json(json!({ "groups": out, "total": total, "limit": limit, "offset": offset })))
+}
+
+#[derive(Deserialize)]
+struct IgnoreGroup {
+    kind: String,
+    value: String,
+    item_ids: Vec<Uuid>,
+}
+
+/// "Not duplicates": hides this group until another record joins it.
+async fn ignore_group(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(b): Json<IgnoreGroup>) -> AppResult<Json<Value>> {
+    let t = entity_type(&state, &code).await?;
+    dup_kinds(&Some(b.kind.clone()))?;
+    if b.item_ids.len() < 2 || b.item_ids.len() > 1000 || b.value.len() > 1000 {
+        return Err(AppError::bad("a group has between 2 and 1000 records"));
+    }
+    // Only records the person may change, of this type.
+    let rows: Vec<(Uuid, i16, Option<Uuid>)> = sqlx::query_as("SELECT id, entity_type, assigned_to FROM crm_items WHERE id = ANY($1) AND deleted_at IS NULL").bind(&b.item_ids).fetch_all(&state.db).await?;
+    let scope = visible(&state, &auth, t.id, "write").await?;
+    if rows.len() != b.item_ids.len() || rows.iter().any(|r| r.1 != t.id || !scope.allows(r.2)) {
+        return Err(AppError::Forbidden);
+    }
+    sqlx::query(
+        "INSERT INTO crm_duplicate_ignores (entity_type, kind, value, item_ids, created_by) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (entity_type, kind, value) DO UPDATE SET item_ids = (SELECT array_agg(DISTINCT x) FROM unnest(crm_duplicate_ignores.item_ids || EXCLUDED.item_ids) x),
+             created_by = EXCLUDED.created_by, created_at = now()",
+    )
+    .bind(t.id)
+    .bind(&b.kind)
+    .bind(&b.value)
+    .bind(&b.item_ids)
+    .bind(auth.id)
+    .execute(&state.db)
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct MergeGroups {
+    /// Each group's records; each merges into its oldest record (or `target_id` when given).
+    groups: Vec<MergeGroup>,
+}
+
+#[derive(Deserialize)]
+struct MergeGroup {
+    item_ids: Vec<Uuid>,
+    target_id: Option<Uuid>,
+}
+
+/// Merges several groups at once. Each group is merged on its own; one that can't be (no
+/// right to delete a record, a record gone meanwhile) is reported and the rest go on.
+async fn merge_groups(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(b): Json<MergeGroups>) -> AppResult<Json<Value>> {
+    let t = entity_type(&state, &code).await?;
+    if b.groups.is_empty() || b.groups.len() > 100 {
+        return Err(AppError::bad("choose between 1 and 100 groups"));
+    }
+    let mut merged = Vec::new();
+    let mut failed = Vec::new();
+    for g in &b.groups {
+        let mut ids = g.item_ids.clone();
+        ids.sort();
+        ids.dedup();
+        let present: Vec<(Uuid, DateTime<Utc>)> =
+            sqlx::query_as("SELECT id, created_at FROM crm_items WHERE id = ANY($1) AND entity_type = $2 AND deleted_at IS NULL ORDER BY created_at, number")
+                .bind(&ids)
+                .bind(t.id)
+                .fetch_all(&state.db)
+                .await?;
+        if present.len() < 2 {
+            failed.push(json!({ "item_ids": g.item_ids, "error": "fewer than two of these records are left" }));
+            continue;
+        }
+        let target = match g.target_id {
+            Some(x) if present.iter().any(|p| p.0 == x) => x,
+            Some(_) => {
+                failed.push(json!({ "item_ids": g.item_ids, "error": "the record to keep isn't in the group" }));
+                continue;
+            }
+            None => present[0].0,
+        };
+        let sources: Vec<Uuid> = present.iter().map(|p| p.0).filter(|x| *x != target).collect();
+        match merge_records(&state, &auth, &t, &Merge { target_id: target, source_ids: sources }).await {
+            Ok(()) => merged.push(target),
+            Err(e) => failed.push(json!({ "item_ids": g.item_ids, "error": e.to_string() })),
+        }
+    }
+    Ok(Json(json!({ "merged": merged, "failed": failed })))
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +454,9 @@ pub struct ImportRequest {
     duplicates: String,
     #[serde(default)]
     delimiter: Option<String>,
+    /// csv (default) or vcard (a .vcf file: no mapping needed).
+    #[serde(default)]
+    format: Option<String>,
 }
 fn yes() -> bool {
     true
@@ -261,9 +478,17 @@ async fn start_import(State(state): State<AppState>, auth: AuthUser, Path(code):
     }
     let owner: Option<Option<Uuid>> = sqlx::query_scalar("SELECT owner_id FROM files WHERE id = $1").bind(b.file_id).fetch_optional(&state.db).await?;
     if owner != Some(Some(auth.id)) {
-        return Err(AppError::bad("upload the CSV file first"));
+        return Err(AppError::bad("upload the file first"));
     }
-    if b.mapping.is_empty() {
+    let vcard = match b.format.as_deref().unwrap_or("csv") {
+        "csv" => false,
+        "vcard" => true,
+        _ => return Err(AppError::bad("format must be csv or vcard")),
+    };
+    if vcard && t.id != super::CONTACT {
+        return Err(AppError::bad("vCards hold people: import them as contacts"));
+    }
+    if !vcard && b.mapping.is_empty() {
         return Err(AppError::bad("map at least one column to a field"));
     }
     let job = Uuid::new_v4();
@@ -281,6 +506,19 @@ async fn import_status(State(state): State<AppState>, _auth: AuthUser, Path(job)
     Ok(Json(raw.and_then(|r| serde_json::from_str(&r).ok()).ok_or(AppError::NotFound("import"))?))
 }
 
+/// A date as exports write it: 2026-01-31, 20260131, 1/31/2026 (US), 31.01.2026; others
+/// (and Outlook's 0/0/00 for "none") are dropped.
+fn import_date(raw: &str) -> Option<String> {
+    use chrono::NaiveDate;
+    let raw = raw.trim();
+    for f in ["%Y-%m-%d", "%Y%m%d", "%m/%d/%Y", "%d.%m.%Y", "%Y/%m/%d"] {
+        if let Ok(d) = NaiveDate::parse_from_str(raw, f) {
+            return Some(d.format("%Y-%m-%d").to_string());
+        }
+    }
+    None
+}
+
 /// Builds a record body from one CSV row according to the mapping.
 async fn row_body(state: &AppState, t: &EntityType, map: &Map<String, Value>, rec: &csv::StringRecord, uf_codes: &HashSet<String>) -> Result<(Map<String, Value>, Vec<String>)> {
     let mut body = Map::new();
@@ -294,6 +532,8 @@ async fn row_body(state: &AppState, t: &EntityType, map: &Map<String, Value>, re
         let Some(field) = field.as_str() else { continue };
         match field {
             "phone" | "email" | "web" | "im" => {
+                // Google's exports put several values in one cell, separated by " ::: ".
+                let raw = raw.replace(":::", ";");
                 for part in raw.split([';', ',']).map(str::trim).filter(|p| !p.is_empty()) {
                     multi.push(json!({ "kind": field, "value_type": if field == "im" { "other" } else { "work" }, "value": part }));
                     if field == "phone" || field == "email" {
@@ -303,8 +543,19 @@ async fn row_body(state: &AppState, t: &EntityType, map: &Map<String, Value>, re
             }
             f if f.starts_with("address.") => {
                 let k = &f[8..];
-                let v = if k == "country" { raw.to_uppercase() } else { raw.to_string() };
-                address.insert(k.to_string(), json!(v));
+                // Only ISO codes are kept: exports often hold country names.
+                if k == "country" {
+                    if raw.len() == 2 && raw.chars().all(|c| c.is_ascii_alphabetic()) {
+                        address.insert(k.to_string(), json!(raw.to_uppercase()));
+                    }
+                } else {
+                    address.insert(k.to_string(), json!(raw));
+                }
+            }
+            "birthdate" => {
+                if let Some(d) = import_date(raw) {
+                    body.insert("birthdate".into(), json!(d));
+                }
             }
             f if uf_codes.contains(f) => {
                 uf.insert(f.to_string(), json!(raw));
@@ -364,6 +615,77 @@ async fn row_body(state: &AppState, t: &EntityType, map: &Map<String, Value>, re
     Ok((body, match_keys))
 }
 
+/// One record of an import: create it, or (by its phones and emails) update or skip the
+/// record it matches.
+async fn import_one(state: &AppState, auth: &AuthUser, t: &EntityType, company_type: &EntityType, duplicates: &str, mut body: Map<String, Value>, keys: Vec<String>) -> Result<&'static str> {
+    if body.is_empty() {
+        return Ok("skipped");
+    }
+    if let Some(Value::String(c)) = body.get("company_id").cloned()
+        && let Some(name) = c.strip_prefix("new:") {
+            let mut m = Map::new();
+            m.insert("company_name".into(), json!(name));
+            let id = create_item(state, auth, company_type, m, None).await.map_err(|e| anyhow!(e.to_string()))?;
+            body.insert("company_id".into(), json!(id));
+        }
+    // Existing record with the same phone/email?
+    let existing: Option<Uuid> = if keys.is_empty() || duplicates == "create" {
+        None
+    } else {
+        let (phones, emails): (Vec<String>, Vec<String>) = keys.iter().cloned().partition(|k| k.starts_with("phone:"));
+        let strip = |v: Vec<String>| v.into_iter().map(|k| k.split_once(':').unwrap().1.to_string()).collect::<Vec<_>>();
+        sqlx::query_scalar(
+            "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+             WHERE i.entity_type = $1 AND i.deleted_at IS NULL
+               AND ((m.kind = 'phone' AND m.normalized = ANY($2)) OR (m.kind = 'email' AND m.normalized = ANY($3)))
+             LIMIT 1",
+        )
+        .bind(t.id)
+        .bind(strip(phones))
+        .bind(strip(emails))
+        .fetch_optional(&state.db)
+        .await?
+    };
+    match (existing, duplicates) {
+        (Some(_), "skip") => Ok("skipped"),
+        (Some(id), _) => {
+            body.remove("multifields"); // keep the existing record's contact details
+            update_item(state, auth, t, id, body).await.map_err(|e| anyhow!(e.to_string()))?;
+            Ok("updated")
+        }
+        (None, _) => {
+            create_item(state, auth, t, body, None).await.map_err(|e| anyhow!(e.to_string()))?;
+            Ok("created")
+        }
+    }
+}
+
+/// A vCard's body for import: the company from ORG linked (or made), and its phones and
+/// emails as match keys.
+async fn card_body(state: &AppState, c: super::vcard::Card) -> Result<(Map<String, Value>, Vec<String>)> {
+    let mut body = c.body;
+    let keys: Vec<String> = body
+        .get("multifields")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| {
+                    let kind = m["kind"].as_str()?;
+                    (kind == "phone" || kind == "email").then(|| format!("{kind}:{}", normalize(kind, m["value"].as_str().unwrap_or(""))))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(org) = c.company.filter(|o| !o.is_empty()) {
+        let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) LIMIT 1")
+            .bind(&org)
+            .fetch_optional(&state.db)
+            .await?;
+        body.insert("company_id".into(), json!(existing.map(|e| e.to_string()).unwrap_or_else(|| format!("new:{org}"))));
+    }
+    Ok((body, keys))
+}
+
 pub async fn run_import(state: &AppState, payload: &Value) -> Result<()> {
     let job: Uuid = serde_json::from_value(payload["job_id"].clone()).unwrap_or_else(|_| Uuid::nil());
     let user: Uuid = serde_json::from_value(payload["user_id"].clone())?;
@@ -373,62 +695,51 @@ pub async fn run_import(state: &AppState, payload: &Value) -> Result<()> {
     let t = entity_type(state, code).await?;
     let path: String = sqlx::query_scalar("SELECT storage_path FROM files WHERE id = $1").bind(req.file_id).fetch_one(&state.db).await?;
     let full = state.config.upload_dir.join(path);
+    // Exports from mail programs come as UTF-8, UTF-16 or Windows-1252.
+    let text = super::vcard::decode(&tokio::fs::read(&full).await?);
     let delimiter = req.delimiter.as_deref().and_then(|d| d.bytes().next()).unwrap_or(b',');
-    let uf_codes: HashSet<String> = custom_fields(state, t.id).await?.into_iter().map(|f| f.code).collect();
+    let uf_codes: HashSet<String> = super::fields::visible_fields(state, &auth, t.id).await?.into_iter().map(|f| f.code).collect();
     let company_type = entity_type_by_id(state, COMPANY).await?;
+    let vcard = req.format.as_deref() == Some("vcard");
 
-    let mut rdr = csv::ReaderBuilder::new().has_headers(req.has_header).delimiter(delimiter).flexible(true).from_path(&full)?;
     let (mut processed, mut created, mut updated, mut skipped) = (0u64, 0u64, 0u64, 0u64);
     let mut errors: Vec<Value> = Vec::new();
     let mut redis = state.redis.clone();
     let key = status_key(job);
-    for (n, rec) in rdr.records().enumerate() {
-        let line = n + if req.has_header { 2 } else { 1 };
-        let outcome: Result<&str> = async {
-            let rec = rec?;
-            let (mut body, keys) = row_body(state, &t, &req.mapping, &rec, &uf_codes).await?;
-            if body.is_empty() {
-                return Ok("skipped");
-            }
-            if let Some(Value::String(c)) = body.get("company_id").cloned()
-                && let Some(name) = c.strip_prefix("new:") {
-                    let mut m = Map::new();
-                    m.insert("company_name".into(), json!(name));
-                    let id = create_item(state, &auth, &company_type, m, None).await.map_err(|e| anyhow!(e.to_string()))?;
-                    body.insert("company_id".into(), json!(id));
-                }
-            // Existing record with the same phone/email?
-            let existing: Option<Uuid> = if keys.is_empty() || req.duplicates == "create" {
-                None
-            } else {
-                let (phones, emails): (Vec<String>, Vec<String>) = keys.iter().cloned().partition(|k| k.starts_with("phone:"));
-                let strip = |v: Vec<String>| v.into_iter().map(|k| k.split_once(':').unwrap().1.to_string()).collect::<Vec<_>>();
-                sqlx::query_scalar(
-                    "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
-                     WHERE i.entity_type = $1 AND i.deleted_at IS NULL
-                       AND ((m.kind = 'phone' AND m.normalized = ANY($2)) OR (m.kind = 'email' AND m.normalized = ANY($3)))
-                     LIMIT 1",
-                )
-                .bind(t.id)
-                .bind(strip(phones))
-                .bind(strip(emails))
-                .fetch_optional(&state.db)
-                .await?
-            };
-            match (existing, req.duplicates.as_str()) {
-                (Some(_), "skip") => Ok("skipped"),
-                (Some(id), _) => {
-                    body.remove("multifields"); // keep the existing record's contact details
-                    update_item(state, &auth, &t, id, body).await.map_err(|e| anyhow!(e.to_string()))?;
-                    Ok("updated")
-                }
-                (None, _) => {
-                    create_item(state, &auth, &t, body, None).await.map_err(|e| anyhow!(e.to_string()))?;
-                    Ok("created")
-                }
-            }
+    // Each record: its line in the file, and its body and match keys (or why it can't be read).
+    let mut records: Vec<(usize, Result<(Map<String, Value>, Vec<String>)>)> = Vec::new();
+    let mut rows = None;
+    if vcard {
+        for c in super::vcard::parse(&text) {
+            let line = c.line;
+            records.push((line, card_body(state, c).await));
         }
-        .await;
+    } else {
+        rows = Some(csv::ReaderBuilder::new().has_headers(req.has_header).delimiter(delimiter).flexible(true).from_reader(text.as_bytes()).into_records().enumerate());
+    }
+    let mut cards = records.into_iter();
+    loop {
+        let (line, rec) = match rows.as_mut() {
+            Some(r) => match r.next() {
+                Some((n, rec)) => {
+                    let line = n + if req.has_header { 2 } else { 1 };
+                    let built = match rec {
+                        Ok(rec) => row_body(state, &t, &req.mapping, &rec, &uf_codes).await,
+                        Err(e) => Err(e.into()),
+                    };
+                    (line, built)
+                }
+                None => break,
+            },
+            None => match cards.next() {
+                Some(x) => x,
+                None => break,
+            },
+        };
+        let outcome = match rec {
+            Ok((body, keys)) => import_one(state, &auth, &t, &company_type, &req.duplicates, body, keys).await,
+            Err(e) => Err(e),
+        };
         processed += 1;
         match outcome {
             Ok("created") => created += 1,
@@ -491,7 +802,8 @@ async fn export(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
         return Err(AppError::Forbidden);
     }
     let read = visible(&state, &auth, t.id, "read").await?;
-    let defs = custom_fields(&state, t.id).await?;
+    super::items::guard_filter(&state, &auth, &t, &f).await?;
+    let defs = super::fields::visible_fields(&state, &auth, t.id).await?;
     let mut header = vec!["Number", "Title", "First name", "Last name", "Position", "Company", "Phones", "Emails", "Stage", "Amount", "Currency", "Source", "Responsible", "Created", "Updated"]
         .into_iter()
         .map(String::from)
@@ -579,7 +891,8 @@ async fn export_rows(state: &AppState, auth: &AuthUser, code: &str, f: &Filter) 
         return Err(AppError::Forbidden);
     }
     let read = visible(state, auth, t.id, "read").await?;
-    let defs = custom_fields(state, t.id).await?;
+    super::items::guard_filter(state, auth, &t, f).await?;
+    let defs = super::fields::visible_fields(state, auth, t.id).await?;
     let mut out: Vec<ExportRow> = Vec::new();
     let mut last: Option<Uuid> = None;
     loop {
@@ -903,6 +1216,7 @@ async fn save_filter(State(state): State<AppState>, auth: AuthUser, Path(code): 
     // Check the filter parses before saving it.
     let f: Filter = serde_json::from_value(Value::Object(b.filter.clone())).map_err(|_| AppError::bad("invalid filter"))?;
     push_filter(&mut QueryBuilder::new(""), &t, &f, auth.id)?;
+    super::items::guard_filter(&state, &auth, &t, &f).await?;
     sqlx::query("INSERT INTO crm_saved_filters (user_id, entity_type, name, filter) VALUES ($1, $2, $3, $4)")
         .bind(auth.id)
         .bind(t.id)

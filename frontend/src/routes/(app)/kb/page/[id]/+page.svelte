@@ -9,6 +9,7 @@
 	import KbTree from '#lib/components/KbTree.svelte';
 	import MarkdownEditor, { type Uploaded } from '#lib/components/MarkdownEditor.svelte';
 	import MarkdownView from '#lib/components/MarkdownView.svelte';
+	import VisualEditor from '#lib/components/VisualEditor.svelte';
 	import Modal from '#lib/components/Modal.svelte';
 	import { formatDateTime, formatRelative } from '#lib/format.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
@@ -34,6 +35,38 @@
 	let editing = $state(false);
 	let draft = $state({ title: '', body: '' });
 	let busy = $state(false);
+	// Visual (shared live with others editing at the same time) or Markdown; remembered.
+	let mode = $state<'visual' | 'markdown'>((() => {
+		try {
+			return localStorage.getItem('nerp:kb-editor') === 'visual' ? 'visual' : 'markdown';
+		} catch {
+			return 'markdown';
+		}
+	})());
+	let visual = $state<VisualEditor | null>(null);
+	let liveRound = $state(0);
+	async function setMode(m: 'visual' | 'markdown') {
+		if (m === mode) return;
+		// The live document starts from the saved page: Markdown changes are saved first.
+		if (m === 'visual' && dirty) {
+			if (!confirm('Save your Markdown changes and switch to the visual editor?')) return;
+			if (!(await save(true))) return;
+		}
+		mode = m;
+		try {
+			localStorage.setItem('nerp:kb-editor', m);
+		} catch {
+			/* storage unavailable */
+		}
+	}
+	function liveReset() {
+		toasts.success('The page was changed outside the live editor; you now see the new text');
+		api.get<Page>(`/kb/pages/${p!.id}`).then((x) => {
+			p = x;
+			draft = { title: draft.title, body: x.body };
+			liveRound += 1;
+		});
+	}
 	const dirty = $derived(editing && !!p && (draft.title !== p.title || draft.body !== p.body));
 
 	async function load(id: string) {
@@ -116,18 +149,27 @@
 		if (dirty && !confirm('Throw away your changes?')) return;
 		stopEditing();
 	}
-	async function save() {
-		if (busy || !draft.title.trim()) return;
+	/** Saves; `stay` keeps the editor open. */
+	async function save(stay = false): Promise<boolean> {
+		if (busy || !draft.title.trim()) return false;
 		busy = true;
 		try {
-			p = await api.patch<Page>(`/kb/pages/${p!.id}`, { ...draft, version: p!.version });
+			if (mode === 'visual' && visual) draft.body = visual.getMarkdown();
+			p = await api.patch<Page>(`/kb/pages/${p!.id}`, mode === 'visual' ? { title: draft.title, body: draft.body, collab: true } : { ...draft, version: p!.version });
+			if (stay) {
+				draft = { title: p.title, body: p.body };
+				dropDraft(p.id);
+				return true;
+			}
 			editing = false;
 			dropDraft(p.id);
 			tree = (await api.get<{ pages: typeof tree }>(`/kb/spaces/${p.space_id}`)).pages;
 			toasts.success('Saved');
 			goto(`/kb/page/${p.id}`, { replace: true });
+			return true;
 		} catch (e) {
 			toasts.error(e);
+			return false;
 		} finally {
 			busy = false;
 		}
@@ -189,10 +231,22 @@
 				<div class="mt-4 space-y-4">
 					<div class="flex flex-wrap items-center gap-2">
 						<input class="input min-w-0 flex-1 text-xl font-semibold" maxlength="200" aria-label="Title" bind:value={draft.title} />
-						<button class="btn btn-primary" disabled={busy || !draft.title.trim()} onclick={save}>{busy ? 'Saving…' : 'Save'}</button>
+						<div class="flex rounded-full bg-slate-100 p-0.5 text-xs" role="tablist" aria-label="Editor">
+							{#each [['visual', 'Visual'], ['markdown', 'Markdown']] as const as [k, l] (k)}
+								<button type="button" role="tab" aria-selected={mode === k} class="rounded-full px-3 py-1 {mode === k ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-600'}" onclick={() => setMode(k)} data-editor-mode={k}>{l}</button>
+							{/each}
+						</div>
+						<button class="btn btn-primary" disabled={busy || !draft.title.trim()} onclick={() => save()}>{busy ? 'Saving…' : 'Save'}</button>
 						<button class="btn btn-ghost" onclick={cancel}>Cancel</button>
 					</div>
-					<MarkdownEditor class="h-[calc(100dvh-15rem)] min-h-[480px]" bind:value={draft.body} render={renderMd} {upload} {links} onsave={save} label="Page text (Markdown)" placeholder={'# Heading\n\nWrite with **bold**, lists, links, tables, pictures… Type [[ to link a page.'} />
+					{#if mode === 'visual'}
+						{#key liveRound}
+							<VisualEditor bind:this={visual} class="h-[calc(100dvh-15rem)] min-h-[480px]" pageId={p.id} markdown={p.body} {upload} onchange={(md) => (draft.body = md)} onreset={liveReset} />
+						{/key}
+						<p class="text-xs text-slate-500">Everyone editing this page in the visual editor sees each other's changes as they type. Save makes a version for all.</p>
+					{:else}
+						<MarkdownEditor class="h-[calc(100dvh-15rem)] min-h-[480px]" bind:value={draft.body} render={renderMd} {upload} {links} onsave={() => save()} label="Page text (Markdown)" placeholder={'# Heading\n\nWrite with **bold**, lists, links, tables, pictures… Type [[ to link a page.'} />
+					{/if}
 					{#if dirty}<p class="text-xs text-amber-700">Unsaved changes · Ctrl+S saves</p>{/if}
 				</div>
 			{:else}

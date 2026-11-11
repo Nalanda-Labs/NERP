@@ -15,6 +15,9 @@
 	import EmailComposer, { type ReplyTarget } from '#lib/components/crm/EmailComposer.svelte';
 	import EmailView from '#lib/components/crm/EmailView.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import BookingLink from '#lib/components/crm/BookingLink.svelte';
+	import Journey from '#lib/components/crm/Journey.svelte';
+	import RecordProcesses from '#lib/components/crm/RecordProcesses.svelte';
 	import Modal from '#lib/components/Modal.svelte';
 	import UserPicker from '#lib/components/UserPicker.svelte';
 	import { cardLayout, crm, durationText, formatAddress, invoiceOverdue, itemLink, optionLabel, ufText, money, overLimit, type Activity, type CardLayoutInfo, type CrmDetail, type CrmType, typeName } from '#lib/crm.svelte.ts';
@@ -37,7 +40,7 @@
 	let editing = $state(false);
 	let timeline = $state<{ pinned: Entry[]; items: Entry[]; has_more: boolean }>({ pinned: [], items: [], has_more: false });
 	let activities = $state<Activity[]>([]);
-	type Run = { id: string; robot_name: string; run_at: string; status: string; wait_until: string | null };
+	type Run = { id: string; robot_name: string; run_at: string; status: string; wait_until: string | null; is_test?: boolean };
 	let waiting = $state<Run[]>([]);
 
 	let cardInfo = $state<CardLayoutInfo | null>(null);
@@ -288,6 +291,7 @@
 		if (e.kind === 'chat' && !e.author_name) return 'The visitor';
 		if (e.kind === 'signature' && !e.author_name) return e.data.name ?? 'E-signature';
 		if (e.kind === 'recurring' && !e.author_name) return 'Repeat schedule';
+		if (e.kind === 'booking') return e.data.name ?? 'The client';
 		if (e.kind === 'campaign') return e.data.event === 'unsubscribed' ? 'The client' : 'Marketing';
 		return e.kind === 'email' && e.data.direction === 'in' ? e.data.from : e.author_name;
 	}
@@ -303,6 +307,8 @@
 				return e.data.from_lead ? `created this from the lead "${e.data.lead_title}"` : 'converted this lead';
 			case 'merged':
 				return `merged "${e.data.title}" into this record`;
+			case 'booking':
+				return e.data.cancelled ? `cancelled the meeting they booked` : `booked a meeting through “${e.data.link}” for ${formatDateTime(e.data.starts_at)}`;
 			case 'restored':
 				return 'restored this from the recycle bin';
 			case 'products':
@@ -400,6 +406,7 @@
 				<div class="flex flex-wrap items-center gap-3">
 					<h1 class="text-2xl text-slate-900">{item.title}</h1>
 					<ChatCallButtons small chat={recordChat} call={false} />
+					{#if !session.user?.is_guest}<BookingLink itemId={item.id} />{/if}
 				</div>
 				<p class="mt-1 flex flex-wrap gap-x-4 text-sm text-slate-500">
 					{#if type.has_amount}<span class="font-medium text-slate-800">{money(item.opportunity, item.currency)}</span>{/if}
@@ -575,6 +582,8 @@
 				<RequisitesCard itemId={item.id} person={type.code === 'contact'} canWrite={item.can_write} defaultCountry={item.address?.country ?? ''} defaultName={item.title} />
 			{/if}
 			<DocumentsCard itemId={item.id} typeCode={type.code} canWrite={item.can_write} hasBuyer={type.has_client} />
+			{#key item.id}<RecordProcesses itemId={item.id} canWrite={item.can_write} />{/key}
+			{#key item.id}<Journey itemId={item.id} />{/key}
 
 			{#if item.source_item}
 				<p class="text-sm text-slate-500">Created from <a class="text-brand-600 hover:underline" href={itemLink(item.source_item.entity_type, item.source_item.id)}>{item.source_item.title}</a></p>
@@ -615,7 +624,7 @@
 					<ul class="divide-y divide-slate-50">
 						{#each waiting as w (w.id)}
 							<li class="flex items-center gap-3 px-5 py-2.5 text-sm">
-								<Icon name="clock" class="size-4 text-slate-400" /><span class="flex-1 text-slate-800">{w.robot_name}</span>
+								<Icon name="clock" class="size-4 text-slate-400" /><span class="flex-1 text-slate-800">{w.robot_name}{#if w.is_test}<span class="badge ml-1.5 bg-amber-100 text-amber-800">test</span>{/if}</span>
 								<span class="text-xs text-slate-500">
 									{#if w.status === 'pending'}after the previous robot{:else if w.status === 'waiting'}waiting{w.wait_until ? ` until ${formatDateTime(w.wait_until)} at most` : ''}{:else}{formatDateTime(w.run_at)}{/if}
 								</span>

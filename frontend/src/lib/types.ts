@@ -145,7 +145,8 @@ export const PERM = {
 	ACCOUNTING_ADMIN: 'accounting.admin',
 	BI: 'bi.manage',
 	USERS_INVITE: 'users.invite',
-	FEED_MODERATE: 'feed.moderate'
+	FEED_MODERATE: 'feed.moderate',
+	MAIL_ADMIN: 'mail.admin'
 } as const;
 
 export interface Notification {

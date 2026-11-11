@@ -9,10 +9,12 @@
 	import TunnelsSummary from '#lib/components/crm/TunnelsSummary.svelte';
 	import TrafficSources from '#lib/components/crm/TrafficSources.svelte';
 	import TypeManager from '#lib/components/crm/TypeManager.svelte';
+	import FieldAudience from '#lib/components/crm/FieldAudience.svelte';
+	import CrmProcesses from '#lib/components/crm/CrmProcesses.svelte';
 	import { allCurrencies, crm, currencyName, type CrmCategory, type CrmType, type FieldDef } from '#lib/crm.svelte.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
 
-	const TABS = [['types', 'Record types'], ['pipelines', 'Pipelines & stages'], ['fields', 'Custom fields'], ['currencies', 'Currencies'], ['automation', 'Automation'], ['documents', 'Documents'], ['access', 'Access rights']] as const;
+	const TABS = [['types', 'Record types'], ['pipelines', 'Pipelines & stages'], ['fields', 'Custom fields'], ['currencies', 'Currencies'], ['automation', 'Automation'], ['processes', 'Business processes'], ['documents', 'Documents'], ['access', 'Access rights']] as const;
 	type Tab = (typeof TABS)[number][0];
 	// The tab lives in the address (?tab=documents) so every tab can be bookmarked and shared.
 	const tab = $derived<Tab>(TABS.find(([k]) => k === page.url.searchParams.get('tab'))?.[0] ?? 'pipelines');
@@ -162,6 +164,7 @@
 							<code class="text-xs text-slate-400">{d.code}</code>
 							<label class="flex items-center gap-1.5"><input type="checkbox" class="rounded border-slate-300 text-brand-600" checked={d.is_required} onchange={(e) => patchField(d, { is_required: e.currentTarget.checked })} /> Required</label>
 							<label class="flex items-center gap-1.5"><input type="checkbox" class="rounded border-slate-300 text-brand-600" checked={d.show_in_list} onchange={(e) => patchField(d, { show_in_list: e.currentTarget.checked })} /> Show in list</label>
+							<FieldAudience field={d} {typeCode} onsaved={reload} />
 							<button class="btn btn-ghost ml-auto p-1.5 text-slate-400 hover:text-red-600" aria-label="Delete field" onclick={() => removeField(d)}><Icon name="trash" class="size-4" /></button>
 						</li>
 					{:else}
@@ -214,6 +217,8 @@
 		{:else if tab === 'types'}
 			<TypeManager />
 			<TrafficSources />
+		{:else if tab === 'processes'}
+			<CrmProcesses types={crm.config?.types ?? []} />
 		{:else if tab === 'automation'}
 			<Automation />
 		{:else if tab === 'documents'}

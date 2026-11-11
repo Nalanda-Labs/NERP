@@ -59,7 +59,7 @@
 	import WfSteps from './WfSteps.svelte';
 
 	type Person = { id: string; name: string; avatar_file_id: string | null };
-	let { steps = $bindable(), fields, people = $bindable({}), depth = 0 }: { steps: Step[]; fields: ListField[]; people?: Record<string, Person>; depth?: number } = $props();
+	let { steps = $bindable(), fields, people = $bindable({}), depth = 0, author = 'author' }: { steps: Step[]; fields: ListField[]; people?: Record<string, Person>; depth?: number; /** What “the author” is called (a CRM record's responsible person). */ author?: string } = $props();
 	let adding = $state<Step['kind']>('approval');
 	const OPS: [string, string][] = [['eq', 'is'], ['ne', 'is not'], ['gt', 'more than'], ['lt', 'less than'], ['empty', 'is empty'], ['filled', 'is filled']];
 	function move(i: number, d: number) {
@@ -78,8 +78,8 @@
 {#snippet whoEditor(w: Who)}
 	<div class="space-y-1.5">
 		<div class="flex flex-wrap gap-3 text-xs">
-			<label class="flex items-center gap-1"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={w.author} /> The author</label>
-			<label class="flex items-center gap-1"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={w.head} /> The author's head</label>
+			<label class="flex items-center gap-1"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={w.author} /> The {author}</label>
+			<label class="flex items-center gap-1"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={w.head} /> The {author}'s head</label>
 		</div>
 		<MultiUserPicker value={picked(w)} placeholder="And these people…" onchange={(v: Person[]) => setPicked(w, v)} />
 	</div>
@@ -104,8 +104,8 @@
 					<label class="flex items-center gap-1">Within <input class="input w-20" type="number" min="1" placeholder="—" bind:value={st.due_hours} /> hours</label>
 				</div>
 				<div class="mt-3 grid gap-3 lg:grid-cols-2">
-					<div><p class="mb-1 text-xs font-medium text-emerald-700">If approved</p><WfSteps bind:steps={st.approved!} {fields} bind:people depth={depth + 1} /></div>
-					<div><p class="mb-1 text-xs font-medium text-red-700">If rejected {st.rejected?.length ? '' : '(ends as rejected)'}</p><WfSteps bind:steps={st.rejected!} {fields} bind:people depth={depth + 1} /></div>
+					<div><p class="mb-1 text-xs font-medium text-emerald-700">If approved</p><WfSteps bind:steps={st.approved!} {fields} bind:people depth={depth + 1} {author} /></div>
+					<div><p class="mb-1 text-xs font-medium text-red-700">If rejected {st.rejected?.length ? '' : '(ends as rejected)'}</p><WfSteps bind:steps={st.rejected!} {fields} bind:people depth={depth + 1} {author} /></div>
 				</div>
 			{:else if st.kind === 'condition'}
 				<div class="flex flex-wrap gap-2">
@@ -114,8 +114,8 @@
 					{#if st.op !== 'empty' && st.op !== 'filled'}<input class="input w-40" aria-label="Value" bind:value={st.value} />{/if}
 				</div>
 				<div class="mt-3 grid gap-3 lg:grid-cols-2">
-					<div><p class="mb-1 text-xs font-medium text-slate-600">Then</p><WfSteps bind:steps={st.then!} {fields} bind:people depth={depth + 1} /></div>
-					<div><p class="mb-1 text-xs font-medium text-slate-600">Otherwise</p><WfSteps bind:steps={st.else!} {fields} bind:people depth={depth + 1} /></div>
+					<div><p class="mb-1 text-xs font-medium text-slate-600">Then</p><WfSteps bind:steps={st.then!} {fields} bind:people depth={depth + 1} {author} /></div>
+					<div><p class="mb-1 text-xs font-medium text-slate-600">Otherwise</p><WfSteps bind:steps={st.else!} {fields} bind:people depth={depth + 1} {author} /></div>
 				</div>
 			{:else if st.kind === 'notify'}
 				{@render whoEditor(st.who!)}

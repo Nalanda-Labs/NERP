@@ -95,6 +95,7 @@
 			<p class="text-sm text-slate-500">{data ? `${data.total} ${data.total === 1 ? 'person' : 'people'}` : ' '}</p>
 		</div>
 		<button class="btn btn-secondary ml-auto" onclick={() => downloadUrl('/api/users/export.csv', 'employees.csv').catch(toasts.error)}>Export CSV</button>
+		<button class="btn btn-secondary" title="For Outlook and other address books; phones can sync the list with CardDAV (Profile → App passwords)" onclick={() => downloadUrl('/api/users/export.vcf', 'employees.vcf').catch(toasts.error)} data-export-vcf>vCards</button>
 		{#if canManage || session.can(PERM.USERS_INVITE)}<a class="btn btn-secondary" href="/employees/invitations">Invitations</a> <a class="btn btn-secondary" href="/employees/guests">Guests</a>{/if}
 		{#if canManage}
 			<button

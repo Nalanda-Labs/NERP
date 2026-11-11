@@ -131,7 +131,7 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     require_manager(&auth)?;
     if let Some(Some(m)) = b.mailbox_id {
         let mb = crate::crm::email::load_mailbox(&state, m).await?;
-        if !mb.can_send(auth.id) {
+        if !mb.may_send(&state, auth.id).await? {
             return Err(AppError::bad("choose a mailbox you own or that is shared with you"));
         }
     }

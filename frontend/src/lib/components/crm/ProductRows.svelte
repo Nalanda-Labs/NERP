@@ -17,6 +17,8 @@
 		discount_value: string;
 		tax_rate: string | null;
 		tax_included: boolean;
+		/** Unit cost in the record's currency; empty: unknown (catalogue rows take the product's). */
+		cost?: string | null;
 	};
 	type Product = { id: string; name: string; sku: string | null; price: string; currency: string; tax_rate: string | null; tax_included: boolean; unit: string };
 
@@ -44,10 +46,18 @@
 			return { subtotal: t.subtotal + l.net, tax: t.tax + l.tax, total: t.total + l.total, discount: t.discount + l.discount };
 		}, { subtotal: 0, tax: 0, total: 0, discount: 0 })
 	);
+	// Gross profit of the rows whose cost is known (net sales − cost).
+	const gross = $derived.by(() => {
+		const costed = rows.filter((r) => r.cost !== null && r.cost !== undefined && r.cost !== '');
+		if (!costed.length) return null;
+		const revenue = costed.reduce((t, r) => t + line(r).net, 0);
+		const profit = revenue - costed.reduce((t, r) => t + num(r.cost ?? null) * num(r.quantity), 0);
+		return { profit, margin: revenue ? (profit / revenue) * 100 : null, partial: costed.length < rows.length };
+	});
 
 	async function load() {
 		const d = await api.get<{ rows: { row: Row }[] }>(`/crm/items/${itemId}/products`);
-		rows = d.rows.map((x) => ({ ...x.row, price: String(Number(x.row.price)), quantity: String(Number(x.row.quantity)), discount_value: String(Number(x.row.discount_value)), tax_rate: x.row.tax_rate === null ? null : String(Number(x.row.tax_rate)) }));
+		rows = d.rows.map((x) => ({ ...x.row, price: String(Number(x.row.price)), quantity: String(Number(x.row.quantity)), discount_value: String(Number(x.row.discount_value)), tax_rate: x.row.tax_rate === null ? null : String(Number(x.row.tax_rate)), cost: x.row.cost === null || x.row.cost === undefined ? '' : String(Number(x.row.cost)) }));
 	}
 	onMount(load);
 
@@ -77,8 +87,8 @@
 		rows = [
 			...rows,
 			p
-				? { product_id: p.id, name: p.name, price: String(Number(price)), quantity: '1', unit: p.unit, discount_kind: 'percent', discount_value: '0', tax_rate: p.tax_rate === null ? null : String(Number(p.tax_rate)), tax_included: p.tax_included }
-				: { product_id: null, name: '', price: '0', quantity: '1', unit: 'pcs', discount_kind: 'percent', discount_value: '0', tax_rate: null, tax_included: false }
+				? { product_id: p.id, name: p.name, price: String(Number(price)), quantity: '1', unit: p.unit, discount_kind: 'percent', discount_value: '0', tax_rate: p.tax_rate === null ? null : String(Number(p.tax_rate)), tax_included: p.tax_included, cost: '' }
+				: { product_id: null, name: '', price: '0', quantity: '1', unit: 'pcs', discount_kind: 'percent', discount_value: '0', tax_rate: null, tax_included: false, cost: '' }
 		];
 		search = '';
 		found = [];
@@ -94,7 +104,8 @@
 					price: String(r.price ?? 0),
 					quantity: String(r.quantity ?? 1),
 					discount_value: String(r.discount_value ?? 0),
-					tax_rate: r.tax_rate === '' || r.tax_rate === null || r.tax_rate === undefined ? null : String(r.tax_rate)
+					tax_rate: r.tax_rate === '' || r.tax_rate === null || r.tax_rate === undefined ? null : String(r.tax_rate),
+					cost: r.cost === '' || r.cost === null || r.cost === undefined ? null : String(r.cost)
 				}))
 			});
 			editing = false;
@@ -124,6 +135,7 @@
 						<th class="px-2 py-2 text-right">Qty</th>
 						<th class="px-2 py-2 text-right">Discount</th>
 						<th class="px-2 py-2 text-right">Tax %</th>
+						{#if editing}<th class="px-2 py-2 text-right" title="What a unit costs the company, for gross profit">Unit cost</th>{/if}
 						<th class="px-4 py-2 text-right">Total</th>
 						{#if editing}<th></th>{/if}
 					</tr>
@@ -147,6 +159,7 @@
 										<label class="flex items-center gap-1 text-xs whitespace-nowrap text-slate-500" title="Price includes tax"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={r.tax_included} /> incl.</label>
 									</div>
 								</td>
+								<td class="px-2 py-1.5"><input class="input w-24 text-right" type="number" min="0" step="0.01" placeholder={r.product_id ? 'catalogue' : '—'} bind:value={r.cost} aria-label="Unit cost" /></td>
 							{:else}
 								<td class="px-4 py-2 text-slate-800">{r.name}</td>
 								<td class="px-2 py-2 text-right">{money(r.price, currency)}</td>
@@ -189,6 +202,10 @@
 			{#if totals.discount}<dt class="text-slate-500">Discount</dt><dd class="text-right">−{money(totals.discount, currency)}</dd>{/if}
 			<dt class="text-slate-500">Tax</dt><dd class="text-right">{money(totals.tax, currency)}</dd>
 			<dt class="font-medium text-slate-900">Total</dt><dd class="text-right font-semibold text-slate-900">{money(totals.total, currency)}</dd>
+			{#if gross && !editing}
+				<dt class="text-slate-500" title={gross.partial ? 'Rows without a cost are left out' : ''}>Gross profit{gross.partial ? '*' : ''}</dt>
+				<dd class="text-right" data-gross-profit>{money(gross.profit, currency)}{#if gross.margin !== null}<span class="ml-1 text-xs text-slate-500">{gross.margin.toFixed(1)}%</span>{/if}</dd>
+			{/if}
 		</dl>
 		{#if editing}
 			<div class="flex gap-2 border-t border-slate-100 px-5 py-3">

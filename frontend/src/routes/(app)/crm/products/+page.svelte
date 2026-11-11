@@ -27,6 +27,7 @@
 		stock: string | null;
 		parent_id: string | null;
 		is_service?: boolean;
+		cost?: string | null;
 	};
 	let catalogOpen = $state(false);
 	let extras = $state<ReturnType<typeof ProductExtras> | null>(null);
@@ -101,7 +102,7 @@
 	let showInactive = $state(false);
 	let open = $state(false);
 	let editing = $state<Product | null>(null);
-	const blank = () => ({ name: '', sku: '', description: '', price: '', currency: crm.config?.base_currency ?? '', tax_rate: '', tax_included: false, unit: 'pcs', is_active: true, in_shop: false, shop_category_id: null as string | null, image_file_id: null as string | null, stock: '', is_service: false });
+	const blank = () => ({ name: '', sku: '', description: '', price: '', currency: crm.config?.base_currency ?? '', tax_rate: '', tax_included: false, unit: 'pcs', is_active: true, in_shop: false, shop_category_id: null as string | null, image_file_id: null as string | null, stock: '', is_service: false, cost: '' as string | number | null });
 	let form = $state(blank());
 
 	async function load() {
@@ -157,7 +158,8 @@
 					shop_category_id: p.shop_category_id,
 					image_file_id: p.image_file_id,
 					stock: num(p.stock),
-					is_service: !!p.is_service
+					is_service: !!p.is_service,
+					cost: num(p.cost ?? null)
 				}
 			: blank();
 		showPhoto(form.image_file_id).catch(() => (photo = null));
@@ -168,7 +170,7 @@
 		try {
 			// Number inputs hand back numbers (or null when cleared); the API takes decimal strings.
 			const text = (v: unknown) => (v === null || v === undefined || v === '' ? null : String(v));
-			const body: Record<string, unknown> = { ...form, price: text(form.price) ?? '0', tax_rate: text(form.tax_rate), stock: text(form.stock) };
+			const body: Record<string, unknown> = { ...form, price: text(form.price) ?? '0', tax_rate: text(form.tax_rate), stock: text(form.stock), cost: text(form.cost) };
 			// Stock is sent only when changed here: orders may have moved it meanwhile.
 			if (editing && text(form.stock) === text(num(editing.stock))) delete body.stock;
 			if (editing) {
@@ -246,6 +248,7 @@
 		<div><label class="label" for="p-u">Unit</label><input id="p-u" class="input" bind:value={form.unit} /></div>
 		<div><label class="label" for="p-p">Price</label><input id="p-p" class="input" type="number" min="0" step="0.01" required bind:value={form.price} /></div>
 		<div><label class="label" for="p-c">Currency</label><select id="p-c" class="input" bind:value={form.currency}>{#each crm.config?.currencies ?? [] as c (c.code)}<option>{c.code}</option>{/each}</select></div>
+		<div><label class="label" for="p-cost">Cost price <span class="font-normal text-slate-400">(per unit, for gross profit)</span></label><input id="p-cost" class="input" type="number" min="0" step="0.01" placeholder="Average purchase price" bind:value={form.cost} /></div>
 		<div><label class="label" for="p-t">Tax rate, %</label><input id="p-t" class="input" type="number" min="0" max="100" step="0.01" bind:value={form.tax_rate} /></div>
 		<label class="flex items-end gap-2 pb-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={form.tax_included} /> Price includes tax</label>
 		<div class="sm:col-span-2"><label class="label" for="p-d">Description</label><textarea id="p-d" class="input" rows="2" bind:value={form.description}></textarea></div>

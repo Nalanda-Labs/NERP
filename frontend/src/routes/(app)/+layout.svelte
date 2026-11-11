@@ -258,6 +258,8 @@
 			items: [
 				{ href: '/marketing/campaigns', label: 'Campaigns', icon: 'send', perm: PERM.MARKETING },
 				{ href: '/marketing/segments', label: 'Segments', icon: 'users', perm: PERM.MARKETING },
+				{ href: '/marketing/generators', label: 'Sales generator', icon: 'funnel', perm: PERM.MARKETING },
+				{ href: '/marketing/traffic', label: 'Traffic', icon: 'chart', perm: PERM.MARKETING },
 				{ href: '/marketing/optouts', label: 'Unsubscribes', icon: 'mail', perm: PERM.MARKETING }
 			]
 		},
@@ -266,6 +268,7 @@
 			items: [
 				{ href: '/crm/settings', label: 'CRM settings', icon: 'funnel', perm: PERM.CRM_ADMIN },
 				{ href: '/roles', label: 'Roles & permissions', icon: 'shield', perm: PERM.ROLES_MANAGE },
+				{ href: '/admin/mailboxes', label: 'Mailboxes', icon: 'mail', perm: PERM.MAIL_ADMIN },
 				{ href: '/audit', label: 'Audit log', icon: 'history', perm: PERM.AUDIT_VIEW },
 				{ href: '/developers', label: 'API & webhooks', icon: 'key', perm: PERM.API_KEYS, orPerm: PERM.WEBHOOKS_MANAGE },
 				{ href: '/system', label: 'System', icon: 'cpu', perm: PERM.SYSTEM_MANAGE },

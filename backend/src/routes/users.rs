@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/users", get(list_users).post(create_user))
         .route("/users/export.csv", get(export_users))
+        .route("/users/export.vcf", get(export_vcards))
         .route("/users/{id}", get(get_user).patch(update_user))
         .route("/users/{id}/roles", put(set_roles))
         .route("/users/{id}/password", post(reset_password))
@@ -851,6 +852,17 @@ pub(crate) fn csv_cell(s: &str) -> String {
 }
 
 /// The employee list as CSV (opens in Excel), for those who may see employees.
+/// The employee list as vCards, for address books that can't sync (Outlook imports the file).
+async fn export_vcards(State(state): State<AppState>, auth: AuthUser) -> AppResult<axum::response::Response> {
+    auth.require(perm::USERS_VIEW)?;
+    let company = crate::calendar::carddav::company(&state).await;
+    let out: String = crate::calendar::carddav::people(&state, false).await?.iter().map(|p| crate::calendar::carddav::vcard(p, &company)).collect();
+    let mut res = axum::response::IntoResponse::into_response(out);
+    res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/vcard; charset=utf-8"));
+    res.headers_mut().insert(axum::http::header::CONTENT_DISPOSITION, axum::http::HeaderValue::from_static("attachment; filename=\"employees.vcf\""));
+    Ok(res)
+}
+
 async fn export_users(State(state): State<AppState>, auth: AuthUser) -> AppResult<axum::response::Response> {
     auth.require(perm::USERS_VIEW)?;
     let rows: Vec<UserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {USER_COLUMNS} FROM users u WHERE u.is_active ORDER BY u.last_name, u.first_name"))).fetch_all(&state.db).await?;

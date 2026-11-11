@@ -18,6 +18,8 @@
 		my_reaction: string | null;
 		badge: string | null;
 		badge_people: { id: string; name: string; avatar_file_id: string | null }[];
+		/** A board made for the post. */
+		board?: { id: string; title: string; level: 'view' | 'edit' } | null;
 		comments: number;
 		read_by_me: boolean;
 		reads: number;
@@ -37,6 +39,7 @@
 	import { api, downloadFile } from '#lib/api.ts';
 	import Avatar from '#lib/components/Avatar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import VideoPlayer from '#lib/components/VideoPlayer.svelte';
 	import { formatBytes, formatRelative } from '#lib/format.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
@@ -209,6 +212,9 @@
 		<p class="mt-3 break-words whitespace-pre-line text-slate-800">{post.body}</p>
 	{/if}
 
+	{#each post.files.filter((f) => (f.mime ?? '').startsWith('video/')) as v (v.id)}
+		<VideoPlayer fileId={v.id} name={v.name} class="mt-3" />
+	{/each}
 	{#if post.files.length}
 		<div class="mt-3 flex flex-wrap gap-2">
 			{#each post.files as f (f.id)}<button
@@ -299,6 +305,13 @@
 				<p class="text-sm text-amber-800">for {post.badge_people.map((p) => p.name).join(', ')}</p>
 			</div>
 		</div>
+	{/if}
+	{#if post.board}
+		<a href="/boards/{post.board.id}" class="mt-3 flex items-center gap-3 rounded-xl border border-slate-200 px-4 py-3 hover:border-brand-400" data-post-board-card>
+			<Icon name="board" class="size-5 text-brand-600" />
+			<span class="flex-1"><span class="block font-medium text-slate-900">{post.board.title}</span><span class="text-xs text-slate-500">{post.board.level === 'edit' ? 'A board to draw on together' : 'A board to look at'}</span></span>
+			<span class="text-sm text-brand-700">Open</span>
+		</a>
 	{/if}
 	<footer class="mt-4 flex gap-4 border-t border-slate-100 pt-3 text-sm">
 		<div class="relative flex items-center gap-2">

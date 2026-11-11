@@ -201,7 +201,7 @@ async fn readable(state: &AppState, auth: &AuthUser, space: Uuid) -> AppResult<(
     if can(state, auth, space, "read").await? { Ok(()) } else { Err(AppError::NotFound("space")) }
 }
 
-async fn editable(state: &AppState, auth: &AuthUser, space: Uuid) -> AppResult<()> {
+pub(crate) async fn editable(state: &AppState, auth: &AuthUser, space: Uuid) -> AppResult<()> {
     readable(state, auth, space).await?;
     if can(state, auth, space, "edit").await? { Ok(()) } else { Err(AppError::Forbidden) }
 }
@@ -402,11 +402,15 @@ struct PageInput {
     parent_id: Option<Option<Uuid>>,
     /// The version the editor started from; saving over a newer one is refused.
     version: Option<i32>,
+    /// Saved from the live shared document: everyone's changes are in it, so no version
+    /// check, and the live document carries on.
+    #[serde(default)]
+    collab: bool,
 }
 
 const MAX_BODY: usize = 500_000;
 
-async fn check_parent(state: &AppState, space: Uuid, parent: Option<Uuid>, page: Option<Uuid>) -> AppResult<()> {
+pub(crate) async fn check_parent(state: &AppState, space: Uuid, parent: Option<Uuid>, page: Option<Uuid>) -> AppResult<()> {
     let Some(parent) = parent else { return Ok(()) };
     let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM kb_pages WHERE id = $1 AND space_id = $2)").bind(parent).bind(space).fetch_one(&state.db).await?;
     if !ok {
@@ -474,7 +478,7 @@ async fn save(state: &AppState, auth: &AuthUser, p: &PageRow, title: String, bod
 async fn update_page(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PageInput>) -> AppResult<Json<Value>> {
     let p = page_row(&state, id).await?;
     editable(&state, &auth, p.space_id).await?;
-    if b.version.is_some_and(|v| v != p.version) {
+    if !b.collab && b.version.is_some_and(|v| v != p.version) {
         return Err(AppError::Conflict(format!("{} saved a newer version meanwhile; reload the page and make your change again", p.updated_by_name.clone().unwrap_or_else(|| "Someone".into()))));
     }
     let title = match &b.title {
@@ -495,7 +499,12 @@ async fn update_page(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if title == p.title && body == p.body && parent == p.parent_id {
         return get_page(State(state), auth, Path(id)).await;
     }
+    let body_changed = body != p.body;
     save(&state, &auth, &p, title, body, parent).await?;
+    // Changed outside the live document: editors there start from the new text.
+    if body_changed && !b.collab {
+        crate::kb_collab::reset(&state, id).await;
+    }
     get_page(State(state), auth, Path(id)).await
 }
 
@@ -544,6 +553,7 @@ async fn restore(State(state): State<AppState>, auth: AuthUser, Path((id, v)): P
         .ok_or(AppError::NotFound("version"))?;
     let parent = p.parent_id;
     save(&state, &auth, &p, title, body, parent).await?;
+    crate::kb_collab::reset(&state, id).await;
     get_page(State(state), auth, Path(id)).await
 }
 

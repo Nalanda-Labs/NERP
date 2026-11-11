@@ -7,6 +7,12 @@
 	var origin = new URL(s.src).origin;
 	var f = document.createElement('iframe');
 	var q = new URLSearchParams({ embed: '1', u: location.href, r: document.referrer });
+	// The visitor id of NERP's tracking script on this site, if it runs here.
+	var vid = window.NERP_VID;
+	try {
+		vid = vid || localStorage.getItem('nerp_vid');
+	} catch (e) {}
+	if (vid) q.set('vid', vid);
 	f.src = origin + '/f/' + encodeURIComponent(key) + '?' + q.toString();
 	f.title = s.dataset.title || 'Contact form';
 	f.loading = 'lazy';

@@ -84,7 +84,7 @@
 		busy = true;
 		error = '';
 		try {
-			const r = await api.post<{ token: string }>(`/public/chat/${encodeURIComponent(key)}/start`, { ...details, page_url: page.url.searchParams.get('u') ?? undefined });
+			const r = await api.post<{ token: string }>(`/public/chat/${encodeURIComponent(key)}/start`, { ...details, page_url: page.url.searchParams.get('u') ?? undefined, visitor_id: page.url.searchParams.get('vid') ?? undefined });
 			token = r.token;
 			remember(r.token);
 			messages = [];

@@ -43,7 +43,7 @@
 	// Colleagues who shared their calendar with me (or my departments).
 	let sharedWithMe = $state<(Person & { level: string })[]>([]);
 	let sharingOpen = $state(false);
-	let linksOpen = $state(false);
+	let linksOpen = $state(page.url.searchParams.get('slots') === '1');
 	let accountsOpen = $state(false);
 	let extras = $state(true);
 	let colleagues = $state<Person[]>([]);

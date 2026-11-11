@@ -156,6 +156,47 @@ async fn need(state: &AppState, auth: &AuthUser, id: Uuid, want: Level) -> AppRe
     Ok((n, l))
 }
 
+/// What someone may do with a drive item, for boards kept in the drive: 0 none, 1 look, 2 edit.
+/// An item in the trash gives nothing.
+pub(crate) async fn board_item_level(state: &AppState, auth: &AuthUser, node_id: Uuid) -> AppResult<u8> {
+    let Ok(n) = node(state, node_id).await else { return Ok(0) };
+    if n.deleted_at.is_some() {
+        return Ok(0);
+    }
+    Ok(match level_of(state, auth, &n).await? {
+        Level::None => 0,
+        Level::View => 1,
+        _ => 2,
+    })
+}
+
+/// A board as a drive item (where the person may add things): it shows in the folder and
+/// opens the board.
+pub(crate) async fn add_board_item(state: &AppState, auth: &AuthUser, space: Option<&str>, project: Option<Uuid>, parent: Option<Uuid>, title: &str, board: Uuid) -> AppResult<Uuid> {
+    let at = place(state, auth, space, project, parent).await?;
+    let base = clean_name(&title.replace(['/', '\\'], "-"))?;
+    let mut name = format!("{base}.board");
+    for i in 2..1000 {
+        if sibling(state, &at, &name, None).await?.is_none() {
+            break;
+        }
+        name = format!("{base} ({i}).board");
+    }
+    Ok(sqlx::query_scalar(
+        "INSERT INTO drive_nodes (kind, space, owner_id, parent_id, name, size_bytes, mime_type, created_by, updated_by, project_id, board_id)
+         VALUES ('file', $1, $2, $3, $4, 0, 'application/vnd.nerp.board', $5, $5, $6, $7) RETURNING id",
+    )
+    .bind(&at.space)
+    .bind(at.owner)
+    .bind(at.parent)
+    .bind(&name)
+    .bind(auth.id)
+    .bind(at.project)
+    .bind(board)
+    .fetch_one(&state.db)
+    .await?)
+}
+
 /// Files kept by the drive (any version) are readable by whoever can see the item.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
     let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM drive_nodes WHERE file_id = $1 UNION SELECT node_id FROM drive_versions WHERE file_id = $1 LIMIT 5").bind(file).fetch_all(&state.db).await?;
@@ -186,11 +227,13 @@ struct Entry {
     updated_by_name: Option<String>,
     updated_at: DateTime<Utc>,
     shared: bool,
+    /// A board kept in the drive (opens the board).
+    board_id: Option<Uuid>,
 }
 
 const ENTRY_SELECT: &str = "SELECT n.id, n.kind, n.space, n.parent_id, n.name, n.size_bytes, n.mime_type, n.version,
     trim(o.first_name || ' ' || o.last_name) AS owner_name, trim(u.first_name || ' ' || u.last_name) AS updated_by_name, n.updated_at,
-    EXISTS (SELECT 1 FROM drive_shares s WHERE s.node_id = n.id) AS shared
+    EXISTS (SELECT 1 FROM drive_shares s WHERE s.node_id = n.id) AS shared, n.board_id
     FROM drive_nodes n LEFT JOIN users o ON o.id = n.owner_id LEFT JOIN users u ON u.id = n.updated_by";
 
 #[derive(Deserialize)]
@@ -480,9 +523,9 @@ async fn get_node(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         .fetch_all(&state.db)
         .await?;
         v["shares"] = json!(shares.into_iter().map(|(u, d, lv, name)| json!({ "user_id": u, "department_id": d, "level": lv, "name": name })).collect::<Vec<_>>());
-        let links: Vec<(Uuid, Option<DateTime<Utc>>, i32, DateTime<Utc>, bool)> =
-            sqlx::query_as("SELECT id, expires_at, downloads, created_at, password_hash IS NOT NULL FROM drive_links WHERE node_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.db).await?;
-        v["links"] = json!(links.into_iter().map(|(id, exp, d, at, pw)| json!({ "id": id, "expires_at": exp, "downloads": d, "created_at": at, "password": pw })).collect::<Vec<_>>());
+        let links: Vec<(Uuid, Option<DateTime<Utc>>, i32, DateTime<Utc>, bool, bool)> =
+            sqlx::query_as("SELECT id, expires_at, downloads, created_at, password_hash IS NOT NULL, can_edit FROM drive_links WHERE node_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.db).await?;
+        v["links"] = json!(links.into_iter().map(|(id, exp, d, at, pw, ed)| json!({ "id": id, "expires_at": exp, "downloads": d, "created_at": at, "password": pw, "can_edit": ed })).collect::<Vec<_>>());
     }
     Ok(Json(v))
 }
@@ -727,6 +770,9 @@ struct LinkInput {
     expires_days: Option<i64>,
     /// Asked for before anything is shown.
     password: Option<String>,
+    /// Anyone with the link may edit the (office) file in the browser.
+    #[serde(default)]
+    can_edit: bool,
 }
 
 async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<LinkInput>) -> AppResult<Json<Value>> {
@@ -735,6 +781,10 @@ async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     }
     crate::routes::settings::require_public_links(&state).await?;
     need(&state, &auth, id, Level::Own).await?;
+    let board: Option<Uuid> = sqlx::query_scalar("SELECT board_id FROM drive_nodes WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    if board.is_some() {
+        return Err(AppError::bad("share a board with its own links (on the board)"));
+    }
     if b.expires_days.is_some_and(|d| !(1..=365).contains(&d)) {
         return Err(AppError::bad("a link lasts 1 to 365 days, or until removed"));
     }
@@ -743,13 +793,20 @@ async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         Some(p) => Some(crate::auth::password::hash_password(p).await?),
         None => None,
     };
+    if b.can_edit {
+        let (n, level) = need(&state, &auth, id, Level::Edit).await?;
+        if n.kind != "file" || level < Level::Edit {
+            return Err(AppError::bad("only files you may edit can be shared for editing"));
+        }
+    }
     let token = random_token(24);
-    sqlx::query("INSERT INTO drive_links (node_id, token_hash, expires_at, created_by, password_hash) VALUES ($1, $2, $3, $4, $5)")
+    sqlx::query("INSERT INTO drive_links (node_id, token_hash, expires_at, created_by, password_hash, can_edit) VALUES ($1, $2, $3, $4, $5, $6)")
         .bind(id)
         .bind(hash(&token))
         .bind(b.expires_days.map(|d| Utc::now() + Duration::days(d)))
         .bind(auth.id)
         .bind(pw)
+        .bind(b.can_edit)
         .execute(&state.db)
         .await?;
     let mut v = get_node(State(state.clone()), auth, Path(id)).await?.0;
@@ -798,6 +855,17 @@ async fn link_node(state: &AppState, token: &str, headers: &axum::http::HeaderMa
         return Err(AppError::NotFound("link"));
     }
     Ok((lid, n))
+}
+
+/// A shared file opened from its link in the office editor: the link, the file, whether the
+/// link lets people edit, and who made it.
+pub(crate) async fn link_for_office(state: &AppState, token: &str, headers: &axum::http::HeaderMap, ip: Option<&str>) -> AppResult<(Uuid, Uuid, bool, Option<Uuid>)> {
+    let (lid, n) = link_node(state, token, headers, ip).await?;
+    if n.kind != "file" {
+        return Err(AppError::bad("open a file"));
+    }
+    let (can_edit, by): (bool, Option<Uuid>) = sqlx::query_as("SELECT can_edit, created_by FROM drive_links WHERE id = $1").bind(lid).fetch_one(&state.db).await?;
+    Ok((lid, n.id, can_edit, by))
 }
 
 /// Something inside a linked folder (any depth), not in the trash.
@@ -853,7 +921,8 @@ async fn public_info(State(state): State<AppState>, ClientIp(ip): ClientIp, head
         })));
     }
     let (size, mime): (i64, Option<String>) = sqlx::query_as("SELECT size_bytes, mime_type FROM drive_nodes WHERE id = $1").bind(n.id).fetch_one(&state.db).await?;
-    Ok(Json(json!({ "kind": "file", "name": n.name, "size_bytes": size, "mime_type": mime })))
+    let can_edit: bool = q.item.is_none() && sqlx::query_scalar("SELECT can_edit FROM drive_links WHERE token_hash = $1").bind(hash(&token)).fetch_one(&state.db).await?;
+    Ok(Json(json!({ "kind": "file", "name": n.name, "size_bytes": size, "mime_type": mime, "can_edit": can_edit, "office": crate::office::link_office_status(&state, &n.name).await })))
 }
 
 async fn public_download(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(token): Path<String>, Query(q): Query<PublicQuery>, headers: axum::http::HeaderMap) -> AppResult<Response> {

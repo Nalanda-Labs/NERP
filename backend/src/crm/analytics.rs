@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/crm/analytics/{type}", get(report))
         .route("/crm/analytics/{type}/targets", get(get_targets).put(put_targets))
+        .route("/crm/analytics/{type}/profit", get(profit))
 }
 
 /// Longest period one report may cover.
@@ -630,6 +631,197 @@ async fn put_targets(State(state): State<AppState>, auth: AuthUser, Path(code): 
     }
     tx.commit().await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------------------------------------------------------------------
+// Gross profit and margin
+// ---------------------------------------------------------------------------
+
+/// Most won records one profit report reads.
+const PROFIT_CAP: i64 = 50_000;
+
+#[derive(Default, Clone)]
+struct Pl {
+    /// Net sales (after discounts, without tax) of the rows whose cost is known.
+    revenue: Decimal,
+    cost: Decimal,
+    /// Net sales of rows whose cost isn't known (left out of profit and margin).
+    uncosted: Decimal,
+    deals: i64,
+}
+
+impl Pl {
+    fn add(&mut self, o: &Pl) {
+        self.revenue += o.revenue;
+        self.cost += o.cost;
+        self.uncosted += o.uncosted;
+        self.deals += o.deals;
+    }
+    fn json(&self) -> Value {
+        let profit = self.revenue - self.cost;
+        let margin = if self.revenue.is_zero() { None } else { Some((profit * Decimal::ONE_HUNDRED / self.revenue).round_dp(1)) };
+        json!({
+            "revenue": self.revenue.round_dp(2).to_string(),
+            "cost": self.cost.round_dp(2).to_string(),
+            "profit": profit.round_dp(2).to_string(),
+            "margin": margin.map(|m| m.to_string()),
+            "uncosted_revenue": self.uncosted.round_dp(2).to_string(),
+            "deals": self.deals,
+        })
+    }
+}
+
+#[derive(FromRow)]
+struct ItemRow {
+    item_id: Uuid,
+    #[sqlx(flatten)]
+    row: super::money::ProductRow,
+}
+
+#[derive(FromRow)]
+struct WonDeal {
+    id: Uuid,
+    number: i64,
+    title: String,
+    assigned_to: Option<Uuid>,
+    assigned_name: Option<String>,
+    month: String,
+    opportunity: Decimal,
+    opportunity_base: Decimal,
+}
+
+/// Gross profit and margin of the records won in the period, from their product rows' prices
+/// and costs, in the base currency: in total, by manager, by product, by month, and the
+/// records themselves (most profitable first).
+async fn profit(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Query(q): Query<ReportQuery>) -> AppResult<Json<Value>> {
+    let t = report_type(&state, &code).await?;
+    let scope = visible(&state, &auth, t.id, "read").await?;
+    if matches!(scope, Visible::Nothing) {
+        return Err(AppError::Forbidden);
+    }
+    let tz = user_tz(&state, &auth).await;
+    let today = Utc::now().with_timezone(&tz).date_naive();
+    let from = q.from.unwrap_or_else(|| month_start(today));
+    let to = q.to.unwrap_or(today);
+    if to < from {
+        return Err(AppError::bad("the period ends before it starts"));
+    }
+    if (to - from).num_days() + 1 > MAX_DAYS {
+        return Err(AppError::bad("the period can be at most three years"));
+    }
+    let (start, end) = (day_start(tz, from), day_start(tz, to + Duration::days(1)));
+    let b = Base { t: &t, category: q.category_id, users: parse_users(&q.users)?, scope: &scope };
+
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT i.id, i.number, i.title, i.assigned_to,
+                CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS assigned_name,
+                to_char(i.closed_at AT TIME ZONE ",
+    );
+    qb.push_bind(tz.name().to_string()).push(", 'YYYY-MM') AS month, i.opportunity, i.opportunity_base
+         FROM crm_items i LEFT JOIN users u ON u.id = i.assigned_to WHERE");
+    b.push(&mut qb);
+    qb.push(" AND i.stage_semantics = 'success' AND i.closed_at >= ").push_bind(start).push(" AND i.closed_at < ").push_bind(end);
+    qb.push(" ORDER BY i.closed_at LIMIT ").push_bind(PROFIT_CAP + 1);
+    let mut deals: Vec<WonDeal> = qb.build_query_as().fetch_all(&state.db).await?;
+    let capped = deals.len() as i64 > PROFIT_CAP;
+    deals.truncate(PROFIT_CAP as usize);
+
+    let ids: Vec<Uuid> = deals.iter().map(|d| d.id).collect();
+    let rows: Vec<(Uuid, super::money::ProductRow)> = {
+        let r: Vec<ItemRow> = sqlx::query_as(
+            "SELECT item_id, id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, cost
+             FROM crm_item_products WHERE item_id = ANY($1) ORDER BY item_id, sort",
+        )
+        .bind(&ids)
+        .fetch_all(&state.db)
+        .await?;
+        r.into_iter().map(|x| (x.item_id, x.row)).collect()
+    };
+    let mut by_item: HashMap<Uuid, Vec<super::money::ProductRow>> = HashMap::new();
+    for (i, r) in rows {
+        by_item.entry(i).or_default().push(r);
+    }
+
+    let mut total = Pl::default();
+    let mut without_products = 0i64;
+    let mut managers: HashMap<Option<Uuid>, (String, Pl)> = HashMap::new();
+    let mut products: HashMap<String, (Option<Uuid>, String, Decimal, Pl)> = HashMap::new();
+    let mut months: std::collections::BTreeMap<String, Pl> = std::collections::BTreeMap::new();
+    let mut per_deal: Vec<(Value, Decimal)> = Vec::new();
+    for d in &deals {
+        let Some(rs) = by_item.get(&d.id) else {
+            without_products += 1;
+            continue;
+        };
+        // Into the base currency at the record's own rate.
+        let factor = if d.opportunity.is_zero() { Decimal::ONE } else { d.opportunity_base / d.opportunity };
+        let mut pl = Pl { deals: 1, ..Default::default() };
+        for r in rs {
+            let net = super::money::line(r).net * factor;
+            let mut one = Pl::default();
+            match r.cost {
+                Some(c) => {
+                    one.revenue = net;
+                    one.cost = c * r.quantity * factor;
+                }
+                None => one.uncosted = net,
+            }
+            pl.add(&one);
+            let key = r.product_id.map(|p| p.to_string()).unwrap_or_else(|| format!("name:{}", r.name.to_lowercase()));
+            let e = products.entry(key).or_insert_with(|| (r.product_id, r.name.clone(), Decimal::ZERO, Pl::default()));
+            e.2 += r.quantity;
+            e.3.add(&one);
+        }
+        total.add(&pl);
+        managers.entry(d.assigned_to).or_insert_with(|| (d.assigned_name.clone().unwrap_or_default(), Pl::default())).1.add(&pl);
+        months.entry(d.month.clone()).or_default().add(&pl);
+        let profit = pl.revenue - pl.cost;
+        let mut v = pl.json();
+        v["id"] = json!(d.id);
+        v["number"] = json!(d.number);
+        v["title"] = json!(d.title);
+        v["assigned_name"] = json!(d.assigned_name);
+        per_deal.push((v, profit));
+    }
+    // Products count each record once per product, not once per row.
+    for (_, (_, _, _, pl)) in products.iter_mut() {
+        pl.deals = 0;
+    }
+    let mut by_manager: Vec<(Decimal, Value)> = managers
+        .into_iter()
+        .map(|(id, (name, pl))| {
+            let mut v = pl.json();
+            v["user_id"] = json!(id);
+            v["name"] = json!(name);
+            (pl.revenue - pl.cost, v)
+        })
+        .collect();
+    by_manager.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut by_product: Vec<(Decimal, Value)> = products
+        .into_values()
+        .map(|(id, name, qty, pl)| {
+            let mut v = pl.json();
+            v["product_id"] = json!(id);
+            v["name"] = json!(name);
+            v["quantity"] = json!(qty.normalize().to_string());
+            (pl.revenue - pl.cost, v)
+        })
+        .collect();
+    by_product.sort_by(|a, b| b.0.cmp(&a.0));
+    by_product.truncate(200);
+    per_deal.sort_by(|a, b| b.1.cmp(&a.1));
+    per_deal.truncate(100);
+    Ok(Json(json!({
+        "period": { "from": from, "to": to },
+        "base_currency": super::money::base_currency(&state).await?,
+        "total": total.json(),
+        "without_products": without_products,
+        "capped": capped,
+        "by_manager": by_manager.into_iter().map(|x| x.1).collect::<Vec<_>>(),
+        "by_product": by_product.into_iter().map(|x| x.1).collect::<Vec<_>>(),
+        "by_month": months.into_iter().map(|(m, pl)| { let mut v = pl.json(); v["month"] = json!(m); v }).collect::<Vec<_>>(),
+        "deals": per_deal.into_iter().map(|x| x.0).collect::<Vec<_>>(),
+    })))
 }
 
 #[cfg(test)]

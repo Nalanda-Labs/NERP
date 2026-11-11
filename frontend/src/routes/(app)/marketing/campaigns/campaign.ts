@@ -18,6 +18,8 @@ export interface Campaign {
 	segment_ids: string[];
 	subject: string;
 	body: string;
+	/** Designed in blocks (the email designer); then body is its plain text. */
+	design: import('#lib/components/marketing/EmailDesigner.svelte').Design | null;
 	from_name: string | null;
 	reply_to: string | null;
 	send_at: string | null;

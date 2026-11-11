@@ -5,6 +5,7 @@
 pub(crate) mod imap;
 pub(crate) mod oauth;
 mod actions;
+mod admin;
 mod sync;
 
 use axum::{
@@ -48,6 +49,7 @@ pub const SEND_JOB: &str = "crm.mail.send";
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(admin::router())
         .route("/crm/mailboxes", get(list_mailboxes).post(create_mailbox))
         .route("/crm/mailboxes/test", post(test_mailbox))
         .route("/crm/mailboxes/oauth/providers", get(oauth::providers))
@@ -84,6 +86,9 @@ pub struct MailboxRow {
     pub secret: Vec<u8>,
     pub allow_invalid_certs: bool,
     pub shared_with: Vec<Uuid>,
+    /// Also shared with everyone in these roles and departments (with sub-departments).
+    pub shared_roles: Vec<Uuid>,
+    pub shared_departments: Vec<Uuid>,
     pub create_leads: bool,
     pub sync_days: i32,
     pub sync_enabled: bool,
@@ -103,7 +108,14 @@ pub struct MailboxRow {
 
 const MAILBOX_COLUMNS: &str = "id, owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
     username, secret, allow_invalid_certs, shared_with, create_leads, sync_days, sync_enabled, folders, sent_folder, last_sync_at, last_error, created_at,
-    auth_kind, access_token, access_expires_at";
+    auth_kind, access_token, access_expires_at, shared_roles, shared_departments";
+
+/// SQL: mailboxes user $1 may use (owns, or shared with them, their roles or departments).
+pub(crate) const MAY_USE: &str = "(owner_id = $1 OR $1 = ANY(shared_with)
+    OR EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = $1 AND ur.role_id = ANY(shared_roles))
+    OR EXISTS (WITH RECURSIVE mine AS (SELECT department_id AS id FROM user_departments WHERE user_id = $1
+                 UNION SELECT d.parent_id FROM departments d JOIN mine m ON d.id = m.id WHERE d.parent_id IS NOT NULL)
+               SELECT 1 FROM mine WHERE id = ANY(shared_departments)))";
 
 impl MailboxRow {
     pub fn password(&self, state: &AppState) -> Option<String> {
@@ -142,8 +154,16 @@ impl MailboxRow {
         let auth = (self.smtp_auth || self.is_oauth()).then_some((self.username.as_str(), secret));
         smtp_transport(&self.smtp_host, self.smtp_port as u16, &self.smtp_security, auth, self.allow_invalid_certs, self.is_oauth())
     }
-    pub(crate) fn can_send(&self, user: Uuid) -> bool {
-        self.owner_id == user || self.shared_with.contains(&user)
+    /// Whether someone may send from it (and see it): its owner, the people it's shared with,
+    /// and everyone in its roles and departments.
+    pub(crate) async fn may_send(&self, state: &AppState, user: Uuid) -> AppResult<bool> {
+        if self.owner_id == user || self.shared_with.contains(&user) {
+            return Ok(true);
+        }
+        if self.shared_roles.is_empty() && self.shared_departments.is_empty() {
+            return Ok(false);
+        }
+        Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS (SELECT 1 FROM crm_mailboxes WHERE id = $2 AND {MAY_USE})"))).bind(user).bind(self.id).fetch_one(&state.db).await?)
     }
 }
 
@@ -173,7 +193,7 @@ fn smtp_transport(host: &str, port: u16, security: &str, auth: Option<(&str, &st
 }
 
 #[derive(Deserialize, Clone)]
-struct MailboxBody {
+pub(crate) struct MailboxBody {
     email: Option<String>,
     display_name: Option<String>,
     imap_host: Option<String>,
@@ -187,6 +207,8 @@ struct MailboxBody {
     password: Option<String>,
     allow_invalid_certs: Option<bool>,
     shared_with: Option<Vec<Uuid>>,
+    shared_roles: Option<Vec<Uuid>>,
+    shared_departments: Option<Vec<Uuid>>,
     create_leads: Option<bool>,
     sync_days: Option<i32>,
     sync_enabled: Option<bool>,
@@ -207,6 +229,8 @@ struct Settings {
     password: String,
     allow_invalid_certs: bool,
     shared_with: Vec<Uuid>,
+    shared_roles: Vec<Uuid>,
+    shared_departments: Vec<Uuid>,
     create_leads: bool,
     sync_days: i32,
     sync_enabled: bool,
@@ -256,6 +280,8 @@ fn settings(b: MailboxBody, cur: Option<(&MailboxRow, String)>) -> AppResult<Set
         password,
         allow_invalid_certs: b.allow_invalid_certs.or(c.map(|c| c.allow_invalid_certs)).unwrap_or(false),
         shared_with: b.shared_with.or(c.map(|c| c.shared_with.clone())).unwrap_or_default().into_iter().take(100).collect(),
+        shared_roles: b.shared_roles.or(c.map(|c| c.shared_roles.clone())).unwrap_or_default().into_iter().take(50).collect(),
+        shared_departments: b.shared_departments.or(c.map(|c| c.shared_departments.clone())).unwrap_or_default().into_iter().take(100).collect(),
         create_leads: b.create_leads.or(c.map(|c| c.create_leads)).unwrap_or(false),
         sync_days: days,
         sync_enabled: b.sync_enabled.or(c.map(|c| c.sync_enabled)).unwrap_or(true),
@@ -312,7 +338,7 @@ async fn test_mailbox(State(state): State<AppState>, auth: AuthUser, Json(b): Js
 
 async fn list_mailboxes(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     let rows: Vec<MailboxRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {MAILBOX_COLUMNS} FROM crm_mailboxes WHERE owner_id = $1 OR $1 = ANY(shared_with) ORDER BY email"
+        "SELECT {MAILBOX_COLUMNS} FROM crm_mailboxes WHERE {MAY_USE} ORDER BY email"
     )))
     .bind(auth.id)
     .fetch_all(&state.db)
@@ -343,8 +369,8 @@ async fn create_mailbox(State(state): State<AppState>, auth: AuthUser, Json(b): 
     }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO crm_mailboxes (owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
-             username, secret, allow_invalid_certs, shared_with, create_leads, sync_days, sync_enabled)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING id",
+             username, secret, allow_invalid_certs, shared_with, create_leads, sync_days, sync_enabled, shared_roles, shared_departments)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
     )
     .bind(auth.id)
     .bind(&s.email)
@@ -363,6 +389,8 @@ async fn create_mailbox(State(state): State<AppState>, auth: AuthUser, Json(b): 
     .bind(s.create_leads)
     .bind(s.sync_days)
     .bind(s.sync_enabled)
+    .bind(&s.shared_roles)
+    .bind(&s.shared_departments)
     .fetch_one(&state.db)
     .await?;
     crate::audit::record(&state.db, Some(auth.id), "crm.mailbox.connect", "crm_mailbox", Some(id.to_string()), json!({ "email": s.email }), None).await;
@@ -383,7 +411,8 @@ async fn update_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
             return Err(AppError::bad("import between 0 and 365 days of mail"));
         }
         sqlx::query(
-            "UPDATE crm_mailboxes SET display_name = $2, shared_with = $3, create_leads = $4, sync_days = $5, sync_enabled = $6, updated_at = now() WHERE id = $1",
+            "UPDATE crm_mailboxes SET display_name = $2, shared_with = $3, create_leads = $4, sync_days = $5, sync_enabled = $6,
+                 shared_roles = $7, shared_departments = $8, updated_at = now() WHERE id = $1",
         )
         .bind(id)
         .bind(b.display_name.unwrap_or(cur.display_name).trim().chars().take(200).collect::<String>())
@@ -391,6 +420,8 @@ async fn update_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
         .bind(b.create_leads.unwrap_or(cur.create_leads))
         .bind(days)
         .bind(b.sync_enabled.unwrap_or(cur.sync_enabled))
+        .bind(b.shared_roles.unwrap_or(cur.shared_roles).into_iter().take(50).collect::<Vec<_>>())
+        .bind(b.shared_departments.unwrap_or(cur.shared_departments).into_iter().take(100).collect::<Vec<_>>())
         .execute(&state.db)
         .await?;
         return Ok(Json(serde_json::to_value(load_mailbox(&state, id).await?).unwrap()));
@@ -411,7 +442,7 @@ async fn update_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
     sqlx::query(
         "UPDATE crm_mailboxes SET email = $2, display_name = $3, imap_host = $4, imap_port = $5, imap_security = $6, smtp_host = $7, smtp_port = $8,
              smtp_security = $9, smtp_auth = $10, username = $11, secret = $12, allow_invalid_certs = $13, shared_with = $14, create_leads = $15,
-             sync_days = $16, sync_enabled = $17, last_error = NULL,
+             sync_days = $16, sync_enabled = $17, shared_roles = $19, shared_departments = $20, last_error = NULL,
              folders = CASE WHEN $18 THEN '{}'::jsonb ELSE folders END, sent_folder = CASE WHEN $18 THEN NULL ELSE sent_folder END, updated_at = now()
          WHERE id = $1",
     )
@@ -433,6 +464,8 @@ async fn update_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
     .bind(s.sync_days)
     .bind(s.sync_enabled)
     .bind(reset)
+    .bind(&s.shared_roles)
+    .bind(&s.shared_departments)
     .execute(&state.db)
     .await?;
     Ok(Json(serde_json::to_value(load_mailbox(&state, id).await?).unwrap()))
@@ -470,7 +503,7 @@ async fn queue_sync(state: &AppState, id: Uuid) -> AppResult<bool> {
 
 async fn sync_now(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let m = load_mailbox(&state, id).await?;
-    if !m.can_send(auth.id) {
+    if !m.may_send(&state, auth.id).await? {
         return Err(AppError::NotFound("mailbox"));
     }
     Ok(Json(json!({ "queued": queue_sync(&state, id).await? })))
@@ -822,7 +855,7 @@ async fn send_email(State(state): State<AppState>, auth: AuthUser, Path(item): P
     let row = load_row(&state, item, false).await?;
     require(&state, &auth, row.entity_type, "read", row.assigned_to).await?;
     let mb = load_mailbox(&state, b.mailbox_id).await?;
-    if !mb.can_send(auth.id) {
+    if !mb.may_send(&state, auth.id).await? {
         return Err(AppError::NotFound("mailbox"));
     }
     let id = queue_send(&state, auth.id, &mb, item, &b.to, &b.cc, &b.subject, &b.body, b.reply_to, &b.file_ids).await?;

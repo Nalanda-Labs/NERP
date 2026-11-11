@@ -128,6 +128,25 @@ pub async fn authenticate(state: &AppState, parts: &Parts, token: &str) -> AppRe
     Ok(AuthUser { id: user.id, session_id: entry.id, permissions: user.permissions })
 }
 
+/// The scopes of a working key (not revoked or expired, its owner active and allowed to use
+/// the API), for callers that authenticate keys themselves (the MCP server).
+pub async fn key_scopes(state: &AppState, token: &str) -> AppResult<Vec<String>> {
+    let hash = tokens::hash_token(token);
+    let e: KeyEntry = sqlx::query_as("SELECT id, user_id, scopes, expires_at, revoked_at FROM api_keys WHERE secret_hash = $1")
+        .bind(&hash)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    if e.revoked_at.is_some() || e.expires_at.is_some_and(|t| t < Utc::now()) {
+        return Err(AppError::Unauthorized);
+    }
+    let user = crate::auth::acting_as(state, e.user_id).await?.ok_or(AppError::Unauthorized)?;
+    if !user.can(perm::API_KEYS) {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(e.scopes)
+}
+
 #[derive(Serialize, FromRow)]
 struct KeyRow {
     id: Uuid,

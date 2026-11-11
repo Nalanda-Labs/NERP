@@ -28,6 +28,25 @@
 		}
 	}
 
+	// Import: Markdown or HTML files, or a ZIP of them (Notion, Obsidian, Confluence exports).
+	let importing = $state(false);
+	async function importFile(f: File | undefined) {
+		if (!f || !s) return;
+		importing = true;
+		try {
+			const fd = new FormData();
+			fd.append('file', f);
+			const meta = await api.post<{ id: string }>('/files', fd);
+			const r = await api.post<{ pages: { id: string }[]; images: number }>(`/kb/spaces/${s.id}/import`, { file_id: meta.id });
+			toasts.success(`${r.pages.length} page${r.pages.length === 1 ? '' : 's'} imported${r.images ? `, with ${r.images} image${r.images === 1 ? '' : 's'}` : ''}`);
+			s = await api.get<Space>(`/kb/spaces/${s.id}`);
+		} catch (e) {
+			toasts.error(e);
+		} finally {
+			importing = false;
+		}
+	}
+
 	let settings = $state(false);
 	let form = $state({ name: '', description: '', to_all: true });
 	let readers = $state<Who>({ users: [], departments: [] });
@@ -70,6 +89,12 @@
 			{#if s.description}<p class="mt-1 text-slate-600">{s.description}</p>{/if}
 		</div>
 		{#if s.can_manage}<button class="btn btn-secondary" onclick={openSettings}>Settings</button>{/if}
+		{#if s.can_edit}
+			<label class="btn btn-secondary cursor-pointer {importing ? 'opacity-60' : ''}" title="Markdown or HTML files, or a ZIP of them — exports from Notion, Obsidian or Confluence keep their page tree and images" data-kb-import>
+				<Icon name="upload" class="size-4" /> {importing ? 'Importing…' : 'Import'}
+				<input type="file" class="hidden" accept=".md,.markdown,.txt,.html,.htm,.zip" disabled={importing} onchange={(e) => importFile(e.currentTarget.files?.[0])} />
+			</label>
+		{/if}
 		{#if s.can_edit}<button class="btn btn-primary" onclick={newPage}><Icon name="plus" class="size-4" /> New page</button>{/if}
 	</div>
 	<div class="card mt-5 max-w-3xl p-4">
