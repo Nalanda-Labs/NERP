@@ -47,6 +47,9 @@ impl Mailer {
         let tls_params = || {
             TlsParameters::builder(cfg.host.clone())
                 .dangerous_accept_invalid_certs(cfg.accept_invalid_certs)
+                // "Invalid" covers a certificate for another name too (e.g. a self-signed one
+                // without the address among its names).
+                .dangerous_accept_invalid_hostnames(cfg.accept_invalid_certs)
                 .build()
         };
         let tls = match cfg.security.as_str() {

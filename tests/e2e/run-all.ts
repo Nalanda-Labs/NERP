@@ -33,6 +33,11 @@ for (const f of chosen) {
   const last = out.trim().split('\n').at(-1) ?? '';
   console.log(`${!ok ? 'FAIL' : /^skipped:/m.test(out) ? 'skip' : 'ok  '} ${f.padEnd(10)} ${((Date.now() - started) / 1000).toFixed(0).padStart(4)}s  ${last}`);
   for (const l of fails.slice(0, 5)) console.log('       ' + l.slice(0, 300));
+  // A crash (or timeout) ends without a summary line: show what it said on the way out.
+  if (r.status !== 0 && !/passed, \d+ failed/.test(out)) {
+    if (r.error) console.log('       ' + String(r.error).slice(0, 300));
+    for (const l of (r.stderr ?? '').trim().split('\n').slice(-12)) console.log('       | ' + l.slice(0, 300));
+  }
   for (const l of out.split('\n').filter((l) => l.startsWith('cleanup'))) console.log('       ' + l.slice(0, 300));
 }
 const shots = readdirSync(OUTPUT).filter((f) => f.startsWith('fail') && f.endsWith('.png') && statSync(`${OUTPUT}/${f}`).mtimeMs >= started);

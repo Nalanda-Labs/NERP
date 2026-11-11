@@ -35,7 +35,8 @@ let r: any = await admin.post('/auth/login', { email: 'admin@acme.test', passwor
 ok('admin login', r.status === 200, JSON.stringify(r.data));
 const adminWs = await admin.ws();
 ok('ws hello', adminWs.events.some((e) => e.type === 'hello'));
-const depts = (await admin.get('/departments')).data; const sales = depts.find((d) => d.name === 'Sales');
+// Its own department (a fresh database has none; the stamp gets it cleaned up).
+const sales = (await admin.post('/departments', { name: `Sales ${stamp}` })).data;
 
 // --- invitation ---
 r = await admin.post('/users', { email: daveEmail, first_name: 'Dave', last_name: 'Diaz', send_invite: true, department_ids: [sales.id] });

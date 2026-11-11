@@ -1,8 +1,14 @@
 // The first UI suite: sign-in redirect, dashboard, employees and the basics of the app shell.
 import { chromium } from 'playwright';
 import { cleanupRun } from './cleanup.ts';
+import { Client } from './lib.ts';
 const B = 'http://localhost:8080';
 const s = Date.now().toString(36);
+// Its own department (a fresh database has none; the stamp gets it cleaned up).
+const api = new Client();
+await api.post('/auth/login', { email: 'admin@acme.test', password: 'supersecret1' });
+const dept = `Sales ${s}`;
+await api.post('/departments', { name: dept });
 const exe = process.env.HOME + '/.cache/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-linux64/chrome-headless-shell';
 const browser = await chromium.launch({ executablePath: exe });
 const page = await browser.newPage({ viewport: { width: 1360, height: 860 } });
@@ -22,7 +28,7 @@ await step('employees list', async () => { await page.click('nav >> text=Employe
 await step('add employee', async () => {
   await page.click('button:has-text("Add employee")');
   await page.fill('#fn', 'Carol'); await page.fill('#ln', 'Chen'); await page.fill('#em', `carol.${s}@acme.test`); await page.fill('#pos', 'Account manager');
-  await page.selectOption('#dept', { label: 'Sales' });
+  await page.selectOption('#dept', { label: dept });
   await shot('04-add-employee');
   await page.click('dialog button:has-text("Send invitation")');
   await page.waitForURL(/\/employees\/[0-9a-f-]{36}$/); await page.waitForSelector('h1:has-text("Carol Chen")'); await shot('05-employee-profile');
@@ -34,7 +40,7 @@ await step('assign role', async () => {
 });
 await step('structure', async () => {
   await page.click('nav >> text=Company structure'); await page.waitForSelector('h2:has-text("Acme Ltd")');
-  await page.click('nav.card >> text=Sales'); await page.waitForSelector('h2:has-text("Sales")'); await page.waitForSelector('text=Carol Chen');
+  await page.click(`nav.card >> text=${dept}`); await page.waitForSelector(`h2:has-text("${dept}")`); await page.waitForSelector('text=Carol Chen');
   await shot('06-structure');
 });
 await step('create sub-department', async () => {

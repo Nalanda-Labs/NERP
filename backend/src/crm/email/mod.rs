@@ -176,7 +176,7 @@ pub(crate) async fn load_mailbox(state: &AppState, id: Uuid) -> AppResult<Mailbo
 }
 
 fn smtp_transport(host: &str, port: u16, security: &str, auth: Option<(&str, &str)>, allow_invalid: bool, xoauth2: bool) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
-    let params = || TlsParameters::builder(host.to_string()).dangerous_accept_invalid_certs(allow_invalid).build().map_err(|e| e.to_string());
+    let params = || TlsParameters::builder(host.to_string()).dangerous_accept_invalid_certs(allow_invalid).dangerous_accept_invalid_hostnames(allow_invalid).build().map_err(|e| e.to_string());
     let tls = match security {
         "tls" => Tls::Wrapper(params()?),
         "starttls" => Tls::Required(params()?),
