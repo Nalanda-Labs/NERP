@@ -13,12 +13,13 @@ WorkingDirectory=/opt/nerp/backend
 ExecStart=/opt/nerp/backend/target/release/nerp
 Restart=on-failure
 RestartSec=5
-# Hardening: NERP only writes its upload folder and the temporary folder.
+# Hardening: NERP only writes its upload folder, the backup folder (System → Backups runs the
+# backup scripts; "-": fine if it doesn't exist) and the temporary folder.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/nerp/backend/data
+ReadWritePaths=/opt/nerp/backend/data -/var/backups/nerp
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
