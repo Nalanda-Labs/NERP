@@ -7,11 +7,12 @@
 #   checksum and the list of applied migrations.
 # - Files: the upload folder, copied with rsync. Unchanged files are hard links to the
 #   previous backup, so every backup is complete but only new files take space.
-# - Point-in-time restores: when PostgreSQL archives its WAL (archive_mode = on, with
-#   nerp-wal-archive.sh), a base backup of the database server too (pg_basebackup), and
-#   archived WAL older than the oldest base backup kept is removed. Restore to any moment
-#   since the oldest base backup with nerp-pitr-restore.sh. WAL_ARCHIVE_DIR (default
-#   DEST/wal) is the archive folder; the database user needs the REPLICATION right.
+# - Point-in-time restores: when nerp-wal-receive.sh streams the database's WAL into
+#   WAL_ARCHIVE_DIR (default DEST/wal; its replication slot WAL_SLOT exists), also a base
+#   backup of the database server (pg_basebackup, over the network like pg_dump); finished
+#   WAL segments are compressed, and those older than the oldest base backup kept are
+#   removed. Restore to any moment since the oldest base backup with nerp-pitr-restore.sh.
+#   The database user needs the REPLICATION right.
 # - Backups older than --keep-days are removed.
 # - Settings come from backend/.env (DATABASE_URL, UPLOAD_DIR), like the server's.
 #
@@ -65,20 +66,23 @@ sha256sum "$WORK/database.dump" | sed "s|$WORK/||" > "$WORK/database.dump.sha256
 psql "$DATABASE_URL" -Atc "SELECT version, description FROM _sqlx_migrations ORDER BY version" > "$WORK/migrations.txt"
 psql "$DATABASE_URL" -Atc "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY relname" > "$WORK/table-sizes.txt"
 
-# PostgreSQL's own tools of the server's version (PG_BIN, else the usual places, else PATH).
+# PostgreSQL's client programs of the server's version: the usual places, else PATH (PG_BIN,
+# from the environment, overrides the search for unusual layouts).
 pg_tool() {
   local major
   major="$(psql "$DATABASE_URL" -Atc "SELECT current_setting('server_version_num')::int / 10000")"
-  for d in "$(setting PG_BIN)" "/usr/lib/postgresql/$major/bin" "/usr/pgsql-$major/bin" "$(pg_config --bindir 2>/dev/null || true)"; do
+  for d in "${PG_BIN:-}" "/usr/lib/postgresql/$major/bin" "/usr/pgsql-$major/bin" "$(pg_config --bindir 2>/dev/null || true)"; do
     [ -n "$d" ] && [ -x "$d/$1" ] && { echo "$d/$1"; return; }
   done
   command -v "$1"
 }
 WAL_ARCHIVE_DIR="$(setting WAL_ARCHIVE_DIR)"
 WAL_ARCHIVE_DIR="${WAL_ARCHIVE_DIR:-$DEST/wal}"
-ARCHIVE_MODE="$(psql "$DATABASE_URL" -Atc "SHOW archive_mode")"
+WAL_SLOT="$(setting WAL_SLOT)"
+WAL_SLOT="${WAL_SLOT:-nerp_wal}"
+RECEIVING="$(psql "$DATABASE_URL" -Atc "SELECT count(*) FROM pg_replication_slots WHERE slot_name = '$WAL_SLOT'")"
 BASE=0
-if [ "$ARCHIVE_MODE" = on ] || [ "$ARCHIVE_MODE" = always ]; then
+if [ "$RECEIVING" = 1 ] && [ -d "$WAL_ARCHIVE_DIR" ]; then
   echo "taking a base backup for point-in-time restores…"
   "$(pg_tool pg_basebackup)" --dbname="$DATABASE_URL" --pgdata="$WORK/base" --format=tar --gzip --wal-method=stream --checkpoint=fast --no-password
   BASE=1
@@ -114,10 +118,16 @@ find "$DEST" -mindepth 1 -maxdepth 1 -type d -name '20*' -mtime +"$KEEP_DAYS" | 
   rm -rf -- "$old"
 done
 
-# Archived WAL from before the oldest base backup kept can't be used any more.
-OLDEST_WAL="$(find "$DEST" -mindepth 2 -maxdepth 2 -name manifest.txt -path "$DEST/20*" | sort | xargs -r grep -h '^base_wal=' | head -1 | cut -d= -f2 || true)"
-if [ -n "$OLDEST_WAL" ] && [ -d "$WAL_ARCHIVE_DIR" ]; then
-  if CLEANUP="$(pg_tool pg_archivecleanup)" && [ -n "$CLEANUP" ]; then
-    "$CLEANUP" -x .gz "$WAL_ARCHIVE_DIR" "$OLDEST_WAL"
+# The WAL archive: finished segments compressed (the one being received ends in .partial);
+# segments from before the oldest base backup kept can't be used any more.
+if [ -d "$WAL_ARCHIVE_DIR" ]; then
+  find "$WAL_ARCHIVE_DIR" -maxdepth 1 -type f -regextype posix-extended -regex '.*/[0-9A-F]{24}' -print0 | xargs -0 -r gzip -1
+  OLDEST_WAL="$(find "$DEST" -mindepth 2 -maxdepth 2 -name manifest.txt -path "$DEST/20*" | sort | xargs -r grep -h '^base_wal=' | head -1 | cut -d= -f2 || true)"
+  if [ -n "$OLDEST_WAL" ]; then
+    # Same timeline or earlier, and an earlier position (names sort by timeline, then position).
+    find "$WAL_ARCHIVE_DIR" -maxdepth 1 -type f -regextype posix-extended -regex '.*/[0-9A-F]{24}(\.gz)?' | while read -r f; do
+      n="$(basename "$f" .gz)"
+      if [[ "${n:0:8}" < "${OLDEST_WAL:0:8}" || ( "${n:0:8}" == "${OLDEST_WAL:0:8}" && "${n:8}" < "${OLDEST_WAL:8}" ) ]]; then rm -f -- "$f"; fi
+    done
   fi
 fi

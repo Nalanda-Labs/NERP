@@ -53,7 +53,8 @@ jobs:
           # PostgreSQL's own repository, for a pg_dump as new as the server (backups, api70/api79).
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          # The server programs too (api100 runs a throwaway server for point-in-time restores),
+          # The server programs too (api100 runs a throwaway server, streams its WAL with
+          # pg_receivewal and replays it for point-in-time restores),
           # without the cluster the package would start on port 5432, the service's port.
           echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
           sudo apt-get update

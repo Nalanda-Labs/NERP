@@ -97,7 +97,7 @@ try {
     await pa.goto(B + '/system/backups');
     const sec = pa.locator('[data-pitr]');
     await sec.waitFor();
-    await sec.locator('[data-archiving]').waitFor();
+    await sec.locator('[data-receiving]').waitFor();
     if (!(await sec.locator('[data-pitr-command]').innerText()).includes('nerp-pitr-restore.sh')) throw new Error('no command');
   });
 
