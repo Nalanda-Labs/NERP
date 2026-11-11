@@ -64,7 +64,8 @@ ok('dave has welcome + department notifications', ['user.welcome', 'department.a
 r = await dave.get('/notifications/unread-count');
 const unread = r.data.count;
 const daveWs = await dave.ws();
-await admin.put(`/users/${daveId}/roles`, { role_ids: [(await admin.get('/roles')).data.find((x) => x.code === 'hr').id] });
+const hrRole = (await admin.post('/roles', { code: `hr-${stamp}`, name: `HR manager ${stamp}`, permissions: ['users.manage'] })).data;
+await admin.put(`/users/${daveId}/roles`, { role_ids: [hrRole.id] });
 await sleep(400);
 ok('dave gets live role notification + me.changed', daveWs.events.some((e) => e.type === 'notification' && e.data.kind === 'user.roles') && daveWs.events.some((e) => e.type === 'me.changed'));
 r = await dave.post('/notifications/read-all');

@@ -9,6 +9,8 @@ const api = new Client();
 await api.post('/auth/login', { email: 'admin@acme.test', password: 'supersecret1' });
 const dept = `Sales ${s}`;
 await api.post('/departments', { name: dept });
+const role = `HR manager ${s}`;
+await api.post('/roles', { code: `hr-${s}`, name: role, permissions: ['users.manage'] });
 const exe = process.env.HOME + '/.cache/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-linux64/chrome-headless-shell';
 const browser = await chromium.launch({ executablePath: exe });
 const page = await browser.newPage({ viewport: { width: 1360, height: 860 } });
@@ -35,8 +37,8 @@ await step('add employee', async () => {
 });
 await step('assign role', async () => {
   await page.click('button:has-text("Manage roles")');
-  await page.check('dialog label:has-text("HR manager") input'); await page.click('dialog button:has-text("Save roles")');
-  await page.waitForSelector('.badge:has-text("HR manager")');
+  await page.check(`dialog label:has-text("${role}") input`); await page.click('dialog button:has-text("Save roles")');
+  await page.waitForSelector(`.badge:has-text("${role}")`);
 });
 await step('structure', async () => {
   await page.click('nav >> text=Company structure'); await page.waitForSelector('h2:has-text("Acme Ltd")');
@@ -47,7 +49,7 @@ await step('create sub-department', async () => {
   await page.click('button:has-text("Add sub-department")'); await page.fill('#d-name', `Enterprise sales ${s}`);
   await page.click('dialog button:has-text("Create")'); await page.waitForSelector('h2:has-text("Enterprise sales")');
 });
-await step('roles page', async () => { await page.click('nav >> text=Roles'); await page.click('text=HR manager'); await page.waitForSelector('text=Manage employees'); await shot('07-roles'); });
+await step('roles page', async () => { await page.click('nav >> text=Roles'); await page.click(`text=${role}`); await page.waitForSelector('text=Manage employees'); await shot('07-roles'); });
 await step('files upload', async () => {
   await page.click('nav >> text=My uploads');
   await page.setInputFiles('input[type=file]', { name: `report-${s}.txt`, mimeType: 'text/plain', buffer: Buffer.from('Q3 numbers') });

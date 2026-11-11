@@ -49,6 +49,8 @@ try {
     await ada.fill('#cf-consent', 'I agree to the privacy notice.');
     await ada.click('button[form="ch-form"]');
     await ada.locator(`[data-channel="Web ${s}"]`).waitFor();
+    // Wait for the dialog to close (on a slow machine its closing took the first field's text).
+    await ada.locator('dialog[open]').waitFor({ state: 'detached' });
     await ada.fill('input[aria-label="Short code"]', `price${s}`);
     await ada.fill('input[aria-label="Title"]', 'Prices');
     await ada.fill('textarea[aria-label="Reply text"]', 'Our prices start at 10 euros a month.');

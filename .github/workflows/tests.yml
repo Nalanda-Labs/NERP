@@ -48,11 +48,14 @@ jobs:
             axllent/mailpit:v1.33.1 \
             --smtp-tls-cert /certs/cert.pem --smtp-tls-key /certs/key.pem --smtp-require-starttls
 
-      - name: Install Dovecot, OpenLDAP, coturn, document engines and fonts
+      - name: Install Dovecot, OpenLDAP, coturn, ffmpeg, document engines and fonts
         run: |
+          # PostgreSQL's own repository, for a pg_dump as new as the server (backups, api70/api79).
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            dovecot-imapd postgresql-client poppler-utils redis-tools \
+            dovecot-imapd postgresql-client-18 poppler-utils redis-tools ffmpeg \
             slapd ldap-utils coturn \
             texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
             fonts-noto-core fonts-noto-cjk fonts-texgyre fonts-liberation fonts-dejavu-core \
