@@ -190,7 +190,8 @@ try {
   p = await pub('POST', '/tickets', { name: 'Pat Public', email: pat, title: `Cannot log in ${stamp}`, body: 'My password does not work.', category_id: network.id });
   ok('a request from the page', p.status === 200 && p.data.number > 0 && p.data.token, p.data);
   const ptoken = p.data.token;
-  const t4 = (await sue.get(`/support/tickets?scope=open&q=${p.data.number}`)).data.items[0];
+  // (On a fresh database the number is small and also matches other tickets' text.)
+  const t4 = (await sue.get(`/support/tickets?scope=open&q=${p.data.number}`)).data.items.find((t: any) => t.number === p.data.number);
   ok('support finds it by number', t4?.channel === 'portal' && t4.requester_name === 'Pat Public' && t4.responsible_id === sue.id, t4);
   ok('Pat gets the link', await waitFor(async () => (await mailpit(`to:${pat} subject:"[#${t4.number}] Cannot log in"`))[0]));
   await sue.post(`/support/tickets/${t4.id}/messages`, { body: 'Reset it with the link on the sign-in page.' });

@@ -35,7 +35,8 @@ let r: any = await admin.post('/auth/login', { email: 'admin@acme.test', passwor
 ok('admin login', r.status === 200, JSON.stringify(r.data));
 const adminWs = await admin.ws();
 ok('ws hello', adminWs.events.some((e) => e.type === 'hello'));
-const depts = (await admin.get('/departments')).data; const sales = depts.find((d) => d.name === 'Sales');
+// Its own department (a fresh database has none; the stamp gets it cleaned up).
+const sales = (await admin.post('/departments', { name: `Sales ${stamp}` })).data;
 
 // --- invitation ---
 r = await admin.post('/users', { email: daveEmail, first_name: 'Dave', last_name: 'Diaz', send_invite: true, department_ids: [sales.id] });
@@ -63,7 +64,8 @@ ok('dave has welcome + department notifications', ['user.welcome', 'department.a
 r = await dave.get('/notifications/unread-count');
 const unread = r.data.count;
 const daveWs = await dave.ws();
-await admin.put(`/users/${daveId}/roles`, { role_ids: [(await admin.get('/roles')).data.find((x) => x.code === 'hr').id] });
+const hrRole = (await admin.post('/roles', { code: `hr-${stamp}`, name: `HR manager ${stamp}`, permissions: ['users.manage'] })).data;
+await admin.put(`/users/${daveId}/roles`, { role_ids: [hrRole.id] });
 await sleep(400);
 ok('dave gets live role notification + me.changed', daveWs.events.some((e) => e.type === 'notification' && e.data.kind === 'user.roles') && daveWs.events.some((e) => e.type === 'me.changed'));
 r = await dave.post('/notifications/read-all');

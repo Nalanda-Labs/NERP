@@ -25,7 +25,7 @@ export async function startTurn(name: string): Promise<Turn> {
     '--listening-ip=127.0.0.1', '--relay-ip=127.0.0.1', `--listening-port=${TURN_PORT}`,
     '--min-port=49160', '--max-port=49260',
     '--lt-cred-mech', `--user=${TURN_USER}:${TURN_PASSWORD}`, '--realm=nerp.test',
-    '--no-tls',
+    '--no-tls', '--no-cli', // newer coturn refuses loopback peers with a password-less CLI
     // Both browsers are on this machine, so the relayed peers are loopback addresses.
     '--allow-loopback-peers',
     `--pidfile=${join(dir, 'turn.pid')}`, `--userdb=${join(dir, 'turn.db')}`,

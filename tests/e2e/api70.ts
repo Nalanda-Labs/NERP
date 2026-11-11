@@ -32,7 +32,7 @@ try {
   ok('a backup starts', r.status === 200 && r.data.started, r.data);
   ok('one at a time', (await admin.post('/admin/backups')).status === 409);
   let info = await settle();
-  ok('it succeeded', info.last_backup?.ok === true, info.last_backup?.output);
+  ok('it succeeded', info.last_backup?.ok === true, JSON.stringify(info.last_backup?.output));
   const newest = info.items[0];
   ok('and is listed with its manifest', info.items.length === before + 1 && newest.has_dump && newest.manifest.database_bytes > 0 && newest.manifest.last_migration >= 67, info.items[0]);
   ok('with the command to restore it', info.restore_command?.includes(`nerp-restore.sh ${info.dir}/${newest.name} --yes`), info.restore_command);

@@ -40,7 +40,8 @@ try {
   ok('segments of contacts or companies only', (await admin.post('/marketing/generators', { name: 'x', segment_id: leadSeg.id })).status === 400);
   ok('a stage must be in the pipeline', (await admin.post('/marketing/generators', { name: 'x', segment_id: seg.id, category_id: pipe.id, stage_id: '00000000-0000-4000-8000-000000000000' })).status === 400);
   let r = await admin.post('/marketing/generators', { name: `Renewal ${stamp}`, segment_id: seg.id, target: 'deal', category_id: pipe.id, stage_id: stage.id, title: '{{name}}: renewal {{year}}', repeat: 'monthly' });
-  ok('a monthly generator, running now', r.status === 200 && r.data.repeat === 'monthly' && r.data.next_run_at, r.data);
+  // Due at once, so it is already queued (no next run until this one is done).
+  ok('a monthly generator, running now', r.status === 200 && r.data.repeat === 'monthly' && r.data.is_active, r.data);
   const gen = r.data;
   const done = await waitFor(async () => { const g = (await admin.get(`/marketing/generators/${gen.id}`)).data; return g.last_result ? g : null; });
   ok('it ran: two deals, one client skipped', done?.last_result?.created === 2 && done.last_result.skipped === 1, done);

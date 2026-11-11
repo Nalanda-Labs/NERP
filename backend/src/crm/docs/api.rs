@@ -579,21 +579,22 @@ struct Builtin {
 }
 
 const INV: &str = "INV-{YYYY}-";
+// Types: 2 deals, 5 quotes, 6 invoices, 7 orders (as migrations 0018/0023 give older databases).
 const BUILTINS: &[Builtin] = &[
-    Builtin { key: "typst.invoice", name: "Invoice", engine: "typst", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice.typ")) },
-    Builtin { key: "typst.quote", name: "Quote", engine: "typst", title: "Quote", prefix: "QUO-{YYYY}-", types: &[1, 2], src: Src::Text(tpl!("quote.typ")) },
-    Builtin { key: "latex.invoice", name: "Invoice (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice.tex")) },
-    Builtin { key: "office.invoice", name: "Invoice (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2], src: Src::Docx(docx!("invoice.docx"), "invoice-template.docx") },
+    Builtin { key: "typst.invoice", name: "Invoice", engine: "typst", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice.typ")) },
+    Builtin { key: "typst.quote", name: "Quote", engine: "typst", title: "Quote", prefix: "QUO-{YYYY}-", types: &[1, 2, 5], src: Src::Text(tpl!("quote.typ")) },
+    Builtin { key: "latex.invoice", name: "Invoice (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice.tex")) },
+    Builtin { key: "office.invoice", name: "Invoice (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Docx(docx!("invoice.docx"), "invoice-template.docx") },
     // Example designs, three per engine.
-    Builtin { key: "typst.invoice.classic", name: "Invoice · Classic (Typst)", engine: "typst", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice-classic.typ")) },
-    Builtin { key: "typst.invoice.modern", name: "Invoice · Modern (Typst)", engine: "typst", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice-modern.typ")) },
-    Builtin { key: "typst.invoice.minimal", name: "Invoice · Minimal (Typst)", engine: "typst", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice-minimal.typ")) },
-    Builtin { key: "latex.invoice.classic", name: "Invoice · Classic (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice-classic.tex")) },
-    Builtin { key: "latex.invoice.modern", name: "Invoice · Modern (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice-modern.tex")) },
-    Builtin { key: "latex.invoice.minimal", name: "Invoice · Minimal (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2], src: Src::Text(tpl!("invoice-minimal.tex")) },
-    Builtin { key: "office.invoice.classic", name: "Invoice · Classic (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2], src: Src::Docx(docx!("invoice-classic.docx"), "invoice-classic.docx") },
-    Builtin { key: "office.invoice.modern", name: "Invoice · Modern (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2], src: Src::Docx(docx!("invoice-modern.docx"), "invoice-modern.docx") },
-    Builtin { key: "office.invoice.minimal", name: "Invoice · Minimal (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2], src: Src::Docx(docx!("invoice-minimal.docx"), "invoice-minimal.docx") },
+    Builtin { key: "typst.invoice.classic", name: "Invoice · Classic (Typst)", engine: "typst", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice-classic.typ")) },
+    Builtin { key: "typst.invoice.modern", name: "Invoice · Modern (Typst)", engine: "typst", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice-modern.typ")) },
+    Builtin { key: "typst.invoice.minimal", name: "Invoice · Minimal (Typst)", engine: "typst", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice-minimal.typ")) },
+    Builtin { key: "latex.invoice.classic", name: "Invoice · Classic (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice-classic.tex")) },
+    Builtin { key: "latex.invoice.modern", name: "Invoice · Modern (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice-modern.tex")) },
+    Builtin { key: "latex.invoice.minimal", name: "Invoice · Minimal (LaTeX)", engine: "latex", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Text(tpl!("invoice-minimal.tex")) },
+    Builtin { key: "office.invoice.classic", name: "Invoice · Classic (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Docx(docx!("invoice-classic.docx"), "invoice-classic.docx") },
+    Builtin { key: "office.invoice.modern", name: "Invoice · Modern (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Docx(docx!("invoice-modern.docx"), "invoice-modern.docx") },
+    Builtin { key: "office.invoice.minimal", name: "Invoice · Minimal (Word)", engine: "office", title: "Invoice", prefix: INV, types: &[2, 6, 7], src: Src::Docx(docx!("invoice-minimal.docx"), "invoice-minimal.docx") },
 ];
 
 async fn store_docx(state: &AppState, name: &str, bytes: &[u8]) -> anyhow::Result<Uuid> {

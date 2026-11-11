@@ -41,17 +41,21 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/certs"
           openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=127.0.0.1 \
+            -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" \
             -keyout "$RUNNER_TEMP/certs/key.pem" -out "$RUNNER_TEMP/certs/cert.pem"
           chmod 644 "$RUNNER_TEMP/certs/"*.pem
           docker run -d --name mailpit -p 1025:1025 -p 8026:8025 -v "$RUNNER_TEMP/certs:/certs:ro" \
             axllent/mailpit:v1.33.1 \
             --smtp-tls-cert /certs/cert.pem --smtp-tls-key /certs/key.pem --smtp-require-starttls
 
-      - name: Install Dovecot, OpenLDAP, coturn, document engines and fonts
+      - name: Install Dovecot, OpenLDAP, coturn, ffmpeg, document engines and fonts
         run: |
+          # PostgreSQL's own repository, for a pg_dump as new as the server (backups, api70/api79).
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            dovecot-imapd postgresql-client poppler-utils redis-tools \
+            dovecot-imapd postgresql-client-18 poppler-utils redis-tools ffmpeg \
             slapd ldap-utils coturn \
             texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
             fonts-noto-core fonts-noto-cjk fonts-texgyre fonts-liberation fonts-dejavu-core \
@@ -61,6 +65,8 @@ jobs:
           # slapd's AppArmor profile, which would keep it out of the suites' output folder.
           sudo systemctl disable --now slapd coturn || true
           sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true
+          # The runner image has older PostgreSQL clients too: use 18's (the server's) first.
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
 
       - name: Check the template fonts and build lualatex's font cache
         run: |
@@ -161,29 +167,22 @@ jobs:
             set_env ${p}_OAUTH_AUTH_URL "http://127.0.0.1:8099/$lower/authorize"
             set_env ${p}_OAUTH_TOKEN_URL "http://127.0.0.1:8099/$lower/token"
           done
+          # mock Google CalDAV and Microsoft Graph that api60 serves on the same port
+          set_env GOOGLE_CALDAV_URL http://127.0.0.1:8099/google/caldav/v2
+          set_env MICROSOFT_GRAPH_URL http://127.0.0.1:8099/microsoft/graph/v1.0
 
+      # The same start-up as local test runs (tests/e2e/tools/restart-server.sh): LDAP, TURN,
+      # LiveKit, the sign-in stand-in, backups. The script logs to $NERP_E2E_OUTPUT/server.log.
       - name: Start the server and create the administrator
-        working-directory: backend
-        env:
-          # directory sign-in (api36, ui37, api42)
-          LDAP_ENABLED: 'true'
-          # video calls through TURN (ui40)
-          WEBRTC_ICE_SERVERS: '[{"urls":"turn:127.0.0.1:3478?transport=udp","username":"nerp-test","credential":"nerp-test-turn"}]'
-          # calls through LiveKit and recording (api39, api43, ui41)
-          LIVEKIT_URL: ws://127.0.0.1:7890
-          LIVEKIT_API_URL: http://127.0.0.1:7899
-          LIVEKIT_API_KEY: nerp-test-key
-          LIVEKIT_API_SECRET: nerp-test-secret-0123456789abcdefghijkl
-          LIVEKIT_RECORDINGS_DIR: ${{ github.workspace }}/e2e-output/livekit-recordings
         run: |
-          nohup ./target/debug/nerp > "$RUNNER_TEMP/nerp.log" 2>&1 &
-          for i in $(seq 1 120); do curl -sf http://localhost:8080/api/setup > /dev/null && break; sleep 2; done
+          tests/e2e/tools/restart-server.sh
           curl -sf -X POST http://localhost:8080/api/setup -H 'content-type: application/json' \
             -d '{"company_name":"Acme Ltd","email":"admin@acme.test","password":"supersecret1","first_name":"Ada","last_name":"Admin"}'
 
       - name: Run the end-to-end suites
         working-directory: tests/e2e
         run: |
+          set -o pipefail
           node run-all.ts | tee "$RUNNER_TEMP/e2e.txt"
           # Everything is installed here, so a skipped suite means a broken setup: fail on it.
           if grep -q '^skip ' "$RUNNER_TEMP/e2e.txt"; then
@@ -202,6 +201,6 @@ jobs:
         with:
           name: e2e-failure
           path: |
-            ${{ runner.temp }}/nerp.log
+            ${{ env.NERP_E2E_OUTPUT }}/server.log
             ${{ env.NERP_E2E_OUTPUT }}/*.png
           if-no-files-found: ignore
