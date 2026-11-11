@@ -65,6 +65,8 @@ jobs:
           # slapd's AppArmor profile, which would keep it out of the suites' output folder.
           sudo systemctl disable --now slapd coturn || true
           sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true
+          # The runner image has older PostgreSQL clients too: use 18's (the server's) first.
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
 
       - name: Check the template fonts and build lualatex's font cache
         run: |
@@ -180,6 +182,7 @@ jobs:
       - name: Run the end-to-end suites
         working-directory: tests/e2e
         run: |
+          set -o pipefail
           node run-all.ts | tee "$RUNNER_TEMP/e2e.txt"
           # Everything is installed here, so a skipped suite means a broken setup: fail on it.
           if grep -q '^skip ' "$RUNNER_TEMP/e2e.txt"; then

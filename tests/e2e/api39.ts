@@ -68,6 +68,9 @@ try {
   ok('outsiders cannot', (await (await user('Dan')).post(`/calls/${call.id}/recording`)).status === 404);
   const annIn = (await ann.post(`/calls/${call.id}/join`)).data.peer_id;
   const bobIn = (await bob.post(`/calls/${call.id}/join`)).data.peer_id;
+  // Like the browsers, both send heartbeats (silent ones are dropped after 45 s; the waits
+  // below can take longer on a slow machine).
+  const beats = setInterval(() => { ann.post(`/calls/${call.id}/heartbeat`, { peer_id: annIn }).catch(() => {}); bob.post(`/calls/${call.id}/heartbeat`, { peer_id: bobIn }).catch(() => {}); }, 10_000);
   const bobWs = await bob.ws();
   egress.unavailable = true;
   r = await ann.post(`/calls/${call.id}/recording`);
@@ -104,6 +107,7 @@ try {
   // ---- the call ends while recording ----
   await ann.post(`/calls/${call.id}/recording`);
   const last = [...egress.egresses.values()].at(-1)!;
+  clearInterval(beats);
   await ann.post(`/calls/${call.id}/leave`, { peer_id: annIn });
   ok('recording goes on while someone is in', last.status === 'EGRESS_ACTIVE');
   await bob.post(`/calls/${call.id}/leave`, { peer_id: bobIn });
