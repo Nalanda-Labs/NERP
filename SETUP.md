@@ -18,6 +18,7 @@ Linux server behind HTTPS. Settings are explained in the README's
 | TeX Live with LuaLaTeX | LaTeX document templates (optional) | `texlive-luatex texlive-latex-extra` / `texlive-luatex texlive-latexextra` |
 | LibreOffice | Word document templates (optional) | `libreoffice-writer-nogui` / `libreoffice-fresh` |
 | coturn, LiveKit | video calls across networks, recording (optional) | see the README's video calls section |
+| PostgreSQL 18 client and server programs | backups and point-in-time restores, where backups are kept | `postgresql-client-18`, `postgresql-18` (see step 1 when the database is on another machine) |
 
 ## Development
 
@@ -74,6 +75,19 @@ sudo apt install -y texlive-luatex texlive-latex-recommended texlive-latex-extra
 (Arch: `postgresql valkey noto-fonts noto-fonts-cjk texlive-luatex texlive-latexextra
 libreoffice-fresh nodejs`.)
 
+**When PostgreSQL runs on another machine** (the usual case beyond a small office), install
+`postgresql-18` there as above, and on the NERP machine only what the backups need, from the
+same PostgreSQL repository:
+
+```sh
+# Client programs: pg_dump, pg_basebackup and pg_receivewal for backups (same major version)
+sudo apt install -y postgresql-client-18
+# Server programs, for point-in-time restores only (replaying WAL takes PostgreSQL itself).
+# Don't let the package start a database of its own on this machine:
+echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
+sudo apt install -y postgresql-18
+```
+
 ### 2. Database and Redis
 
 ```sh
@@ -86,6 +100,37 @@ SQL
 `CREATEDB` lets the nightly backup check restore into a temporary database. Keep PostgreSQL and
 Valkey listening on localhost only (the defaults). If Valkey has a password (`requirepass`),
 put it in `REDIS_URL` as `redis://:password@127.0.0.1:6379`.
+
+For point-in-time restores (step 8) the `nerp` role also streams the database's change log:
+
+```sh
+sudo -u postgres psql -c 'ALTER ROLE nerp REPLICATION;'
+```
+
+**PostgreSQL on another machine** (say `10.0.0.4`, with NERP and the backups on `10.0.0.5`):
+on the database server, listen on the private network only and let the NERP machine in, both
+for normal connections and for streaming WAL:
+
+```ini
+# /etc/postgresql/18/main/postgresql.conf
+listen_addresses = 'localhost,10.0.0.4'
+ssl = on                                  # the Debian package sets up a certificate
+max_slot_wal_keep_size = 20GB             # never fill the disk if receiving WAL stops for long
+# (wal_level = replica and max_wal_senders = 10 are the defaults and are enough)
+
+# /etc/postgresql/18/main/pg_hba.conf
+hostssl  nerp         nerp  10.0.0.5/32  scram-sha-256
+hostssl  postgres     nerp  10.0.0.5/32  scram-sha-256   # the backup check creates a scratch database
+hostssl  replication  nerp  10.0.0.5/32  scram-sha-256   # pg_basebackup and pg_receivewal
+```
+
+```sh
+sudo systemctl restart postgresql
+sudo ufw allow from 10.0.0.5 to any port 5432 proto tcp
+```
+
+Then use `DATABASE_URL=postgres://nerp:…@10.0.0.4:5432/nerp?sslmode=require` in step 4.
+Nothing NERP-specific is installed on the database server.
 
 ### 3. NERP itself
 
@@ -105,7 +150,7 @@ sudo -u nerp bash -lc 'cd backend && ~/.cargo/bin/cargo build --release'        
 ```sh
 sudo -u nerp cp backend/.env.example backend/.env
 sudo chmod 600 backend/.env
-openssl rand -base64 48      # run twice: one for JWT_SECRET, one for DATA_ENCRYPTION_KEY
+openssl rand -base64 48      # run three times: JWT_SECRET, DATA_ENCRYPTION_KEY, FILE_ENCRYPTION_KEY
 ```
 
 The settings that matter in production (`backend/.env`):
@@ -116,6 +161,7 @@ DATABASE_URL=postgres://nerp:a-long-random-password@127.0.0.1:5432/nerp
 REDIS_URL=redis://127.0.0.1:6379
 JWT_SECRET=<random, 32+ characters>
 DATA_ENCRYPTION_KEY=<random, 32+ characters>   # encrypts mailbox passwords; never change it later
+FILE_ENCRYPTION_KEY=<random, 32+ characters>   # encrypts uploaded files; lose it and the files are gone
 PUBLIC_URL=https://erp.example.com       # used in links in emails
 STATIC_DIR=../frontend/build             # NERP serves the web app itself
 COOKIE_SECURE=true                       # HTTPS only (also turns on HSTS)
@@ -127,14 +173,20 @@ SMTP_USERNAME=…
 SMTP_PASSWORD=…
 MAIL_FROM="Example ERP <erp@example.com>"
 UPLOAD_DIR=./data/uploads
+BACKUP_DIR=/var/backups/nerp             # nightly backups and the WAL archive (step 8)
+BACKUP_RESTORE=false                     # true: System → Backups may restore over the live data
 ```
+
+`FILE_ENCRYPTION_KEY` is best set before the first upload; set later, existing files are
+encrypted in the background (System → Storage shows the progress). To replace it later, move
+the old key to `FILE_ENCRYPTION_OLD_KEYS` and set the new one; files move over by themselves.
 
 `TRUST_PROXY=true` matters: without it every request seems to come from the proxy, and the
 sign-in limit per address would lock everyone out together. Leave `CRM_WEBHOOK_ALLOW_PRIVATE`
 and `MAIL_ALLOW_PRIVATE` off unless webhooks or mailboxes must reach your internal network.
 
 **Save a copy of `backend/.env` in the company's password manager now** (see
-[BACKUP.md](BACKUP.md)).
+[BACKUP.md](BACKUP.md)). Without its `FILE_ENCRYPTION_KEY` no backup of the files can be read.
 
 ### 5. Run it as a service
 
@@ -146,8 +198,9 @@ journalctl -u nerp -f            # "database migrations are up to date", "NERP l
 curl -s http://127.0.0.1:8080/api/health
 ```
 
-The unit runs NERP as `nerp`, lets it write only its upload folder and `/tmp`, and restarts it
-if it stops.
+The unit runs NERP as `nerp`, lets it write only its upload folder, the backup folder
+(`/var/backups/nerp`, for System → Backups) and `/tmp`, and restarts it if it stops. If
+`BACKUP_DIR` is elsewhere, change `ReadWritePaths` in the unit to match.
 
 ### 6. HTTPS in front
 
@@ -200,8 +253,37 @@ Security).
 
 ### 8. Backups
 
-Install the nightly backup and its test restore, and copy backups off the server, as in
-[BACKUP.md](BACKUP.md). Run it once by hand and read the result before relying on it.
+On the NERP machine (or wherever backups are kept; it needs the same `backend/.env`):
+
+```sh
+sudo install -d -o nerp -g nerp -m 700 /var/backups/nerp /var/backups/nerp/wal
+
+# Nightly: database dump, uploaded files, a base backup for point-in-time restores, and a
+# test restore of it into a scratch database.
+sudo cp deploy/systemd/nerp-backup.{service,timer} /etc/systemd/system/
+
+# All the time: the database's change log (WAL), streamed over the network into
+# /var/backups/nerp/wal through a replication slot, so the database can be put back as it
+# was at any moment since the oldest base backup.
+sudo cp deploy/systemd/nerp-wal-receive.service /etc/systemd/system/
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now nerp-wal-receive.service
+journalctl -u nerp-wal-receive.service -n 20     # "receiving WAL into /var/backups/nerp/wal"
+sudo systemctl enable --now nerp-backup.timer    # every night at 02:30
+sudo systemctl start nerp-backup.service         # once now: makes the first base backup
+journalctl -u nerp-backup.service -n 30          # "backup OK" at the end
+```
+
+Then check System → Backups: the backup is listed, and *Point-in-time restore* says the
+changes are being received and since when the database can be restored. Start the receiver
+before the first backup — base backups are taken only while it runs. If it stops, the page
+turns red: the database server keeps the changes for it (up to `max_slot_wal_keep_size`), so
+start it again soon. To give up point-in-time restores, stop the service and drop its slot
+(`SELECT pg_drop_replication_slot('nerp_wal');`), or the server keeps WAL for nobody.
+
+Copy `/var/backups/nerp` off the machine every night, encrypted, and practise a restore: both
+in [BACKUP.md](BACKUP.md), which also has the restore commands.
 
 ### Updating
 
@@ -222,6 +304,7 @@ nothing), and when several instances start together only one migrates while the 
 Run more instances on other machines with the same `.env` (same database, Redis and
 `UPLOAD_DIR` on shared storage), behind one proxy. Background jobs are shared out
 automatically; set `WORKER_ENABLED=false` on instances that should only answer requests.
+Run the backups and `nerp-wal-receive` on one machine only.
 
 ### Optional features
 
