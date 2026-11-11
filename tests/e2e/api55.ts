@@ -29,7 +29,7 @@ try {
   ok('only training managers make courses', (await ann.post('/training/courses', { title: 'x' })).status === 403);
   let r = await admin.post('/training/courses', { title: `Selling ${stamp}`, description: '# Welcome\nHow we sell.', to_all: false, audience: { departments: [dept.id] } });
   const course = r.data.course;
-  ok('a draft course', r.status === 200 && course.is_published === false && r.data.html.includes('<h1>Welcome</h1>'), r.data);
+  ok('a draft course', r.status === 200 && course.is_published === false && r.data.html.includes('<h1 id="h-welcome">Welcome</h1>'), r.data);
   ok('drafts are hidden', (await ann.get(`/training/courses/${course.id}`)).status === 404 && !(await ann.get('/training/courses')).data.items.some((c: any) => c.id === course.id));
   r = await admin.post(`/training/courses/${course.id}/chapters`, { title: 'Basics' });
   const chapter = r.data.chapters[0];

@@ -33,6 +33,9 @@ pub const SUPPORT_MANAGE: &str = "support.manage";
 pub const ACCOUNTING_VIEW: &str = "accounting.view";
 pub const ACCOUNTING_POST: &str = "accounting.post";
 pub const ACCOUNTING_ADMIN: &str = "accounting.admin";
+pub const BI: &str = "bi.manage";
+pub const FEED_MODERATE: &str = "feed.moderate";
+pub const USERS_INVITE: &str = "users.invite";
 
 #[derive(Serialize)]
 pub struct PermissionInfo {
@@ -45,6 +48,7 @@ pub struct PermissionInfo {
 /// The catalog every module adds to. Roles may only hold permissions listed here.
 pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: USERS_VIEW, group: "Company", name: "View employees", description: "Browse the employee directory and profiles" },
+    PermissionInfo { code: USERS_INVITE, group: "Company", name: "Invite employees", description: "Invite people by email, make links to join the company, and approve those who asked to join" },
     PermissionInfo { code: USERS_MANAGE, group: "Company", name: "Manage employees", description: "Invite, edit and deactivate employees; reset passwords" },
     PermissionInfo { code: DEPARTMENTS_MANAGE, group: "Company", name: "Manage structure", description: "Create, edit and delete departments and set department heads" },
     PermissionInfo { code: PROJECTS_CREATE, group: "Tasks", name: "Create projects", description: "Start new projects and invite colleagues to them" },
@@ -67,6 +71,8 @@ pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: ACCOUNTING_VIEW, group: "Accounting", name: "View the books", description: "See accounts, entries, invoices and bills in the books, payments, bank statements and reports" },
     PermissionInfo { code: ACCOUNTING_POST, group: "Accounting", name: "Record transactions", description: "Post invoices, enter bills, record payments and journal entries, reconcile bank statements, void them" },
     PermissionInfo { code: ACCOUNTING_ADMIN, group: "Accounting", name: "Administer the books", description: "Set up accounting, the chart of accounts and taxes, opening balances, the lock date and year-end closing" },
+    PermissionInfo { code: FEED_MODERATE, group: "Company", name: "Moderate the news feed", description: "See every post (also those for a few people), and edit or delete anyone's posts and comments" },
+    PermissionInfo { code: BI, group: "Company", name: "Build BI dashboards", description: "Make BI dashboards and datasets (CSV files, outside databases), share them and see every dashboard; dashboards show company-wide figures" },
     PermissionInfo { code: LISTS, group: "Company", name: "Manage lists", description: "Make lists and their business processes, and manage every list" },
     PermissionInfo { code: KB, group: "Company", name: "Manage the knowledge base", description: "Create knowledge base spaces, choose who reads and edits them, and edit every space" },
     PermissionInfo { code: ROLES_MANAGE, group: "Administration", name: "Manage roles", description: "Create roles, change their permissions and assign them to employees" },

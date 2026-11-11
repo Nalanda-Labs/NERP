@@ -522,11 +522,43 @@ pub(crate) async fn within_hours(state: &AppState, r: &Resource, start: DateTime
     Ok(true)
 }
 
+/// Runs `f` while holding a lock on each resource (Postgres advisory locks, so it holds
+/// across server instances): checking that a resource is free and booking it happen as one,
+/// and bookings made at the same moment can't both take the last place.
+pub(crate) async fn with_resource_locks<T, Fut>(state: &AppState, ids: &[Uuid], f: impl FnOnce() -> Fut) -> AppResult<T>
+where
+    Fut: std::future::Future<Output = AppResult<T>>,
+{
+    let mut ids = ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    ids.truncate(20);
+    if ids.is_empty() {
+        return f().await;
+    }
+    let mut conn = state.db.acquire().await?;
+    for id in &ids {
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended('booking:' || $1::text, 0))").bind(id).execute(&mut *conn).await?;
+    }
+    let out = f().await;
+    if sqlx::query("SELECT pg_advisory_unlock_all()").execute(&mut *conn).await.is_err() {
+        // A connection that may still hold the locks is not given back to the pool.
+        let _ = conn.detach();
+    }
+    out
+}
+
 /// Bookings that hold the resource during [start, end), the buffer counted (`except`: a
 /// booking being moved).
 pub(crate) async fn overlapping(state: &AppState, r: &Resource, start: DateTime<Utc>, end: DateTime<Utc>, except: Option<Uuid>) -> AppResult<i64> {
     let buffer = Duration::minutes(r.buffer_minutes as i64);
-    Ok(sqlx::query_scalar(
+    // A meeting room is also held by calendar events in it.
+    let events = if r.kind == "room" {
+        crate::calendar::room_events(state, r.id, start - buffer, end + buffer, None).await?.into_iter().filter(|(s, e)| *s < end + buffer && *e + buffer > start).count() as i64
+    } else {
+        0
+    };
+    Ok(events + sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM bookings b JOIN booking_resources_used u ON u.booking_id = b.id
          WHERE u.resource_id = $1 AND b.status IN ('booked', 'confirmed', 'came') AND ($4::uuid IS NULL OR b.id <> $4)
            AND b.starts_at < $3 AND b.ends_at + $5 > $2",

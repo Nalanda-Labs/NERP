@@ -36,6 +36,7 @@ export interface Person {
 	avatar_file_id: string | null;
 	last_read_at?: string;
 	role?: 'owner' | 'admin' | 'member';
+	is_guest?: boolean;
 }
 
 export interface ChatDetail extends Chat {

@@ -12,7 +12,7 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use super::{exceptions, hash, load_events, occurrences};
+use super::{exceptions, hash, ical::{esc, fold, stamp}, load_events, occurrences};
 use crate::{
     error::{AppError, AppResult},
     state::AppState,
@@ -20,32 +20,6 @@ use crate::{
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/public/calendar/{file}", get(feed))
-}
-
-/// Escapes text for an iCalendar value.
-fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace("\r\n", "\\n").replace('\n', "\\n")
-}
-
-/// Folds a content line at 75 octets (continuation lines start with a space).
-fn fold(line: &str) -> String {
-    let mut out = String::new();
-    let mut len = 0;
-    for c in line.chars() {
-        let w = c.len_utf8();
-        if len + w > 75 {
-            out.push_str("\r\n ");
-            len = 1;
-        }
-        out.push(c);
-        len += w;
-    }
-    out.push_str("\r\n");
-    out
-}
-
-fn stamp(t: DateTime<Utc>) -> String {
-    t.format("%Y%m%dT%H%M%SZ").to_string()
 }
 
 struct Entry {
@@ -157,18 +131,4 @@ async fn feed(State(state): State<AppState>, Path(file): Path<String>) -> AppRes
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/calendar; charset=utf-8"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=300"));
     Ok(r)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escaping_and_folding() {
-        assert_eq!(esc("a;b,c\\d\ne"), "a\\;b\\,c\\\\d\\ne");
-        let long = format!("SUMMARY:{}", "é".repeat(60));
-        let folded = fold(&long);
-        assert!(folded.split("\r\n").all(|l| l.len() <= 75));
-        assert_eq!(folded.replace("\r\n ", "").trim_end(), long);
-    }
 }

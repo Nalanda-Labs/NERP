@@ -18,6 +18,7 @@
 	let busy = $state(false);
 	let company = $state<string | null>(null);
 	let sso = $state<{ enabled: boolean; label: string | null }>({ enabled: false, label: null });
+	let providers = $state<{ id: string; kind: string; label: string }[]>([]);
 
 	onMount(async () => {
 		// A sign-on attempt that failed comes back here with the reason.
@@ -34,6 +35,7 @@
 		if (status.needs_setup) return goto('/setup', { replace: true });
 		company = status.company_name;
 		api.get<typeof sso>('/auth/sso').then((s) => (sso = s)).catch(() => {});
+		api.get<{ items: typeof providers }>('/auth/providers').then((r) => (providers = r.items)).catch(() => {});
 		if (await session.restore()) goto('/', { replace: true });
 	});
 
@@ -159,10 +161,15 @@
 			<input id="password" class="input" type="password" autocomplete="current-password" required bind:value={password} />
 		</div>
 		<button class="btn btn-primary w-full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
-		{#if sso.enabled}
+		{#if sso.enabled || providers.length}
 			<div class="flex items-center gap-3 text-xs text-slate-400"><span class="h-px flex-1 bg-slate-200"></span>or<span class="h-px flex-1 bg-slate-200"></span></div>
+		{/if}
+		{#if sso.enabled}
 			<a class="btn btn-secondary w-full" href="/api/auth/sso/start" data-sso>{sso.label}</a>
 		{/if}
+		{#each providers as p (p.id)}
+			<a class="btn btn-secondary w-full" href="/api/auth/providers/{p.id}/start" data-provider={p.kind}>{p.label}</a>
+		{/each}
 	{:else}
 		<div>
 			<label class="label" for="code">{useRecovery ? 'Recovery code' : 'Authentication code'}</label>

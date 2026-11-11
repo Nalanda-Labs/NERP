@@ -58,6 +58,26 @@
 			toasts.error(err);
 		}
 	}
+
+	// Work reports: how often, for the company and for single people.
+	type Rules = { company: string; people: { user_id: string; name: string; period: string | null; reviewer_id: string | null; reviewer_name: string | null }[] };
+	let rules = $state<Rules | null>(null);
+	let rulePerson = $state<{ id: string; name: string } | null>(null);
+	let ruleForm = $state({ period: '', reviewer: null as string | null, reviewerLabel: null as string | null });
+	const PERIODS: [string, string][] = [['none', 'No reports'], ['daily', 'Daily'], ['weekly', 'Weekly'], ['monthly', 'Monthly']];
+	onMount(() => { api.get<Rules>('/hr/report-rules').then((r) => (rules = r)).catch(() => {}); });
+	async function setCompanyRule(period: string) {
+		try { rules = await api.put<Rules>('/hr/report-rules/company', { period }); toasts.success('Saved'); } catch (e) { toasts.error(e); }
+	}
+	async function setPersonRule(e: SubmitEvent) {
+		e.preventDefault();
+		if (!rulePerson) return;
+		try {
+			rules = await api.put<Rules>('/hr/report-rules', { user_id: rulePerson.id, period: ruleForm.period || null, reviewer_id: ruleForm.reviewer });
+			rulePerson = null;
+			ruleForm = { period: '', reviewer: null, reviewerLabel: null };
+		} catch (err) { toasts.error(err); }
+	}
 </script>
 
 <svelte:head><title>HR settings · NERP</title></svelte:head>
@@ -95,6 +115,23 @@
 				<p class="w-full text-sm text-slate-600">{person.name}, {year}: {Number(bal.allowance)} days{bal.custom ? '' : ' (company default)'}, {bal.used} taken, {bal.requested} waiting, {Number(bal.left)} left.</p>
 				<div><label class="label" for="al-d">Days</label><input id="al-d" class="input w-32" type="number" min="0" max="366" step="0.5" placeholder="Default" bind:value={days} /></div>
 				<button class="btn btn-secondary">Save</button>
+			</form>
+		{/if}
+	</section>
+
+	<section class="card space-y-3 p-6" aria-labelledby="rep-h" data-report-rules>
+		<h2 id="rep-h" class="font-medium text-slate-900">Work reports</h2>
+		{#if rules}
+			<label class="flex items-center gap-3 text-sm">Everyone reports
+				<select class="input w-44" aria-label="Company report period" value={rules.company} onchange={(e) => setCompanyRule(e.currentTarget.value)}>{#each PERIODS as [v, l] (v)}<option value={v}>{l.toLowerCase()}</option>{/each}</select>
+				<span class="text-slate-500">to their department heads and deputies</span>
+			</label>
+			{#if rules.people.length}<ul class="divide-y divide-slate-100 text-sm">{#each rules.people as p (p.user_id)}<li class="py-1.5">{p.name}: {p.period ?? 'as the company'}{p.reviewer_name ? `, read by ${p.reviewer_name}` : ''}</li>{/each}</ul>{/if}
+			<form class="flex flex-wrap items-end gap-2 text-sm" onsubmit={setPersonRule}>
+				<div class="w-56"><UserPicker onpick={(u) => (rulePerson = { id: u.id, name: u.full_name })} placeholder="One person…" /></div>
+				<select class="input w-40" aria-label="Their period" bind:value={ruleForm.period}><option value="">As the company</option>{#each PERIODS as [v, l] (v)}<option value={v}>{l}</option>{/each}</select>
+				<div class="w-56"><UserPicker bind:value={ruleForm.reviewer} bind:label={ruleForm.reviewerLabel} placeholder="Read by (optional)…" /></div>
+				<button class="btn btn-secondary" disabled={!rulePerson}>Save{rulePerson ? ` for ${rulePerson.name}` : ''}</button>
 			</form>
 		{/if}
 	</section>

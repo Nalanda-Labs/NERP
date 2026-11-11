@@ -43,7 +43,7 @@ try {
   ok('a title is needed', (await ann.post(`/kb/spaces/${hrSpace.id}/pages`, { title: ' ' })).status === 400);
   r = await ann.post(`/kb/spaces/${hrSpace.id}/pages`, { title: 'Leave', body: `# Leave policy\n\nAsk **two weeks** ahead. ${stamp}\n\n<script>alert(1)</script>[x](javascript:alert(1))` });
   const leave = r.data;
-  ok('page with safe HTML', leave.version === 1 && leave.html.includes('<h1>Leave policy</h1>') && leave.html.includes('<strong>two weeks</strong>') && !leave.html.includes('<script') && !leave.html.includes('href="javascript'), leave.html);
+  ok('page with safe HTML', leave.version === 1 && leave.html.includes('<h1 id="h-leave-policy">Leave policy</h1>') && leave.html.includes('<strong>two weeks</strong>') && !leave.html.includes('<script') && !leave.html.includes('href="javascript'), leave.html);
   const sick = (await ann.post(`/kb/spaces/${hrSpace.id}/pages`, { title: 'Sick leave', parent_id: leave.id, body: 'Call your manager.' })).data;
   const deep = (await ann.post(`/kb/spaces/${hrSpace.id}/pages`, { title: 'Doctor notes', parent_id: sick.id })).data;
   ok('sub-pages: path and children', deep.path.map((x: any) => x.title).join('/') === 'Leave/Sick leave' && (await ann.get(`/kb/pages/${leave.id}`)).data.children[0].id === sick.id);

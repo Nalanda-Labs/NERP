@@ -1,0 +1,121 @@
+//! How people arrange the app: sidebar items hidden or pinned, and the background. Everyone
+//! sets their own; an administrator sets the company's default and can apply it to everyone
+//! (which clears personal choices).
+
+use axum::{extract::State, routing::{get, put}, Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::{
+    audit,
+    auth::{permissions as perm, AuthUser, ClientIp},
+    error::{AppError, AppResult},
+    state::AppState,
+};
+
+pub fn router() -> Router<AppState> {
+    Router::new().route("/me/ui", get(get_mine).put(put_mine)).route("/settings/ui-default", put(put_default))
+}
+
+const PRESETS: &[&str] = &["plain", "sky", "sand", "mint", "dusk", "grid"];
+
+/// `{"hidden": [...], "pinned": [...]}` with app paths only.
+fn check_menu(v: &Value) -> AppResult<Value> {
+    let list = |k: &str| -> AppResult<Vec<String>> {
+        let items = v.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
+        if items.len() > 200 {
+            return Err(AppError::bad("too many menu items"));
+        }
+        items
+            .iter()
+            .map(|i| i.as_str().filter(|s| s.starts_with('/') && s.len() <= 200 && !s.contains("//")).map(String::from).ok_or_else(|| AppError::bad("menu items are app paths")))
+            .collect()
+    };
+    Ok(json!({ "hidden": list("hidden")?, "pinned": list("pinned")? }))
+}
+
+fn check_background(b: &str) -> AppResult<()> {
+    if PRESETS.contains(&b) || uuid::Uuid::parse_str(b).is_ok() { Ok(()) } else { Err(AppError::bad("pick a background or upload a picture")) }
+}
+
+async fn company(state: &AppState) -> AppResult<Value> {
+    Ok(sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = 'ui_default'").fetch_optional(&state.db).await?.unwrap_or(json!({})))
+}
+
+async fn get_mine(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    let mine: Option<(Option<Value>, Option<String>)> = sqlx::query_as("SELECT menu, background FROM user_ui_prefs WHERE user_id = $1").bind(auth.id).fetch_optional(&state.db).await?;
+    let (menu, background) = mine.unwrap_or((None, None));
+    let c = company(&state).await?;
+    Ok(Json(json!({
+        "menu": menu.clone().or_else(|| c.get("menu").cloned()).unwrap_or(json!({ "hidden": [], "pinned": [] })),
+        "background": background.clone().or_else(|| c.get("background").and_then(Value::as_str).map(String::from)).unwrap_or_else(|| "plain".into()),
+        "own_menu": menu.is_some(), "own_background": background.is_some(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct Mine {
+    /// null: back to the company's.
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    menu: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    background: Option<Option<String>>,
+}
+
+async fn put_mine(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Mine>) -> AppResult<Json<Value>> {
+    let menu = match &b.menu {
+        Some(Some(m)) => Some(Some(check_menu(m)?)),
+        Some(None) => Some(None),
+        None => None,
+    };
+    if let Some(Some(bg)) = &b.background {
+        check_background(bg)?;
+    }
+    sqlx::query(
+        "INSERT INTO user_ui_prefs (user_id, menu, background) VALUES ($1, $3, $5)
+         ON CONFLICT (user_id) DO UPDATE SET menu = CASE WHEN $2 THEN $3 ELSE user_ui_prefs.menu END,
+             background = CASE WHEN $4 THEN $5 ELSE user_ui_prefs.background END, updated_at = now()",
+    )
+    .bind(auth.id)
+    .bind(menu.is_some())
+    .bind(menu.flatten())
+    .bind(b.background.is_some())
+    .bind(b.background.flatten())
+    .execute(&state.db)
+    .await?;
+    get_mine(State(state), auth).await
+}
+
+#[derive(Deserialize)]
+struct Default {
+    menu: Option<Value>,
+    background: Option<String>,
+    /// Also clear everyone's own choices, so they get these.
+    #[serde(default)]
+    apply_to_all: bool,
+}
+
+async fn put_default(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Json(b): Json<Default>) -> AppResult<Json<Value>> {
+    auth.require(perm::SETTINGS_MANAGE)?;
+    let mut c = company(&state).await?;
+    if let Some(m) = &b.menu {
+        c["menu"] = check_menu(m)?;
+    }
+    if let Some(bg) = &b.background {
+        check_background(bg)?;
+        c["background"] = json!(bg);
+    }
+    let mut tx = state.db.begin().await?;
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('ui_default', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()").bind(&c).execute(&mut *tx).await?;
+    if b.apply_to_all {
+        if b.menu.is_some() {
+            sqlx::query("UPDATE user_ui_prefs SET menu = NULL").execute(&mut *tx).await?;
+        }
+        if b.background.is_some() {
+            sqlx::query("UPDATE user_ui_prefs SET background = NULL").execute(&mut *tx).await?;
+        }
+    }
+    audit::record(&mut *tx, Some(auth.id), "settings.ui_default", "settings", None, json!({ "menu": b.menu.is_some(), "background": b.background, "apply_to_all": b.apply_to_all }), ip.as_deref()).await;
+    tx.commit().await?;
+    get_mine(State(state), auth).await
+}

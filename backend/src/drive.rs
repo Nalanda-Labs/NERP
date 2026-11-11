@@ -26,7 +26,7 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::{
-    auth::{permissions as perm, tokens::random_token, AuthUser},
+    auth::{ClientIp, permissions as perm, tokens::random_token, AuthUser},
     error::{AppError, AppResult},
     routes::{
         files::delete_stored,
@@ -188,6 +188,8 @@ struct BrowseQuery {
     space: Option<String>,
     folder: Option<Uuid>,
     project_id: Option<Uuid>,
+    /// Shared with me: only what this person shares (their drive, as I see it).
+    owner: Option<Uuid>,
 }
 
 async fn browse(State(state): State<AppState>, auth: AuthUser, Query(q): Query<BrowseQuery>) -> AppResult<Json<Value>> {
@@ -246,7 +248,7 @@ async fn browse(State(state): State<AppState>, auth: AuthUser, Query(q): Query<B
             }
             "shared" => (
                 sqlx::query_as(sqlx::AssertSqlSafe(format!(
-                    "{ENTRY_SELECT} WHERE n.deleted_at IS NULL AND n.owner_id <> $1 AND n.id IN (
+                    "{ENTRY_SELECT} WHERE n.deleted_at IS NULL AND n.owner_id <> $1 AND ($2::uuid IS NULL OR n.owner_id = $2) AND n.id IN (
                         SELECT s.node_id FROM drive_shares s WHERE s.user_id = $1 OR s.department_id IN (
                             WITH RECURSIVE mine AS (SELECT department_id AS id FROM user_departments WHERE user_id = $1
                                                     UNION SELECT d.parent_id FROM departments d JOIN mine m ON d.id = m.id WHERE d.parent_id IS NOT NULL)
@@ -254,6 +256,7 @@ async fn browse(State(state): State<AppState>, auth: AuthUser, Query(q): Query<B
                      ORDER BY n.kind DESC, lower(n.name)"
                 )))
                 .bind(auth.id)
+                .bind(q.owner)
                 .fetch_all(&state.db)
                 .await?,
                 vec![],
@@ -452,8 +455,9 @@ async fn get_node(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         .fetch_all(&state.db)
         .await?;
         v["shares"] = json!(shares.into_iter().map(|(u, d, lv, name)| json!({ "user_id": u, "department_id": d, "level": lv, "name": name })).collect::<Vec<_>>());
-        let links: Vec<(Uuid, Option<DateTime<Utc>>, i32, DateTime<Utc>)> = sqlx::query_as("SELECT id, expires_at, downloads, created_at FROM drive_links WHERE node_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.db).await?;
-        v["links"] = json!(links.into_iter().map(|(id, exp, d, at)| json!({ "id": id, "expires_at": exp, "downloads": d, "created_at": at })).collect::<Vec<_>>());
+        let links: Vec<(Uuid, Option<DateTime<Utc>>, i32, DateTime<Utc>, bool)> =
+            sqlx::query_as("SELECT id, expires_at, downloads, created_at, password_hash IS NOT NULL FROM drive_links WHERE node_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.db).await?;
+        v["links"] = json!(links.into_iter().map(|(id, exp, d, at, pw)| json!({ "id": id, "expires_at": exp, "downloads": d, "created_at": at, "password": pw })).collect::<Vec<_>>());
     }
     Ok(Json(v))
 }
@@ -556,6 +560,10 @@ async fn restore_node(State(state): State<AppState>, auth: AuthUser, Path(id): P
 }
 
 /// Gone for good: the item, everything inside, every version's file.
+pub(crate) async fn purge_node(state: &AppState, id: Uuid) -> AppResult<()> {
+    purge(state, id).await
+}
+
 async fn purge(state: &AppState, id: Uuid) -> AppResult<()> {
     let files: Vec<Uuid> = sqlx::query_scalar(
         "WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id)
@@ -686,22 +694,28 @@ fn hash(t: &str) -> String {
 #[derive(Deserialize)]
 struct LinkInput {
     expires_days: Option<i64>,
+    /// Asked for before anything is shown.
+    password: Option<String>,
 }
 
 async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<LinkInput>) -> AppResult<Json<Value>> {
-    let (n, _) = need(&state, &auth, id, Level::Own).await?;
-    if n.kind != "file" {
-        return Err(AppError::bad("links are for files"));
-    }
+    crate::routes::settings::require_public_links(&state).await?;
+    need(&state, &auth, id, Level::Own).await?;
     if b.expires_days.is_some_and(|d| !(1..=365).contains(&d)) {
         return Err(AppError::bad("a link lasts 1 to 365 days, or until removed"));
     }
+    let pw = match b.password.filter(|p| !p.is_empty()) {
+        Some(p) if p.len() < 4 => return Err(AppError::bad("the password needs at least 4 characters")),
+        Some(p) => Some(crate::auth::password::hash_password(p).await?),
+        None => None,
+    };
     let token = random_token(24);
-    sqlx::query("INSERT INTO drive_links (node_id, token_hash, expires_at, created_by) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO drive_links (node_id, token_hash, expires_at, created_by, password_hash) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
         .bind(hash(&token))
         .bind(b.expires_days.map(|d| Utc::now() + Duration::days(d)))
         .bind(auth.id)
+        .bind(pw)
         .execute(&state.db)
         .await?;
     let mut v = get_node(State(state.clone()), auth, Path(id)).await?.0;
@@ -716,12 +730,35 @@ async fn delete_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     get_node(State(state), auth, Path(node_id)).await
 }
 
-async fn link_node(state: &AppState, token: &str) -> AppResult<(Uuid, Node)> {
-    let (lid, nid): (Uuid, Uuid) = sqlx::query_as("SELECT id, node_id FROM drive_links WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())")
+/// The item behind a link: not expired, the password right (`X-Link-Password`), and not too
+/// many wrong guesses from one address.
+async fn link_node(state: &AppState, token: &str, headers: &axum::http::HeaderMap, ip: Option<&str>) -> AppResult<(Uuid, Node)> {
+    use redis::AsyncCommands;
+    if !crate::routes::settings::public_links_allowed(state).await? {
+        return Err(AppError::NotFound("link"));
+    }
+    let (lid, nid, pw): (Uuid, Uuid, Option<String>) = sqlx::query_as("SELECT id, node_id, password_hash FROM drive_links WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())")
         .bind(hash(token))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("link"))?;
+    if let Some(h) = pw {
+        let mut redis = state.redis.clone();
+        let key = format!("drive:pw:{}:{}", hash(token), ip.unwrap_or("?"));
+        let fails: i64 = redis.get(&key).await.unwrap_or(0);
+        if fails >= 10 {
+            return Err(AppError::TooManyRequests("too many wrong passwords; try again later".into()));
+        }
+        let given = headers.get("X-Link-Password").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        if given.is_empty() {
+            return Err(AppError::InvalidCredentials("this link needs a password".into()));
+        }
+        if !crate::auth::password::verify_password(given, h).await? {
+            let _: Result<i64, _> = redis.incr(&key, 1).await;
+            let _: Result<(), _> = redis.expire(&key, 900).await;
+            return Err(AppError::InvalidCredentials("wrong password".into()));
+        }
+    }
     let n = node(state, nid).await?;
     if n.deleted_at.is_some() {
         return Err(AppError::NotFound("link"));
@@ -729,14 +766,71 @@ async fn link_node(state: &AppState, token: &str) -> AppResult<(Uuid, Node)> {
     Ok((lid, n))
 }
 
-async fn public_info(State(state): State<AppState>, Path(token): Path<String>) -> AppResult<Json<Value>> {
-    let (_, n) = link_node(&state, &token).await?;
-    let (size, mime): (i64, Option<String>) = sqlx::query_as("SELECT size_bytes, mime_type FROM drive_nodes WHERE id = $1").bind(n.id).fetch_one(&state.db).await?;
-    Ok(Json(json!({ "name": n.name, "size_bytes": size, "mime_type": mime })))
+/// Something inside a linked folder (any depth), not in the trash.
+async fn inside(state: &AppState, folder: Uuid, id: Uuid) -> AppResult<Node> {
+    let ok: bool = sqlx::query_scalar(
+        "WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id WHERE d.deleted_at IS NULL)
+         SELECT EXISTS (SELECT 1 FROM down WHERE id = $2)",
+    )
+    .bind(folder)
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    let n = node(state, id).await?;
+    if !ok || n.deleted_at.is_some() {
+        return Err(AppError::NotFound("file"));
+    }
+    Ok(n)
 }
 
-async fn public_download(State(state): State<AppState>, Path(token): Path<String>, headers: axum::http::HeaderMap) -> AppResult<Response> {
-    let (lid, n) = link_node(&state, &token).await?;
+#[derive(Deserialize, Default)]
+struct PublicQuery {
+    /// In a linked folder: a folder or file inside it.
+    item: Option<Uuid>,
+}
+
+async fn public_info(State(state): State<AppState>, ClientIp(ip): ClientIp, headers: axum::http::HeaderMap, Path(token): Path<String>, Query(q): Query<PublicQuery>) -> AppResult<Json<Value>> {
+    let (_, root) = link_node(&state, &token, &headers, ip.as_deref()).await?;
+    let n = match q.item {
+        Some(i) if root.kind == "folder" => inside(&state, root.id, i).await?,
+        _ => root.clone(),
+    };
+    if n.kind == "folder" {
+        let items: Vec<(Uuid, String, String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, name, kind, size_bytes, mime_type FROM drive_nodes WHERE parent_id = $1 AND deleted_at IS NULL ORDER BY kind DESC, lower(name) LIMIT 2000",
+        )
+        .bind(n.id)
+        .fetch_all(&state.db)
+        .await?;
+        // The way back up to the linked folder.
+        let path: Vec<(Uuid, String)> = sqlx::query_as(
+            "WITH RECURSIVE up AS (SELECT id, parent_id, name, 0 AS depth FROM drive_nodes WHERE id = $1
+                UNION ALL SELECT d.id, d.parent_id, d.name, up.depth + 1 FROM drive_nodes d JOIN up ON d.id = up.parent_id WHERE up.id <> $2)
+             SELECT id, name FROM up ORDER BY depth DESC",
+        )
+        .bind(n.id)
+        .bind(root.id)
+        .fetch_all(&state.db)
+        .await?;
+        return Ok(Json(json!({
+            "kind": "folder", "name": n.name, "root": root.name,
+            "path": path.into_iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
+            "items": items.into_iter().map(|(id, name, kind, size, mime)| json!({ "id": id, "name": name, "kind": kind, "size_bytes": size, "mime_type": mime })).collect::<Vec<_>>(),
+        })));
+    }
+    let (size, mime): (i64, Option<String>) = sqlx::query_as("SELECT size_bytes, mime_type FROM drive_nodes WHERE id = $1").bind(n.id).fetch_one(&state.db).await?;
+    Ok(Json(json!({ "kind": "file", "name": n.name, "size_bytes": size, "mime_type": mime })))
+}
+
+async fn public_download(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(token): Path<String>, Query(q): Query<PublicQuery>, headers: axum::http::HeaderMap) -> AppResult<Response> {
+    let (lid, root) = link_node(&state, &token, &headers, ip.as_deref()).await?;
+    let n = match q.item {
+        Some(i) if root.kind == "folder" => inside(&state, root.id, i).await?,
+        _ => root,
+    };
+    if n.kind != "file" {
+        return Err(AppError::bad("pick a file in the folder"));
+    }
     // A download is counted once, not for every piece a player asks for.
     if headers.get(axum::http::header::RANGE).and_then(|v| v.to_str().ok()).is_none_or(|r| r.starts_with("bytes=0-")) {
         sqlx::query("UPDATE drive_links SET downloads = downloads + 1 WHERE id = $1").bind(lid).execute(&state.db).await?;
@@ -773,4 +867,50 @@ async fn search(State(state): State<AppState>, auth: AuthUser, Query(q): Query<S
         }
     }
     Ok(Json(json!({ "items": out })))
+}
+
+// ---------------------------------------------------------------------------
+// For the office editor (Collabora)
+// ---------------------------------------------------------------------------
+
+/// A drive file as the office editor sees it.
+pub(crate) struct OfficeFile {
+    pub name: String,
+    pub file_id: Uuid,
+    pub size: i64,
+    pub version: i32,
+    pub updated_at: DateTime<Utc>,
+    pub owner: Option<Uuid>,
+    pub can_edit: bool,
+}
+
+/// The file behind a drive item, if the person may at least see it.
+pub(crate) async fn office_file(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<OfficeFile> {
+    let (n, l) = need(state, auth, id, Level::View).await?;
+    if n.kind != "file" || n.deleted_at.is_some() {
+        return Err(AppError::NotFound("file"));
+    }
+    let (size, version, updated_at): (i64, i32, DateTime<Utc>) = sqlx::query_as("SELECT size_bytes, version, updated_at FROM drive_nodes WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    Ok(OfficeFile { name: n.name, file_id: n.file_id.ok_or(AppError::NotFound("file"))?, size, version, updated_at, owner: n.owner_id.or(n.created_by), can_edit: l >= Level::Edit })
+}
+
+/// Saves edited content as the item's newest version.
+pub(crate) async fn save_version(state: &AppState, auth: &AuthUser, id: Uuid, bytes: &[u8]) -> AppResult<(i32, DateTime<Utc>)> {
+    let (n, _) = need(state, auth, id, Level::Edit).await?;
+    let mime: Option<String> = sqlx::query_scalar("SELECT mime_type FROM drive_nodes WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let mime = mime.unwrap_or_else(|| "application/octet-stream".into());
+    let file = crate::routes::files::store_bytes(state, Some(auth.id), &n.name, &mime, bytes).await?;
+    let mut tx = state.db.begin().await?;
+    let (v, at): (i32, DateTime<Utc>) = sqlx::query_as(
+        "UPDATE drive_nodes SET version = version + 1, file_id = $2, size_bytes = $3, updated_by = $4, updated_at = now() WHERE id = $1 RETURNING version, updated_at",
+    )
+    .bind(id)
+    .bind(file)
+    .bind(bytes.len() as i64)
+    .bind(auth.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, $2, $3, $4, $5)").bind(id).bind(v).bind(file).bind(bytes.len() as i64).bind(auth.id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok((v, at))
 }

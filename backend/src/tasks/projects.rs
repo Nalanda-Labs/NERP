@@ -55,6 +55,10 @@ pub struct ProjectSummary {
     requested: bool,
     /// Requests waiting for the owners.
     request_count: i64,
+    /// The latest change to its tasks, or post, or message.
+    last_activity_at: DateTime<Utc>,
+    /// Messages in its chat I haven't read.
+    unread: i64,
 }
 
 #[derive(Serialize, FromRow)]
@@ -64,6 +68,7 @@ pub struct Member {
     position: Option<String>,
     avatar_file_id: Option<Uuid>,
     role: String,
+    is_guest: bool,
 }
 
 #[derive(Serialize)]
@@ -86,7 +91,15 @@ fn summary_query(user: Uuid) -> QueryBuilder<Postgres> {
     qb.push_bind(user)
         .push(") AS my_role, p.created_at, p.kind, p.starts_on, p.ends_on, EXISTS (SELECT 1 FROM project_join_requests r WHERE r.project_id = p.id AND r.user_id = ")
         .push_bind(user)
-        .push(") AS requested, (SELECT COUNT(*) FROM project_join_requests r WHERE r.project_id = p.id) AS request_count FROM projects p WHERE TRUE");
+        .push(") AS requested, (SELECT COUNT(*) FROM project_join_requests r WHERE r.project_id = p.id) AS request_count,
+            GREATEST(p.updated_at,
+                COALESCE((SELECT MAX(t.last_activity_at) FROM tasks t WHERE t.project_id = p.id), p.updated_at),
+                COALESCE((SELECT MAX(f.created_at) FROM feed_posts f WHERE f.project_id = p.id), p.updated_at),
+                COALESCE((SELECT c.last_message_at FROM im_chats c WHERE c.project_id = p.id), p.updated_at)) AS last_activity_at,
+            COALESCE((SELECT COUNT(*) FROM im_chats c JOIN im_members me ON me.chat_id = c.id AND me.user_id = ")
+        .push_bind(user)
+        .push(" JOIN im_messages m ON m.chat_id = c.id AND m.created_at > COALESCE(me.last_read_at, '-infinity') AND m.user_id IS DISTINCT FROM me.user_id AND m.deleted_at IS NULL
+              WHERE c.project_id = p.id), 0) AS unread FROM projects p WHERE TRUE");
     qb
 }
 
@@ -99,12 +112,21 @@ struct ListQuery {
     mine: Option<String>,
     /// group | project
     kind: Option<String>,
+    /// name (default) | activity
+    sort: Option<String>,
+    /// "true": only those with overdue tasks.
+    overdue: Option<String>,
+    /// "true": only those with messages I haven't read.
+    unread: Option<String>,
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<ListQuery>) -> AppResult<Json<Vec<ProjectSummary>>> {
     let mut qb = summary_query(auth.id);
     // Open and closed groups are listed for everyone; private ones for their members.
-    if !auth.can(perm::TASKS_MANAGE_ALL) {
+    if auth.is_guest() {
+        // Guests: only the groups they were invited to.
+        qb.push(" AND EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = ").push_bind(auth.id).push(")");
+    } else if !auth.can(perm::TASKS_MANAGE_ALL) {
         qb.push(" AND (p.visibility IN ('open', 'closed') OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = ")
             .push_bind(auth.id)
             .push("))");
@@ -121,8 +143,16 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Lis
     if let Some(term) = clean(q.q) {
         qb.push(" AND p.name ILIKE ").push_bind(format!("%{}%", term.replace('%', "\\%").replace('_', "\\_")));
     }
-    qb.push(" ORDER BY p.name LIMIT 500");
-    Ok(Json(qb.build_query_as().fetch_all(&state.db).await?))
+    if q.overdue.as_deref() == Some("true") {
+        qb.push(" AND EXISTS (SELECT 1 FROM tasks t WHERE t.project_id = p.id AND t.status IN ('new','in_progress','review') AND t.deadline < now())");
+    }
+    // The summary's columns can't be filtered on here; the list is short, so filter after.
+    qb.push(if q.sort.as_deref() == Some("activity") { " ORDER BY last_activity_at DESC LIMIT 500" } else { " ORDER BY p.name LIMIT 500" });
+    let mut rows: Vec<ProjectSummary> = qb.build_query_as().fetch_all(&state.db).await?;
+    if q.unread.as_deref() == Some("true") {
+        rows.retain(|p| p.unread > 0);
+    }
+    Ok(Json(rows))
 }
 
 async fn load_detail(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<ProjectDetail> {
@@ -131,7 +161,7 @@ async fn load_detail(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<P
     qb.push(" AND p.id = ").push_bind(id);
     let summary: ProjectSummary = qb.build_query_as().fetch_one(&state.db).await?;
     let members: Vec<Member> = sqlx::query_as(
-        "SELECT u.id AS user_id, u.first_name || ' ' || u.last_name AS full_name, u.position, u.avatar_file_id, pm.role
+        "SELECT u.id AS user_id, u.first_name || ' ' || u.last_name AS full_name, u.position, u.avatar_file_id, pm.role, u.is_guest
          FROM project_members pm JOIN users u ON u.id = pm.user_id
          WHERE pm.project_id = $1
          ORDER BY CASE pm.role WHEN 'owner' THEN 0 WHEN 'member' THEN 1 ELSE 2 END, u.last_name, u.first_name",
@@ -156,7 +186,7 @@ async fn detail_or_card(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResul
             qb.push(" AND p.visibility = 'closed' AND p.id = ").push_bind(id);
             let summary: ProjectSummary = qb.build_query_as().fetch_optional(&state.db).await?.ok_or(AppError::NotFound("project"))?;
             let members: Vec<Member> = sqlx::query_as(
-                "SELECT u.id AS user_id, u.first_name || ' ' || u.last_name AS full_name, u.position, u.avatar_file_id, pm.role
+                "SELECT u.id AS user_id, u.first_name || ' ' || u.last_name AS full_name, u.position, u.avatar_file_id, pm.role, u.is_guest
                  FROM project_members pm JOIN users u ON u.id = pm.user_id WHERE pm.project_id = $1 AND pm.role = 'owner' ORDER BY u.last_name, u.first_name",
             )
             .bind(id)
@@ -389,6 +419,9 @@ struct JoinBody {
 }
 
 async fn join(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, body: Option<Json<JoinBody>>) -> AppResult<Json<ProjectDetail>> {
+    if auth.is_guest() {
+        return Err(AppError::NotFound("project"));
+    }
     let (visibility, role, name): (String, Option<String>, String) = sqlx::query_as(
         "SELECT p.visibility, (SELECT role FROM project_members WHERE project_id = p.id AND user_id = $2), p.name FROM projects p WHERE p.id = $1",
     )

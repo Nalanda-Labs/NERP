@@ -7,23 +7,28 @@
 	import Icon from '#lib/components/Icon.svelte';
 	import MultiUserPicker from '#lib/components/MultiUserPicker.svelte';
 	import { realtime } from '#lib/realtime.svelte.ts';
+	import { session } from '#lib/session.svelte.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
+	import { PERM } from '#lib/types.ts';
 
 	let posts = $state<Post[]>([]);
 	let important = $state<Post[]>([]);
 	let more = $state(false);
 	let q = $state('');
+	// Moderators: every post, whoever it was for.
+	let all = $state(false);
+	const moderator = $derived(session.can(PERM.SETTINGS_MANAGE) || session.can(PERM.FEED_MODERATE));
 	let fresh = $state(0);
 
 	async function load() {
-		const r = await api.get<{ items: Post[]; more: boolean }>('/feed' + query({ q: q.trim() || undefined }));
+		const r = await api.get<{ items: Post[]; more: boolean }>('/feed' + query({ q: q.trim() || undefined, all: all || undefined }));
 		posts = r.items;
 		more = r.more;
 		fresh = 0;
 		important = (await api.get<{ items: Post[] }>('/feed/important')).items;
 	}
 	async function older() {
-		const r = await api.get<{ items: Post[]; more: boolean }>('/feed' + query({ q: q.trim() || undefined, before: posts.at(-1)?.created_at }));
+		const r = await api.get<{ items: Post[]; more: boolean }>('/feed' + query({ q: q.trim() || undefined, all: all || undefined, before: posts.at(-1)?.created_at }));
 		posts = [...posts, ...r.items];
 		more = r.more;
 	}
@@ -50,6 +55,11 @@
 	let chosenDepts = $state<string[]>([]);
 	let isImportant = $state(false);
 	let withPoll = $state(false);
+	// Appreciation: a badge for colleagues.
+	let withBadge = $state(false);
+	let badge = $state('thanks');
+	let badgePeople = $state<{ id: string; name: string; avatar_file_id: string | null }[]>([]);
+	const BADGES: [string, string][] = [['thanks', '🙏 Thank you'], ['team_player', '🤝 Team player'], ['great_idea', '💡 Great idea'], ['problem_solver', '🧩 Problem solver'], ['leader', '⭐ Leader'], ['above_beyond', '🚀 Above and beyond']];
 	let poll = $state({ question: '', options: ['', ''] });
 	let files = $state<{ id: string; name: string }[]>([]);
 	let busy = $state(false);
@@ -81,8 +91,12 @@
 				departments: toAll ? [] : chosenDepts,
 				important: isImportant,
 				file_ids: files.map((f) => f.id),
-				poll: withPoll ? { question: poll.question, options: poll.options } : null
+				poll: withPoll ? { question: poll.question, options: poll.options } : null,
+				badge: withBadge ? badge : null,
+				badge_user_ids: withBadge ? badgePeople.map((p) => p.id) : []
 			});
+			withBadge = false;
+			badgePeople = [];
 			posts = [p, ...posts.filter((x) => x.id !== p.id)];
 			body = '';
 			files = [];
@@ -106,6 +120,7 @@
 	<div class="flex items-center gap-3">
 		<h1 class="flex-1 text-2xl font-semibold text-slate-900">News feed</h1>
 		<input class="input w-56" type="search" placeholder="Search posts" aria-label="Search posts" bind:value={q} oninput={search} />
+		{#if moderator}<label class="flex items-center gap-1.5 text-sm text-slate-600" title="Also posts for a few people, and workgroups you're not in"><input type="checkbox" class="rounded border-slate-300" bind:checked={all} onchange={search} /> Every post</label>{/if}
 	</div>
 
 	<form class="card space-y-3 p-5" onsubmit={publish} aria-label="New post">
@@ -115,6 +130,12 @@
 				<input class="input" required maxlength="300" placeholder="Question" aria-label="Poll question" bind:value={poll.question} />
 				{#each poll.options as _, i (i)}<input class="input" maxlength="200" placeholder="Answer {i + 1}" aria-label="Answer {i + 1}" bind:value={poll.options[i]} />{/each}
 				{#if poll.options.length < 10}<button type="button" class="text-sm text-brand-600 hover:underline" onclick={() => poll.options.push('')}>+ Answer</button>{/if}
+			</div>
+		{/if}
+		{#if withBadge}
+			<div class="space-y-2 rounded-xl bg-amber-50 p-3" aria-label="Badge">
+				<div class="flex flex-wrap gap-1.5" role="group" aria-label="Which badge">{#each BADGES as [k, l] (k)}<button type="button" class="rounded-full border px-3 py-1 text-sm {badge === k ? 'border-amber-500 bg-white font-medium' : 'border-amber-200 text-amber-900'}" aria-pressed={badge === k} onclick={() => (badge = k)}>{l}</button>{/each}</div>
+				<MultiUserPicker bind:value={badgePeople} placeholder="For whom…" />
 			</div>
 		{/if}
 		{#if !toAll}
@@ -132,6 +153,7 @@
 			<select class="input w-40" aria-label="Who sees it" bind:value={toAll}><option value={true}>Everyone</option><option value={false}>Chosen people…</option></select>
 			<label class="btn btn-ghost cursor-pointer px-2" aria-label="Attach files"><Icon name="paperclip" class="size-4" /><input type="file" multiple class="sr-only" onchange={upload} /></label>
 			<button type="button" class="btn btn-ghost px-2 {withPoll ? 'text-brand-700' : ''}" aria-pressed={withPoll} onclick={() => (withPoll = !withPoll)}>Poll</button>
+			<button type="button" class="btn btn-ghost px-2 {withBadge ? 'text-brand-700' : ''}" aria-pressed={withBadge} onclick={() => (withBadge = !withBadge)}>Give a badge</button>
 			<label class="flex items-center gap-2 text-slate-600"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={isImportant} /> Important</label>
 			<button class="btn btn-primary ml-auto" disabled={busy || !body.trim()}>Post</button>
 		</div>

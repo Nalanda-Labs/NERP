@@ -11,7 +11,7 @@ use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Recurrence {
-    /// daily | weekly | monthly
+    /// daily | weekly | monthly | yearly
     pub freq: String,
     /// Every N days / weeks / months.
     #[serde(default = "one")]
@@ -19,9 +19,16 @@ pub struct Recurrence {
     /// For weekly: ISO weekday numbers, 1 = Monday … 7 = Sunday.
     #[serde(default)]
     pub weekdays: Vec<u8>,
-    /// For monthly: day of the month (31 means "last day" in shorter months).
+    /// For monthly and yearly: day of the month (31 means "last day" in shorter months).
     #[serde(default)]
     pub month_day: Option<u8>,
+    /// For yearly: the month (1–12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub month: Option<u8>,
+    /// For monthly and yearly by weekday: which one in the month (1–4, or -1 for the last),
+    /// with the weekday as the only entry of `weekdays` ("the second Tuesday").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub week_of_month: Option<i8>,
     /// Local time of day, "HH:MM".
     pub time: String,
     /// IANA time zone, e.g. "Europe/Berlin".
@@ -42,8 +49,8 @@ fn one() -> u32 {
 
 impl Recurrence {
     pub fn validate(&self) -> AppResult<()> {
-        if !["daily", "weekly", "monthly"].contains(&self.freq.as_str()) {
-            return Err(AppError::bad("repeat must be daily, weekly or monthly"));
+        if !["daily", "weekly", "monthly", "yearly"].contains(&self.freq.as_str()) {
+            return Err(AppError::bad("repeat must be daily, weekly, monthly or yearly"));
         }
         if !(1..=366).contains(&self.interval) {
             return Err(AppError::bad("repeat interval must be between 1 and 366"));
@@ -51,8 +58,22 @@ impl Recurrence {
         if self.freq == "weekly" && (self.weekdays.is_empty() || self.weekdays.iter().any(|d| !(1..=7).contains(d))) {
             return Err(AppError::bad("choose at least one weekday"));
         }
-        if self.freq == "monthly" && !self.month_day.is_some_and(|d| (1..=31).contains(&d)) {
-            return Err(AppError::bad("choose a day of the month between 1 and 31"));
+        if ["monthly", "yearly"].contains(&self.freq.as_str()) {
+            match self.week_of_month {
+                Some(w) => {
+                    if !(w == -1 || (1..=4).contains(&w)) || self.weekdays.len() != 1 || !(1..=7).contains(&self.weekdays[0]) {
+                        return Err(AppError::bad("choose the first to fourth, or the last, of one weekday"));
+                    }
+                }
+                None => {
+                    if !self.month_day.is_some_and(|d| (1..=31).contains(&d)) {
+                        return Err(AppError::bad("choose a day of the month between 1 and 31"));
+                    }
+                }
+            }
+        }
+        if self.freq == "yearly" && !self.month.is_some_and(|m| (1..=12).contains(&m)) {
+            return Err(AppError::bad("choose the month a yearly repeat falls in"));
         }
         self.local_time()?;
         self.tz()?;
@@ -91,13 +112,34 @@ impl Recurrence {
             }
             "monthly" => {
                 let months = (date.year() - self.starts_on.year()) as i64 * 12 + date.month() as i64 - self.starts_on.month() as i64;
-                if months % n != 0 {
+                months % n == 0 && self.day_matches(date)
+            }
+            "yearly" => {
+                let years = (date.year() - self.starts_on.year()) as i64;
+                years % n == 0 && self.month.is_some_and(|m| date.month() == m as u32) && self.day_matches(date)
+            }
+            _ => false,
+        }
+    }
+
+    /// The day within a month: a day number, or the nth (or last) of a weekday.
+    fn day_matches(&self, date: NaiveDate) -> bool {
+        match self.week_of_month {
+            Some(w) => {
+                let wd = date.weekday().number_from_monday() as u8;
+                if self.weekdays.first() != Some(&wd) {
                     return false;
                 }
+                if w == -1 {
+                    date.day() + 7 > last_day_of_month(date)
+                } else {
+                    (date.day() - 1) / 7 + 1 == w as u32
+                }
+            }
+            None => {
                 let want = self.month_day.unwrap_or(1) as u32;
                 date.day() == want.min(last_day_of_month(date))
             }
-            _ => false,
         }
     }
 
@@ -106,8 +148,9 @@ impl Recurrence {
         let tz = self.tz().ok()?;
         let time = self.local_time().ok()?;
         let mut date = after.with_timezone(&tz).date_naive().max(self.starts_on);
-        // Ten years of days is far more than any rule needs to find its next match.
-        for _ in 0..3700 {
+        // Enough days for any rule to find its next match (yearly ones every few years).
+        let limit = if self.freq == "yearly" { 366 * (self.interval as usize + 1) + 31 } else { 3700 };
+        for _ in 0..limit {
             if self.ends_on.is_some_and(|e| date > e) {
                 return None;
             }
@@ -139,9 +182,31 @@ impl Recurrence {
                 let days: Vec<&str> = self.weekdays.iter().filter_map(|d| names.get(*d as usize - 1).copied()).collect();
                 format!("{} on {}", every("week"), days.join(", "))
             }
-            _ => format!("{} on day {}", every("month"), self.month_day.unwrap_or(1)),
+            "monthly" => format!("{} on {}", every("month"), self.day_words(&names)),
+            _ => {
+                const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                let m = MONTHS.get(self.month.unwrap_or(1) as usize - 1).copied().unwrap_or("Jan");
+                match self.week_of_month {
+                    Some(_) => format!("{} on {} of {m}", every("year"), self.day_words(&names)),
+                    None => format!("{} on {} {m}", every("year"), self.month_day.unwrap_or(1)),
+                }
+            }
         };
         format!("{base} at {}", self.time)
+    }
+}
+
+impl Recurrence {
+    /// "day 14" or "the 2nd Tue" / "the last Fri".
+    fn day_words(&self, names: &[&str; 7]) -> String {
+        match self.week_of_month {
+            Some(w) => {
+                let day = self.weekdays.first().and_then(|d| names.get(*d as usize - 1)).copied().unwrap_or("Mon");
+                let nth = match w { 1 => "1st", 2 => "2nd", 3 => "3rd", 4 => "4th", _ => "last" };
+                format!("the {nth} {day}")
+            }
+            None => format!("day {}", self.month_day.unwrap_or(1)),
+        }
     }
 }
 
@@ -160,6 +225,8 @@ mod tests {
             interval: 1,
             weekdays: vec![],
             month_day: None,
+            month: None,
+            week_of_month: None,
             time: "09:00".into(),
             timezone: "UTC".into(),
             starts_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
@@ -219,6 +286,36 @@ mod tests {
         let mut r = rule("daily");
         r.ends_on = NaiveDate::from_ymd_opt(2026, 1, 3);
         assert_eq!(r.next_after(utc("2026-01-03T09:00:00Z")), None);
+    }
+
+    #[test]
+    fn monthly_on_the_second_tuesday_and_the_last_friday() {
+        let mut r = rule("monthly");
+        r.week_of_month = Some(2);
+        r.weekdays = vec![2];
+        assert_eq!(r.next_after(utc("2026-11-01T00:00:00Z")), Some(utc("2026-11-10T09:00:00Z")));
+        assert_eq!(r.next_after(utc("2026-11-10T09:00:00Z")), Some(utc("2026-12-08T09:00:00Z")));
+        r.week_of_month = Some(-1);
+        r.weekdays = vec![5];
+        assert_eq!(r.next_after(utc("2026-11-01T00:00:00Z")), Some(utc("2026-11-27T09:00:00Z")));
+        assert_eq!(r.describe(), "Every month on the last Fri at 09:00");
+    }
+
+    #[test]
+    fn yearly_by_date_and_by_weekday() {
+        let mut r = rule("yearly");
+        r.month = Some(3);
+        r.month_day = Some(14);
+        assert_eq!(r.next_after(utc("2026-03-14T10:00:00Z")), Some(utc("2027-03-14T09:00:00Z")));
+        assert_eq!(r.describe(), "Every year on 14 Mar at 09:00");
+        r.month_day = None;
+        r.month = Some(11);
+        r.week_of_month = Some(4);
+        r.weekdays = vec![4]; // the fourth Thursday of November
+        assert_eq!(r.next_after(utc("2026-01-01T00:00:00Z")), Some(utc("2026-11-26T09:00:00Z")));
+        assert!(r.validate().is_ok());
+        r.month = None;
+        assert!(r.validate().is_err());
     }
 
     #[test]

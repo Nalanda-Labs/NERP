@@ -7,6 +7,10 @@
 
 mod absences;
 mod checkin;
+mod myday;
+pub mod reports;
+mod shifts;
+mod sign;
 mod time;
 
 use axum::{
@@ -37,6 +41,10 @@ pub fn router() -> Router<AppState> {
         .merge(time::router())
         .merge(absences::router())
         .merge(checkin::router())
+        .merge(reports::router())
+        .merge(myday::router())
+        .merge(shifts::router())
+        .merge(sign::router())
 }
 
 pub(crate) fn hr_manager(auth: &AuthUser) -> bool {
@@ -50,7 +58,7 @@ pub(crate) async fn managed(state: &AppState, auth: &AuthUser) -> AppResult<Opti
     }
     Ok(Some(
         sqlx::query_scalar(
-            "WITH RECURSIVE mine AS (SELECT id FROM departments WHERE head_user_id = $1
+            "WITH RECURSIVE mine AS (SELECT id FROM departments WHERE head_user_id = $1 OR deputy_user_id = $1
                                      UNION SELECT d.id FROM departments d JOIN mine m ON d.parent_id = m.id)
              SELECT DISTINCT ud.user_id FROM user_departments ud JOIN users u ON u.id = ud.user_id
              WHERE ud.department_id IN (SELECT id FROM mine) AND ud.user_id <> $1 AND u.is_active",
@@ -71,15 +79,16 @@ pub(crate) async fn manages(state: &AppState, auth: &AuthUser, user: Uuid) -> Ap
     })
 }
 
-/// Who decides someone's time off: the nearest heads above them (not themselves), or HR
+/// Who decides someone's time off: the nearest heads (and deputies) above them (not themselves), or HR
 /// managers when there are none.
 pub(crate) async fn approvers(state: &AppState, user: Uuid) -> AppResult<Vec<Uuid>> {
     // Heads above the person, with how many levels up; the nearest ones decide.
     let above: Vec<(Uuid, i32)> = sqlx::query_as(
         "WITH RECURSIVE up AS (
-             SELECT d.parent_id, d.head_user_id, 0 AS n FROM departments d JOIN user_departments ud ON ud.department_id = d.id WHERE ud.user_id = $1
-             UNION ALL SELECT p.parent_id, p.head_user_id, up.n + 1 FROM departments p JOIN up ON p.id = up.parent_id)
-         SELECT up.head_user_id, up.n FROM up JOIN users u ON u.id = up.head_user_id WHERE up.head_user_id <> $1 AND u.is_active",
+             SELECT d.parent_id, d.head_user_id, d.deputy_user_id, 0 AS n FROM departments d JOIN user_departments ud ON ud.department_id = d.id WHERE ud.user_id = $1
+             UNION ALL SELECT p.parent_id, p.head_user_id, p.deputy_user_id, up.n + 1 FROM departments p JOIN up ON p.id = up.parent_id),
+              who AS (SELECT head_user_id AS h, n FROM up UNION ALL SELECT deputy_user_id, n FROM up)
+         SELECT who.h, who.n FROM who JOIN users u ON u.id = who.h WHERE who.h <> $1 AND u.is_active",
     )
     .bind(user)
     .fetch_all(&state.db)

@@ -71,7 +71,7 @@ try {
   ok('unshared', (await bob.get(`/drive/nodes/${plan.id}`)).status === 404);
 
   // ---- public links ----
-  ok('links are for files', (await ann.post(`/drive/nodes/${projects.id}/links`, {})).status === 400);
+  ok('folders can have links too (see api73)', (await ann.post(`/drive/nodes/${projects.id}/links`, {})).status === 200);
   r = await ann.post(`/drive/nodes/${plan.id}/links`, { expires_days: 7 });
   const token = r.data.url.split('/d/')[1];
   ok('a link', r.data.links.length === 1 && token.length >= 30);

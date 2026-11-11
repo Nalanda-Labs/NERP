@@ -2,6 +2,8 @@
 	import { api } from '#lib/api.ts';
 	import Avatar from '#lib/components/Avatar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import AppPasswordsCard from '#lib/components/AppPasswordsCard.svelte';
+	import LinkedAccountsCard from '#lib/components/LinkedAccountsCard.svelte';
 	import SessionsCard from '#lib/components/SessionsCard.svelte';
 	import TwoFactorCard from '#lib/components/TwoFactorCard.svelte';
 	import { session } from '#lib/session.svelte.ts';
@@ -166,5 +168,7 @@
 	</form>
 
 	<TwoFactorCard />
+	<LinkedAccountsCard />
 	<SessionsCard />
+	<AppPasswordsCard />
 </div>

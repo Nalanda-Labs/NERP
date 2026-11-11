@@ -45,6 +45,9 @@ pub struct Stage {
     /// Time limit for records in this stage, in minutes.
     pub sla_minutes: Option<i32>,
     pub sla_escalate: bool,
+    /// Fields a record needs before it enters this stage: standard ones by name, custom ones
+    /// as "uf.<code>".
+    pub required_fields: Vec<String>,
 }
 
 #[derive(Serialize, FromRow)]
@@ -64,7 +67,7 @@ pub async fn categories(state: &AppState, entity_type: i16) -> AppResult<Vec<Cat
         .await?;
     let ids: Vec<Uuid> = cats.iter().map(|c| c.id).collect();
     let stages: Vec<Stage> = sqlx::query_as(
-        "SELECT id, category_id, name, color, sort, semantics, sla_minutes, sla_escalate FROM crm_stages WHERE category_id = ANY($1) ORDER BY sort, name",
+        "SELECT id, category_id, name, color, sort, semantics, sla_minutes, sla_escalate, required_fields FROM crm_stages WHERE category_id = ANY($1) ORDER BY sort, name",
     )
     .bind(&ids)
     .fetch_all(&state.db)
@@ -76,7 +79,7 @@ pub async fn categories(state: &AppState, entity_type: i16) -> AppResult<Vec<Cat
 }
 
 pub async fn stage(state: &AppState, id: Uuid) -> AppResult<Stage> {
-    sqlx::query_as("SELECT id, category_id, name, color, sort, semantics, sla_minutes, sla_escalate FROM crm_stages WHERE id = $1")
+    sqlx::query_as("SELECT id, category_id, name, color, sort, semantics, sla_minutes, sla_escalate, required_fields FROM crm_stages WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
         .await?
@@ -274,6 +277,7 @@ struct UpdateStage {
     #[serde(default, deserialize_with = "crate::routes::double_option")]
     sla_minutes: Option<Option<i32>>,
     sla_escalate: Option<bool>,
+    required_fields: Option<Vec<String>>,
 }
 
 async fn update_stage(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(body): Json<UpdateStage>) -> AppResult<Json<Value>> {
@@ -299,6 +303,15 @@ async fn update_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
     }
     if let Some(e) = body.sla_escalate {
         sqlx::query("UPDATE crm_stages SET sla_escalate = $1 WHERE id = $2").bind(e).bind(id).execute(&state.db).await?;
+    }
+    if let Some(f) = &body.required_fields {
+        let ok = |c: &str| super::items::REQUIRABLE.iter().any(|(k, _)| *k == c) || c.strip_prefix("uf.").is_some_and(|u| !u.is_empty() && u.len() <= 64 && u.chars().all(|x| x.is_ascii_alphanumeric() || x == '_'));
+        if f.len() > 40 || f.iter().any(|c| !ok(c)) {
+            return Err(AppError::bad("unknown field among the required ones"));
+        }
+        let mut f = f.clone();
+        f.dedup();
+        sqlx::query("UPDATE crm_stages SET required_fields = $1 WHERE id = $2").bind(&f).bind(id).execute(&state.db).await?;
     }
     Ok(Json(json!({ "categories": categories(&state, t).await? })))
 }

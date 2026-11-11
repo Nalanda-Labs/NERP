@@ -15,6 +15,8 @@ export interface CrmStage {
 	/** Time limit for records in this stage, in minutes. */
 	sla_minutes: number | null;
 	sla_escalate: boolean;
+	/** Fields that must be filled in before a record enters this stage. */
+	required_fields?: string[];
 }
 export interface CrmCategory {
 	id: string;

@@ -5,7 +5,7 @@
 	import { onDestroy, tick } from 'svelte';
 	import { api } from '#lib/api.ts';
 
-	type Info = { title: string; greeting: string; color: string; ask_details: boolean };
+	type Info = { title: string; greeting: string; color: string; ask_details: boolean; online: boolean; offline_message: string | null; consent_text: string | null; ask_rating: boolean };
 	type Msg = { id: string; author: 'visitor' | 'operator' | 'system'; body: string; name: string | null; created_at: string };
 	const key = $derived(page.params.key ?? '');
 	const storeKey = $derived(`nerp.chat.${key}`);
@@ -16,7 +16,10 @@
 	let messages = $state<Msg[]>([]);
 	let status = $state<'open' | 'closed'>('open');
 	let operator = $state<string | null>(null);
-	let details = $state({ name: '', email: '' });
+	let details = $state({ name: '', email: '', consent: false });
+	let rating = $state<number | null>(null);
+	let stars = $state(0);
+	let comment = $state('');
 	let draft = $state('');
 	let error = $state('');
 	let busy = $state(false);
@@ -45,7 +48,7 @@
 				info = i;
 				token = saved();
 				if (token) await refresh(true);
-				else if (!i.ask_details) await begin();
+				else if (!i.ask_details && !i.consent_text) await begin();
 			})
 			.catch(() => (missing = true));
 	});
@@ -58,11 +61,12 @@
 		if (!token) return;
 		const after = !all && messages.length ? messages[messages.length - 1].created_at : undefined;
 		try {
-			const r = await api.get<{ status: 'open' | 'closed'; operator: string | null; messages: Msg[] }>(
+			const r = await api.get<{ status: 'open' | 'closed'; operator: string | null; messages: Msg[]; rating: number | null }>(
 				`/public/chat/${encodeURIComponent(key)}/session?token=${encodeURIComponent(token)}${after ? `&after=${encodeURIComponent(after)}` : ''}`
 			);
 			status = r.status;
 			operator = r.operator;
+			rating = r.rating;
 			if (all) messages = r.messages;
 			else if (r.messages.length) messages = [...messages, ...r.messages.filter((m) => !messages.some((x) => x.id === m.id))];
 			if (r.messages.length || all) scrollDown();
@@ -117,7 +121,20 @@
 		remember(null);
 		messages = [];
 		status = 'open';
-		if (!info?.ask_details) begin();
+		rating = null;
+		stars = 0;
+		comment = '';
+		if (!info?.ask_details && !info?.consent_text) begin();
+	}
+	async function rate(e: SubmitEvent) {
+		e.preventDefault();
+		if (!token || !stars) return;
+		try {
+			await api.post(`/public/chat/${encodeURIComponent(key)}/rate`, { token, rating: stars, comment: comment || null });
+			rating = stars;
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
 	}
 	const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 	function keydown(e: KeyboardEvent) {
@@ -136,14 +153,18 @@
 	{:else if info}
 		<header class="px-5 py-4 text-white" style="background:{info.color}">
 			<h1 class="font-semibold">{info.title}</h1>
-			<p class="text-sm opacity-90">{operator ? `You're chatting with ${operator}` : 'We usually reply in a few minutes'}</p>
+			<p class="text-sm opacity-90">{operator ? `You're chatting with ${operator}` : info.online ? 'We usually reply in a few minutes' : 'We are away right now'}</p>
 		</header>
 
 		{#if !token}
 			<form class="m-auto w-full max-w-sm space-y-3 p-6" onsubmit={begin} aria-label="Start a chat">
 				<p class="text-sm text-slate-700">{info.greeting}</p>
-				<div><label class="label" for="ch-name">Your name</label><input id="ch-name" class="input" required maxlength="120" autocomplete="name" bind:value={details.name} /></div>
-				<div><label class="label" for="ch-email">Email <span class="font-normal text-slate-400">(so we can reply if you leave)</span></label><input id="ch-email" class="input" type="email" maxlength="254" autocomplete="email" bind:value={details.email} /></div>
+				{#if !info.online && info.offline_message}<p class="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900" data-offline>{info.offline_message}</p>{/if}
+				{#if info.ask_details}
+					<div><label class="label" for="ch-name">Your name</label><input id="ch-name" class="input" required maxlength="120" autocomplete="name" bind:value={details.name} /></div>
+					<div><label class="label" for="ch-email">Email <span class="font-normal text-slate-400">(so we can reply if you leave)</span></label><input id="ch-email" class="input" type="email" maxlength="254" autocomplete="email" bind:value={details.email} /></div>
+				{/if}
+				{#if info.consent_text}<label class="flex items-start gap-2 text-sm text-slate-700"><input type="checkbox" class="mt-0.5 rounded border-slate-300" required bind:checked={details.consent} /> <span class="whitespace-pre-line">{info.consent_text}</span></label>{/if}
 				{#if error}<p class="text-sm text-red-700" role="alert">{error}</p>{/if}
 				<button class="btn w-full justify-center text-white" style="background:{info.color}" disabled={busy}>Start chat</button>
 			</form>
@@ -176,6 +197,19 @@
 			{:else}
 				<div class="border-t border-slate-100 p-4 text-center text-sm text-slate-600">
 					<p>This chat has ended. Thank you!</p>
+					{#if info.ask_rating && messages.length}
+						{#if rating}
+							<p class="mt-2" data-rated>You rated it {rating} out of 5. Thanks!</p>
+						{:else}
+							<form class="mt-2 space-y-2" onsubmit={rate} aria-label="Rate the chat">
+								<p>How did we do?</p>
+								<div class="flex justify-center gap-1" role="group" aria-label="Rating">
+									{#each [1, 2, 3, 4, 5] as n (n)}<button type="button" class="text-2xl {n <= stars ? 'text-amber-400' : 'text-slate-300'}" aria-label="{n} out of 5" aria-pressed={n === stars} onclick={() => (stars = n)}>★</button>{/each}
+								</div>
+								{#if stars}<textarea class="input" rows="2" maxlength="2000" placeholder="Anything to add? (optional)" aria-label="Comment" bind:value={comment}></textarea><button class="btn text-white" style="background:{info.color}">Send</button>{/if}
+							</form>
+						{/if}
+					{/if}
 					<button class="mt-2 font-medium hover:underline" style="color:{info.color}" onclick={again}>Start a new chat</button>
 				</div>
 			{/if}

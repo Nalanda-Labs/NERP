@@ -93,10 +93,12 @@ pub struct Failure {
     pub snippet: Option<String>,
 }
 
-pub async fn send(state: &AppState, r: Request<'_>) -> Result<Response, Failure> {
+/// An HTTP client pinned to the URL's resolved addresses, refusing internal ones (unless
+/// CRM_WEBHOOK_ALLOW_PRIVATE), without redirects.
+async fn pinned_client(state: &AppState, url: &reqwest::Url, timeout_secs: u64) -> Result<reqwest::Client, Failure> {
     let fail = |msg: String, retry: bool| Failure { msg, retry, status: None, snippet: None };
-    let host = r.url.host_str().unwrap_or("").trim_start_matches('[').trim_end_matches(']').to_string();
-    let port = r.url.port_or_known_default().unwrap_or(443);
+    let host = url.host_str().unwrap_or("").trim_start_matches('[').trim_end_matches(']').to_string();
+    let port = url.port_or_known_default().unwrap_or(443);
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
         .await
         .map_err(|e| fail(format!("cannot resolve {host}: {e}"), true))?
@@ -108,14 +110,42 @@ pub async fn send(state: &AppState, r: Request<'_>) -> Result<Response, Failure>
         return Err(fail(format!("{host} is a private network address; only public addresses may be called (see CRM_WEBHOOK_ALLOW_PRIVATE)"), false));
     }
     let tls = crate::crm::email::imap::client_config(false).map_err(|e| fail(e, false))?;
-    let client = reqwest::Client::builder()
+    reqwest::Client::builder()
         .tls_backend_preconfigured(tls)
-        .timeout(std::time::Duration::from_secs(r.timeout_secs))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(&host, &addrs)
         .user_agent("NERP/1")
         .build()
-        .map_err(|e| fail(e.to_string(), false))?;
+        .map_err(|e| fail(e.to_string(), false))
+}
+
+/// GETs a URL's whole body (at most `max_bytes`): (content type, body).
+pub async fn fetch(state: &AppState, url: &reqwest::Url, headers: &[(String, String)], max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>), String> {
+    let client = pinned_client(state, url, timeout_secs).await.map_err(|f| f.msg)?;
+    let mut req = client.get(url.clone());
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    let mut res = req.send().await.map_err(|e| if e.is_timeout() { format!("no answer within {timeout_secs} s") } else { e.to_string() })?;
+    if !res.status().is_success() {
+        return Err(format!("the server answered {}", res.status()));
+    }
+    let ct = res.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let mut body = Vec::new();
+    while let Some(chunk) = res.chunk().await.map_err(|e| e.to_string())? {
+        body.extend_from_slice(&chunk);
+        if body.len() > max_bytes {
+            return Err(format!("the file is larger than {} MB", max_bytes / 1_000_000));
+        }
+    }
+    Ok((ct, body))
+}
+
+pub async fn send(state: &AppState, r: Request<'_>) -> Result<Response, Failure> {
+    let host = r.url.host_str().unwrap_or("").trim_start_matches('[').trim_end_matches(']').to_string();
+    let client = pinned_client(state, &r.url, r.timeout_secs).await?;
+    let fail = |msg: String, retry: bool| Failure { msg, retry, status: None, snippet: None };
     let method = r.method.clone();
     let mut req = client.request(r.method, r.url.clone());
     for (k, v) in &r.headers {

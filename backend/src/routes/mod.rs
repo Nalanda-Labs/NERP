@@ -1,8 +1,12 @@
 pub mod admin;
 pub mod audit;
 pub mod auth;
+pub mod backups;
 pub mod departments;
 pub mod files;
+pub mod join;
+pub mod storage;
+pub mod ui_prefs;
 pub mod roles;
 pub mod settings;
 pub mod security;
@@ -20,6 +24,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/health", get(health))
         .merge(setup::router())
         .merge(auth::router())
+        .merge(crate::auth::app_passwords::router())
         .merge(users::router())
         .merge(departments::router())
         .merge(roles::router())
@@ -38,6 +43,16 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(crate::inventory::router())
         .merge(crate::chat::router())
         .merge(crate::calendar::router())
+        .merge(crate::boards::router())
+        .merge(join::router())
+        .merge(storage::router())
+        .merge(backups::router())
+        .merge(ui_prefs::router())
+        .merge(crate::site_tools::router())
+        .merge(crate::guests::router())
+        .merge(crate::solutions::router())
+        .merge(crate::bi::router())
+        .merge(crate::office::router())
         .merge(crate::im::router())
         .merge(crate::feed::router())
         .merge(crate::kb::router())

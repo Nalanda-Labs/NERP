@@ -45,6 +45,8 @@ pub struct Config {
     pub ldap_enabled: bool,
     /// A LiveKit media server for calls (and recording them); None: browsers connect directly.
     pub livekit: Option<LiveKitConfig>,
+    /// Collabora Online (e.g. http://127.0.0.1:9980) for editing office files; off when unset.
+    pub collabora_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +95,10 @@ pub struct OAuthConfig {
     pub microsoft: Option<OAuthClient>,
     /// Azure tenant: "common" (any work or personal account), "organizations", or a tenant id.
     pub microsoft_tenant: String,
+    /// Google's CalDAV address for calendar sync (overridable for tests).
+    pub google_caldav_url: String,
+    /// Microsoft Graph for calendar sync (overridable for tests).
+    pub microsoft_graph_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -206,10 +212,13 @@ impl Config {
                 anyhow::ensure!(v.is_array(), "WEBRTC_ICE_SERVERS must be a JSON list");
                 v
             },
+            collabora_url: env::var("COLLABORA_URL").ok().map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty()),
             oauth: OAuthConfig {
                 google: oauth_client("GOOGLE"),
                 microsoft: oauth_client("MICROSOFT"),
                 microsoft_tenant: var_or("MICROSOFT_TENANT", "common"),
+                google_caldav_url: var_or("GOOGLE_CALDAV_URL", "https://apidata.googleusercontent.com/caldav/v2").trim_end_matches('/').to_string(),
+                microsoft_graph_url: var_or("MICROSOFT_GRAPH_URL", "https://graph.microsoft.com/v1.0").trim_end_matches('/').to_string(),
             },
             docs: DocsConfig {
                 lualatex_bin: var_or("LUALATEX_BIN", "lualatex"),

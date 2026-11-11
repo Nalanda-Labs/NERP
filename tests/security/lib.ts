@@ -12,6 +12,16 @@ export const ok = (name: string, cond: unknown, extra: unknown = '') => {
   cond ? pass++ : fail++;
   console.log(cond ? 'ok  ' : 'FAIL', name, cond ? '' : String(typeof extra === 'string' ? extra : JSON.stringify(extra)).slice(0, 700));
 };
+/** A check in a sweep of thousands: counted like `ok`, but only failures are printed (the
+ *  first 60, then a count). */
+let shown = 0;
+export const check = (name: string, cond: unknown, extra: unknown = '') => {
+  if (cond) return void pass++;
+  fail++;
+  if (++shown <= 60) console.log('FAIL', name, String(typeof extra === 'string' ? extra : JSON.stringify(extra)).slice(0, 300));
+  else if (shown === 61) console.log('FAIL … (more failures not shown)');
+};
+export const counts = () => ({ pass, fail });
 export const finish = async () => {
   await cleanupRun(stamp);
   console.log(`\n${pass} passed, ${fail} failed`);

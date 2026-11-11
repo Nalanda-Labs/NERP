@@ -63,13 +63,15 @@
 	let formOpen = $state(false);
 	let editing = $state<Department | null>(null);
 	let saving = $state(false);
-	let form = $state({ name: '', description: '', parent_id: '' as string, head_user_id: null as string | null, sort: 100 });
+	let form = $state({ name: '', description: '', parent_id: '' as string, head_user_id: null as string | null, deputy_user_id: null as string | null, sort: 100, hidden: false });
 	let headLabel = $state<string | null>(null);
+	let deputyLabel = $state<string | null>(null);
 
 	function openCreate(parent: Department | null) {
 		editing = null;
-		form = { name: '', description: '', parent_id: parent?.id ?? '', head_user_id: null, sort: 100 };
+		form = { name: '', description: '', parent_id: parent?.id ?? '', head_user_id: null, deputy_user_id: null, sort: 100, hidden: false };
 		headLabel = null;
+		deputyLabel = null;
 		formOpen = true;
 	}
 
@@ -80,9 +82,12 @@
 			description: d.description ?? '',
 			parent_id: d.parent_id ?? '',
 			head_user_id: d.head_user_id,
-			sort: d.sort
+			deputy_user_id: d.deputy_user_id ?? null,
+			sort: d.sort,
+			hidden: !!d.hidden
 		};
 		headLabel = d.head_name;
+		deputyLabel = d.deputy_name ?? null;
 		formOpen = true;
 	}
 
@@ -232,6 +237,9 @@
 						{:else}
 							<p class="text-sm text-slate-500">No head of department assigned.</p>
 						{/if}
+						{#if selected.deputy_user_id && selected.deputy_name}
+							<div class="ml-6"><p class="text-xs text-slate-500">Deputy</p><a href="/employees/{selected.deputy_user_id}" class="font-medium text-slate-800 hover:underline" data-deputy>{selected.deputy_name}</a></div>
+						{/if}
 					</div>
 				</section>
 
@@ -294,8 +302,16 @@
 				{/if}
 			</div>
 		</div>
+		<div>
+			<label class="label" for="d-deputy">Deputy head <span class="font-normal text-slate-400">(manages and approves with the head)</span></label>
+			<div class="flex gap-2">
+				<div class="flex-1"><UserPicker bind:value={form.deputy_user_id} bind:label={deputyLabel} /></div>
+				{#if form.deputy_user_id}<button type="button" class="btn btn-secondary" onclick={() => ((form.deputy_user_id = null), (deputyLabel = null))}>Clear</button>{/if}
+			</div>
+		</div>
 		<div><label class="label" for="d-desc">Description</label><textarea id="d-desc" class="input" rows="3" bind:value={form.description}></textarea></div>
 		<div class="w-32"><label class="label" for="d-sort">Sort order</label><input id="d-sort" type="number" class="input" bind:value={form.sort} /></div>
+		<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300" bind:checked={form.hidden} data-dept-hidden /> Hidden: only its own people (and administrators) see it</label>
 	</form>
 	{#snippet footer()}
 		<button class="btn btn-secondary" onclick={() => (formOpen = false)}>Cancel</button>

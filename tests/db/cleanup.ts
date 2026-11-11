@@ -226,6 +226,11 @@ export async function cleanup({ yes = true, stamp = null } = {}) {
     }
   }
   await each('products', await named(`SELECT id, name FROM crm_products WHERE name ${STAMP_SQL}`), (p) => call('DELETE', `/crm/products/${p.id}`));
+  for (const [label, table, col] of [['HR document templates', 'hr_doc_templates', 'name'], ['shifts', 'hr_shifts', 'name'], ['saved chat replies', 'chat_canned', 'shortcut'], ['boards', 'boards', 'title'], ['BI dashboards', 'bi_dashboards', 'title'], ['BI datasets', 'bi_datasets', 'name'], ['BI databases', 'bi_sources', 'name'], ['join links', 'join_links', 'note']]) {
+    const found = (await rows(`SELECT id, ${col} AS name FROM ${table} WHERE ${col} ${STAMP_SQL}`)).filter((r) => stamped(r.name));
+    report.push(`${String(found.length).padStart(5)}  ${label}`);
+    if (yes && found.length) await db.query(`DELETE FROM ${table} WHERE id = ANY($1)`, [found.map((f) => f.id)]);
+  }
   {
     const evs = (await rows(`SELECT id, title AS name FROM cal_events WHERE title ${STAMP_SQL}`)).filter((r) => stamped(r.name));
     report.push(`${String(evs.length).padStart(5)}  calendar events`);

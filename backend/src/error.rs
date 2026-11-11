@@ -25,6 +25,9 @@ pub enum AppError {
     TooManyRequests(String),
     #[error("{0}")]
     PayloadTooLarge(String),
+    /// Refused by a company rule (an IP address outside the allowed ranges).
+    #[error("{0}")]
+    Blocked(String),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
@@ -52,6 +55,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             AppError::InvalidCredentials(_) => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::Blocked(_) => (StatusCode::FORBIDDEN, "blocked"),
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             AppError::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests"),

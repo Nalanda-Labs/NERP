@@ -23,6 +23,7 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/users", get(list_users).post(create_user))
+        .route("/users/export.csv", get(export_users))
         .route("/users/{id}", get(get_user).patch(update_user))
         .route("/users/{id}/roles", put(set_roles))
         .route("/users/{id}/password", post(reset_password))
@@ -55,12 +56,14 @@ struct UserRow {
     two_factor_enabled: bool,
     last_login_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
+    last_seen_at: Option<DateTime<Utc>>,
+    is_guest: bool,
 }
 
 const USER_COLUMNS: &str = "u.id, u.email, u.first_name, u.last_name, u.middle_name, u.position, \
     u.phone, u.mobile, u.birthday, u.gender, u.about, u.avatar_file_id, u.timezone, u.locale, \
     u.is_active, u.invite_pending, u.invited_at, (u.totp_secret IS NOT NULL) AS two_factor_enabled, \
-    u.last_login_at, u.created_at";
+    u.last_login_at, u.created_at, u.last_seen_at, u.is_guest";
 
 #[derive(Debug, Serialize, Clone, FromRow)]
 pub struct Ref {
@@ -95,10 +98,15 @@ pub struct User {
     pub is_active: bool,
     /// Invited but has not yet accepted (cannot sign in).
     pub invite_pending: bool,
+    /// Someone from outside the company, in the chats and workgroups they were invited to.
+    pub is_guest: bool,
     pub invited_at: Option<DateTime<Utc>>,
     pub two_factor_enabled: bool,
     pub last_login_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Last active, and whether that was in the last five minutes.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub online: bool,
     pub departments: Vec<Ref>,
     pub roles: Vec<RoleRef>,
 }
@@ -154,10 +162,13 @@ async fn hydrate(state: &AppState, rows: Vec<UserRow>) -> AppResult<Vec<User>> {
             locale: r.locale,
             is_active: r.is_active,
             invite_pending: r.invite_pending,
+            is_guest: r.is_guest,
             invited_at: r.invited_at,
             two_factor_enabled: r.two_factor_enabled,
             last_login_at: r.last_login_at,
             created_at: r.created_at,
+            online: r.last_seen_at.is_some_and(|t| Utc::now() - t < chrono::Duration::minutes(5)),
+            last_seen_at: r.last_seen_at,
         })
         .collect())
 }
@@ -180,6 +191,9 @@ pub struct ListQuery {
     role_id: Option<Uuid>,
     /// active (default) | inactive | all — anything but "active" needs users.manage.
     status: Option<String>,
+    /// Pickers include guests (the directory does not).
+    #[serde(default)]
+    with_guests: bool,
     #[serde(flatten)]
     page: PageParams,
 }
@@ -197,7 +211,10 @@ async fn list_users(
 
     let build = |select: &str| {
         let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(select);
-        qb.push(" FROM users u WHERE NOT u.is_system");
+        qb.push(" FROM users u WHERE NOT u.is_system AND NOT u.join_pending");
+        if !q.with_guests {
+            qb.push(" AND NOT u.is_guest");
+        }
         match status {
             "inactive" => {
                 qb.push(" AND u.is_active = FALSE");
@@ -389,7 +406,10 @@ async fn create_user(
     ClientIp(ip): ClientIp,
     Json(body): Json<CreateUser>,
 ) -> AppResult<Json<User>> {
-    auth.require(perm::USERS_MANAGE)?;
+    // Inviting by email is enough for those who may only invite.
+    if !(auth.can(perm::USERS_INVITE) && body.send_invite && body.role_ids.is_empty()) {
+        auth.require(perm::USERS_MANAGE)?;
+    }
     if !body.role_ids.is_empty() {
         auth.require(perm::ROLES_MANAGE)?;
     }
@@ -749,7 +769,9 @@ async fn resend_invite(
     ClientIp(ip): ClientIp,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
-    auth.require(perm::USERS_MANAGE)?;
+    if !auth.can(perm::USERS_INVITE) {
+        auth.require(perm::USERS_MANAGE)?;
+    }
     let user = fetch_user(&state, id).await?;
     if !user.is_active {
         return Err(AppError::bad("reactivate this employee before inviting them"));
@@ -820,4 +842,30 @@ async fn update_profile(
     qb.push(" WHERE id = ").push_bind(auth.id);
     qb.build().execute(&state.db).await?;
     Ok(Json(fetch_user(&state, auth.id).await?))
+}
+
+pub(crate) fn csv_cell(s: &str) -> String {
+    // Cells a spreadsheet would run as a formula are made plain text.
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() };
+    if s.contains([',', '"', '\n', '\r']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s }
+}
+
+/// The employee list as CSV (opens in Excel), for those who may see employees.
+async fn export_users(State(state): State<AppState>, auth: AuthUser) -> AppResult<axum::response::Response> {
+    auth.require(perm::USERS_VIEW)?;
+    let rows: Vec<UserRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {USER_COLUMNS} FROM users u WHERE u.is_active ORDER BY u.last_name, u.first_name"))).fetch_all(&state.db).await?;
+    let users = hydrate(&state, rows).await?;
+    let mut out = String::from("\u{feff}First name,Last name,Email,Position,Departments,Phone,Mobile,Birthday\r\n");
+    for u in users {
+        let cells = [
+            u.first_name, u.last_name, u.email, u.position.unwrap_or_default(), u.departments.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join("; "),
+            u.phone.unwrap_or_default(), u.mobile.unwrap_or_default(), u.birthday.map(|b| b.to_string()).unwrap_or_default(),
+        ];
+        out.push_str(&cells.iter().map(|c| csv_cell(c)).collect::<Vec<_>>().join(","));
+        out.push_str("\r\n");
+    }
+    let mut res = axum::response::IntoResponse::into_response(out);
+    res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/csv; charset=utf-8"));
+    res.headers_mut().insert(axum::http::header::CONTENT_DISPOSITION, axum::http::HeaderValue::from_static("attachment; filename=\"employees.csv\""));
+    Ok(res)
 }

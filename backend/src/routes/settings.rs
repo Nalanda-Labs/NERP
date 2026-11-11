@@ -22,6 +22,14 @@ fn defaults() -> Map<String, Value> {
     m.insert("week_start".into(), json!("monday"));
     // Everyone must use a code from an authenticator app when signing in.
     m.insert("require_two_factor".into(), json!(false));
+    // NERP may be used only from these address ranges (empty: from anywhere), and whether
+    // administrators may still use it from elsewhere.
+    m.insert("ip_allow".into(), json!([]));
+    m.insert("ip_allow_admins_exempt".into(), json!(true));
+    // Whether people may make links to files, boards and dashboards for anyone to open.
+    m.insert("public_links".into(), json!(true));
+    // Chat messages older than this are deleted (null: kept).
+    m.insert("chat_retention_days".into(), Value::Null);
     // Seller details printed on quotes and invoices.
     for k in SELLER_KEYS {
         m.insert((*k).into(), json!(""));
@@ -34,9 +42,32 @@ pub const SELLER_KEYS: &[&str] = &[
     "company_email", "company_website", "company_bank_details", "company_logo_file_id",
 ];
 
+/// Settings only administrators see (the others see their defaults' absence).
+const PRIVATE: &[&str] = &["ip_allow", "ip_allow_admins_exempt"];
+
 fn validate(key: &str, value: &Value) -> AppResult<()> {
-    if key == "require_two_factor" {
-        return if value.is_boolean() { Ok(()) } else { Err(AppError::bad("require_two_factor must be true or false")) };
+    if key == "ip_allow" {
+        let list = value.as_array().ok_or_else(|| AppError::bad("ip_allow is a list of addresses or ranges"))?;
+        if list.len() > 200 {
+            return Err(AppError::bad("at most 200 address ranges"));
+        }
+        for v in list {
+            let s = v.as_str().unwrap_or("");
+            if crate::auth::ip::parse_range(s).is_none() {
+                return Err(AppError::bad(format!("“{s}” is not an IP address or range (such as 192.168.1.0/24)")));
+            }
+        }
+        return Ok(());
+    }
+    if key == "chat_retention_days" {
+        return match value {
+            Value::Null => Ok(()),
+            v if v.as_i64().is_some_and(|d| (1..=3650).contains(&d)) => Ok(()),
+            _ => Err(AppError::bad("keep chat messages 1 to 3650 days, or always")),
+        };
+    }
+    if matches!(key, "require_two_factor" | "ip_allow_admins_exempt" | "public_links") {
+        return if value.is_boolean() { Ok(()) } else { Err(AppError::bad(format!("{key} must be true or false"))) };
     }
     if SELLER_KEYS.contains(&key) {
         let s = value.as_str().ok_or_else(|| AppError::bad(format!("{key} must be text")))?;
@@ -78,8 +109,25 @@ pub(crate) async fn load(state: &AppState) -> AppResult<Map<String, Value>> {
     Ok(out)
 }
 
-async fn get_settings(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Map<String, Value>>> {
-    Ok(Json(load(&state).await?))
+async fn get_settings(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Map<String, Value>>> {
+    let mut all = load(&state).await?;
+    if !auth.can(perm::SETTINGS_MANAGE) {
+        for k in PRIVATE {
+            all.remove(*k);
+        }
+    }
+    Ok(Json(all))
+}
+
+/// Whether links anyone can open are allowed.
+pub async fn public_links_allowed(state: &AppState) -> AppResult<bool> {
+    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'public_links'").fetch_optional(&state.db).await?;
+    Ok(v.and_then(|v| v.as_bool()).unwrap_or(true))
+}
+
+/// Refuses making a public link when they are switched off.
+pub async fn require_public_links(state: &AppState) -> AppResult<()> {
+    if public_links_allowed(state).await? { Ok(()) } else { Err(AppError::Blocked("links for anyone are switched off for the company".into())) }
 }
 
 async fn put_settings(
@@ -91,6 +139,15 @@ async fn put_settings(
     auth.require(perm::SETTINGS_MANAGE)?;
     for (k, v) in &body {
         validate(k, v)?;
+    }
+    // A list that would shut out the person saving it is refused.
+    if body.contains_key("ip_allow") || body.contains_key("ip_allow_admins_exempt") {
+        let now = load(&state).await?;
+        let get = |k: &str| body.get(k).or_else(|| now.get(k)).cloned().unwrap_or(Value::Null);
+        let rules = crate::auth::ip::Rules::from_settings(&get("ip_allow"), &get("ip_allow_admins_exempt"));
+        if !rules.allows(ip.as_deref(), |p| auth.can(p)) {
+            return Err(AppError::bad(format!("this would lock you out: your address ({}) is not in the list", ip.as_deref().unwrap_or("unknown"))));
+        }
     }
     let mut tx = state.db.begin().await?;
     for (k, v) in &body {
@@ -109,5 +166,6 @@ async fn put_settings(
     }
     audit::record(&mut *tx, Some(auth.id), "settings.update", "settings", None, Value::Object(body), ip.as_deref()).await;
     tx.commit().await?;
+    crate::auth::ip::forget();
     Ok(Json(load(&state).await?))
 }

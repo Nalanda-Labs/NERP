@@ -24,6 +24,10 @@ pub struct Email {
     /// Stored files to attach (ids in the `files` table).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<uuid::Uuid>,
+    /// An iCalendar invitation, update or cancellation (with its METHOD), sent as a calendar
+    /// part mail apps show as "Accept / Decline", and as invite.ics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<String>,
 }
 
 /// A file attached to an outgoing email.
@@ -67,7 +71,14 @@ impl Mailer {
             .from(self.from.clone())
             .to(email.to.parse().with_context(|| format!("invalid recipient {}", email.to))?)
             .subject(&email.subject);
-        let body = MultiPart::alternative_plain_html(email.text.clone(), email.html.clone());
+        let mut body = MultiPart::alternative_plain_html(email.text.clone(), email.html.clone());
+        let mut attachments = attachments;
+        if let Some(ics) = &email.calendar {
+            let method = ics.lines().find_map(|l| l.strip_prefix("METHOD:")).unwrap_or("PUBLISH").trim().to_string();
+            let ctype = lettre::message::header::ContentType::parse(&format!("text/calendar; charset=utf-8; method={method}"))?;
+            body = body.singlepart(lettre::message::SinglePart::builder().header(ctype).body(ics.clone()));
+            attachments.push(Attachment { name: "invite.ics".into(), mime: "application/ics".into(), bytes: ics.clone().into_bytes() });
+        }
         let message = if attachments.is_empty() {
             builder.multipart(body)?
         } else {
@@ -205,6 +216,7 @@ pub fn password_reset(to: &str, first_name: &str, company: &str, link: &str) -> 
             "If you did not ask for this, you can ignore this email; your password stays the same.",
         ),
         attachments: vec![],
+        calendar: None,
     }
 }
 
@@ -223,6 +235,7 @@ pub fn invitation(to: &str, first_name: &str, company: &str, inviter: &str, link
             "If you were not expecting this invitation, you can ignore this email.",
         ),
         attachments: vec![],
+        calendar: None,
     }
 }
 
@@ -234,6 +247,7 @@ pub fn test_message(to: &str, company: &str) -> Email {
         text: line.into(),
         html: layout(company, "Email works", &[line], None, "Sent from the NERP administration panel."),
         attachments: vec![],
+        calendar: None,
     }
 }
 
@@ -255,5 +269,6 @@ pub fn notice(to: &str, company: &str, subject: &str, heading: &str, paragraphs:
         text,
         html: layout(company, heading, &refs, button, footer),
         attachments: vec![],
+        calendar: None,
     }
 }

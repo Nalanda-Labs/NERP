@@ -71,7 +71,7 @@ fn people_ok(v: &Value) -> AppResult<Value> {
 }
 
 /// Checks a step list (recursively) against the list's fields; keeps only known keys.
-fn clean_steps(v: &Value, fs: &[Field], depth: usize, count: &mut usize) -> AppResult<Value> {
+pub(crate) fn clean_steps(v: &Value, fs: &[Field], depth: usize, count: &mut usize) -> AppResult<Value> {
     let list = v.as_array().ok_or_else(|| AppError::bad("steps must be a list"))?;
     if depth > 6 {
         return Err(AppError::bad("steps can be nested at most 6 deep"));

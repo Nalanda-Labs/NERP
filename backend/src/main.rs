@@ -1,6 +1,8 @@
 mod api;
 mod audit;
 mod auth;
+mod bi;
+mod boards;
 mod booking;
 mod config;
 mod crm;
@@ -17,8 +19,11 @@ mod chat;
 mod calendar;
 mod im;
 mod feed;
+mod guests;
 mod kb;
 mod hr;
+mod site_tools;
+mod solutions;
 mod sites;
 mod accounting;
 mod calls;
@@ -28,6 +33,7 @@ mod directory;
 mod drive;
 mod livekit;
 mod notify;
+mod office;
 mod outbound;
 mod realtime;
 mod routes;
@@ -131,7 +137,12 @@ async fn main() -> Result<()> {
     }
 
     let mut app = Router::new()
-        .nest("/api", routes::router(state.clone()).layer(api_compression()))
+        .nest("/api", routes::router(state.clone()).layer(api_compression()).layer(axum::middleware::map_response(api_cache_headers)))
+        // Calendar apps (CalDAV), outside /api so their well-known address works.
+        .route("/.well-known/caldav", axum::routing::any(calendar::dav::well_known))
+        .route("/dav", axum::routing::any(calendar::dav::handle))
+        .route("/dav/", axum::routing::any(calendar::dav::handle))
+        .route("/dav/{*rest}", axum::routing::any(calendar::dav::handle))
         .layer(TraceLayer::new_for_http());
 
     if !config.cors_origins.is_empty() {
@@ -171,7 +182,9 @@ async fn main() -> Result<()> {
     let policy = Arc::new(security_headers::Policy::new(
         config.static_dir.as_deref(),
         config.livekit.as_ref().map(|l| l.url.as_str()),
+        config.collabora_url.as_deref(),
         config.cookie_secure,
+        &config.public_url,
     ));
     let app = app.layer(axum::middleware::map_response_with_state(policy, security_headers::apply)).with_state(state);
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
@@ -198,6 +211,15 @@ fn api_compression() -> CompressionLayer<impl Predicate> {
             .is_some_and(|t| PRECOMPRESSED.iter().any(|p| t.starts_with(p)))
     };
     CompressionLayer::new().compress_when(DefaultPredicate::new().and(skip_downloads))
+}
+
+/// API answers are private to whoever asked: no browser or proxy may keep them, unless
+/// the route chose its own caching (public pictures, for instance).
+async fn api_cache_headers(mut res: Response) -> Response {
+    if !res.headers().contains_key(header::CACHE_CONTROL) {
+        res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    res
 }
 
 /// Hashed build files never change, so browsers keep them for a year. Everything else

@@ -9,7 +9,15 @@
 //! viewed. Removing one occurrence keeps the rest. Each person can subscribe other calendar
 //! apps to a private link (`/api/public/calendar/<token>.ics`).
 
+mod access;
+pub mod dav;
+mod ical;
 mod ics;
+mod invites;
+mod slots;
+pub mod sync;
+
+pub use access::Level;
 
 use anyhow::Result;
 use axum::{
@@ -44,7 +52,12 @@ pub fn router() -> Router<AppState> {
         .route("/calendar/events/{id}/respond", post(respond))
         .route("/calendar/events/{id}/chat", post(event_chat))
         .route("/calendar/feed", get(feed_info).post(new_feed).delete(drop_feed))
+        .route("/calendar/rooms", get(rooms))
         .merge(ics::router())
+        .merge(access::router())
+        .merge(invites::router())
+        .merge(slots::router())
+        .merge(sync::router())
 }
 
 // ---------------------------------------------------------------------------
@@ -69,9 +82,19 @@ pub(crate) struct Event {
     pub is_private: bool,
     /// On a workgroup's calendar.
     pub project_id: Option<Uuid>,
+    /// Raised when the time, place or title changes (for guests' calendar apps).
+    pub sequence: i32,
+    pub room_id: Option<Uuid>,
+    pub slot_link_id: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+    /// The iCalendar UID a calendar app gave it (else "<id>@nerp").
+    pub uid: Option<String>,
+    /// A changed occurrence of a repeating event: the event, and which occurrence it replaces.
+    pub parent_id: Option<Uuid>,
+    pub recurrence_id: Option<DateTime<Utc>>,
 }
 
-const EVENT_COLUMNS: &str = "e.id, e.owner_id, e.title, e.description, e.location, e.starts_at, e.ends_at, e.all_day, e.timezone, e.recurrence, e.color, e.item_id, e.remind_minutes, e.is_private, e.project_id";
+const EVENT_COLUMNS: &str = "e.id, e.owner_id, e.title, e.description, e.location, e.starts_at, e.ends_at, e.all_day, e.timezone, e.recurrence, e.color, e.item_id, e.remind_minutes, e.is_private, e.project_id, e.sequence, e.room_id, e.slot_link_id, e.updated_at, e.uid, e.parent_id, e.recurrence_id";
 
 impl Event {
     fn rule(&self) -> Option<Recurrence> {
@@ -172,6 +195,18 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
         crate::tasks::access::project_access(&state, &auth, g).await?;
         users.truncate(1);
     }
+    // What I may see of each colleague's calendar; closed ones are left out.
+    let mut levels: std::collections::HashMap<Uuid, Level> = std::collections::HashMap::new();
+    let mut closed: Vec<Uuid> = Vec::new();
+    for u in users.clone() {
+        let l = access::level(&state, auth.id, u).await?;
+        if l == Level::None {
+            closed.push(u);
+        } else {
+            levels.insert(u, l);
+        }
+    }
+    users.retain(|u| !closed.contains(u));
     // Events of these people (owned or invited to), or on the group's calendar, that may
     // overlap the range.
     let ids: Vec<Uuid> = sqlx::query_scalar(
@@ -189,6 +224,7 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
     let events = load_events(&state, &ids).await?;
     let ids: Vec<Uuid> = events.iter().map(|(e, _)| e.id).collect();
     let ex = exceptions(&state, &ids).await?;
+    let rooms = room_names(&state, events.iter().filter_map(|(e, _)| e.room_id).collect()).await?;
     let answers: Vec<(Uuid, Uuid, String)> = sqlx::query_as("SELECT event_id, user_id, status FROM cal_attendees WHERE event_id = ANY($1)").bind(&ids).fetch_all(&state.db).await?;
     let mut out: Vec<Entry> = Vec::new();
     for (e, guests) in &events {
@@ -203,7 +239,9 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
                 if mine && *u != auth.id {
                     continue;
                 }
-                let busy = !mine && e.is_private;
+                // Group calendars show details to the group; a colleague's calendar as they allow.
+                let lvl = if group.is_some() { Level::Read } else { levels.get(u).copied().unwrap_or(Level::Busy) };
+                let busy = !mine && (lvl <= Level::Busy || (e.is_private && lvl < Level::Edit));
                 out.push(Entry {
                     kind: "event",
                     id: e.id,
@@ -214,7 +252,7 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
                     all_day: e.all_day,
                     occurrence: e.recurrence.as_ref().map(|_| start),
                     recurring: e.recurrence.is_some(),
-                    location: if busy { None } else { e.location.clone() },
+                    location: if busy { None } else { place_of(e, &rooms) },
                     color: e.color.clone(),
                     busy,
                     owner_id: Some(e.owner_id),
@@ -286,8 +324,30 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
         .await?;
     Ok(Json(json!({
         "items": out,
-        "people": people.into_iter().map(|(id, name, a)| json!({ "id": id, "name": name, "avatar_file_id": a })).collect::<Vec<_>>(),
+        "people": people.into_iter().map(|(id, name, a)| json!({ "id": id, "name": name, "avatar_file_id": a, "access": levels.get(&id).map(|l| l.name()) })).collect::<Vec<_>>(),
+        "closed": closed,
     })))
+}
+
+/// Names of meeting rooms.
+async fn room_names(state: &AppState, ids: Vec<Uuid>) -> AppResult<std::collections::HashMap<Uuid, String>> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM booking_resources WHERE id = ANY($1)").bind(&ids).fetch_all(&state.db).await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Where it is: the room, then the typed place.
+fn place_of(e: &Event, rooms: &std::collections::HashMap<Uuid, String>) -> Option<String> {
+    let room = e.room_id.and_then(|r| rooms.get(&r).cloned());
+    match (room, e.location.clone()) {
+        (Some(r), Some(l)) if !l.eq_ignore_ascii_case(&r) => Some(format!("{r}, {l}")),
+        (Some(r), _) => Some(r),
+        (None, l) => l,
+    }
+}
+
+pub(crate) async fn place(state: &AppState, e: &Event) -> AppResult<Option<String>> {
+    let rooms = room_names(state, e.room_id.into_iter().collect()).await?;
+    Ok(place_of(e, &rooms))
 }
 
 pub(crate) async fn load_events(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Event, Vec<Uuid>)>> {
@@ -312,12 +372,15 @@ pub(crate) async fn load_events(state: &AppState, ids: &[Uuid]) -> AppResult<Vec
 async fn event_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Value> {
     let (e, guests) = load_events(state, &[id]).await?.into_iter().next().ok_or(AppError::NotFound("event"))?;
     let mine = e.owner_id == auth.id || guests.contains(&auth.id);
-    if !mine && e.is_private {
-        return Err(AppError::NotFound("event"));
-    }
-    // An event on a workgroup's calendar: for those who can see the group (and its guests).
-    if let Some(g) = e.project_id {
-        if !mine && crate::tasks::access::project_access(state, auth, g).await.is_err() {
+    let lvl = access::level(state, auth.id, e.owner_id).await?;
+    if !mine {
+        // An event on a workgroup's calendar: for those who can see the group; others as
+        // the owner shares their calendar.
+        let allowed = match e.project_id {
+            Some(g) => crate::tasks::access::project_access(state, auth, g).await.is_ok(),
+            None => lvl >= Level::Read,
+        };
+        if !allowed || (e.is_private && lvl < Level::Edit) {
             return Err(AppError::NotFound("event"));
         }
     }
@@ -338,14 +401,24 @@ async fn event_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Va
         None => None,
     };
     let rule = e.rule();
+    let room: Option<(Uuid, String)> = match e.room_id {
+        Some(r) => sqlx::query_as("SELECT id, name FROM booking_resources WHERE id = $1").bind(r).fetch_optional(&state.db).await?,
+        None => None,
+    };
+    let email_guests = invites::guests_of(state, e.id).await?;
     Ok(json!({
-        "id": e.id, "owner_id": e.owner_id, "title": e.title, "description": e.description, "location": e.location,
+        "id": e.id, "owner_id": e.owner_id, "sequence": e.sequence,
+        "room": room.map(|(id, name)| json!({ "id": id, "name": name })),
+        "email_guests": email_guests.iter().map(|g| json!({ "id": g.id, "email": g.email, "name": g.name, "status": g.status })).collect::<Vec<_>>(),
+        "slot_link_id": e.slot_link_id,
+        // A changed occurrence of a repeating event (made in a calendar app).
+        "parent_id": e.parent_id, "title": e.title, "description": e.description, "location": e.location,
         "starts_at": e.starts_at, "ends_at": e.ends_at, "all_day": e.all_day, "timezone": e.timezone,
         "recurrence": e.recurrence, "repeat": rule.map(|r| r.describe()), "color": e.color, "remind_minutes": e.remind_minutes, "is_private": e.is_private,
         "project": project,
         "item": e.item_id.zip(item).map(|(id, (code, title))| json!({ "id": id, "code": code, "title": title })),
         "people": people.into_iter().map(|(id, name, a, status)| json!({ "id": id, "name": name, "avatar_file_id": a, "status": status, "owner": id == e.owner_id })).collect::<Vec<_>>(),
-        "can_edit": e.owner_id == auth.id,
+        "can_edit": lvl == Level::Edit,
     }))
 }
 
@@ -362,6 +435,10 @@ struct RepeatInput {
     #[serde(default)]
     weekdays: Vec<u8>,
     month_day: Option<u8>,
+    #[serde(default)]
+    month: Option<u8>,
+    #[serde(default)]
+    week_of_month: Option<i8>,
     ends_on: Option<NaiveDate>,
     max_runs: Option<i32>,
 }
@@ -394,6 +471,14 @@ struct EventInput {
     attendees: Option<Vec<Uuid>>,
     /// Put it on a workgroup's calendar (when creating).
     project_id: Option<Uuid>,
+    /// A meeting room (a booking resource of kind room).
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    room_id: Option<Option<Uuid>>,
+    /// Guests outside the company, by email (replaces the list).
+    email_guests: Option<Vec<invites::GuestInput>>,
+    /// Whose calendar to put it on (when creating): one's own, or a colleague's who lets one
+    /// change their calendar.
+    calendar_id: Option<Uuid>,
 }
 
 struct Times {
@@ -433,6 +518,8 @@ fn rule_for(r: RepeatInput, t: &Times, tz: &str) -> AppResult<Value> {
         interval: r.interval,
         weekdays: r.weekdays,
         month_day: r.month_day,
+        month: r.month,
+        week_of_month: r.week_of_month,
         time: local.format("%H:%M").to_string(),
         timezone: zone.name().to_string(),
         starts_on: local.date_naive(),
@@ -505,6 +592,13 @@ pub async fn delete_event(state: &AppState, auth: &AuthUser, id: Uuid) -> AppRes
 }
 
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<EventInput>) -> AppResult<Json<Value>> {
+    // A room is checked and taken under its lock (shared with bookings).
+    let rooms: Vec<Uuid> = b.room_id.flatten().into_iter().collect();
+    let st = state.clone();
+    crate::booking::with_resource_locks(&state, &rooms, || create_locked(st, auth, b)).await
+}
+
+async fn create_locked(state: AppState, auth: AuthUser, b: EventInput) -> AppResult<Json<Value>> {
     let title = required("title", b.title.as_deref().unwrap_or(""), 300)?;
     let all_day = b.all_day.unwrap_or(false);
     let t = times(b.start.as_deref().unwrap_or(""), b.end.as_deref().unwrap_or(""), all_day)?;
@@ -513,22 +607,37 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Eve
     let rule = b.repeat.flatten().map(|r| rule_for(r, &t, &tz)).transpose()?;
     let item = b.item_id.flatten();
     check_item(&state, &auth, item).await?;
+    // On a colleague's calendar only with their leave to change it.
+    let owner = b.calendar_id.unwrap_or(auth.id);
+    if owner != auth.id && access::level(&state, auth.id, owner).await? < Level::Edit {
+        return Err(AppError::Forbidden);
+    }
     let mut guests = b.attendees.unwrap_or_default();
-    guests.retain(|g| *g != auth.id);
+    guests.retain(|g| *g != owner);
     guests.sort();
     guests.dedup();
     check_guests(&state, &guests).await?;
+    let email_guests = invites::clean_guests(b.email_guests.unwrap_or_default())?;
     if let Some(g) = b.project_id {
         if !crate::tasks::access::project_access(&state, &auth, g).await?.contribute {
             return Err(AppError::Forbidden);
         }
     }
+    let room = b.room_id.flatten();
+    if let Some(r) = room {
+        let draft = Event {
+            id: Uuid::nil(), owner_id: owner, title: title.clone(), description: None, location: None, starts_at: t.starts_at, ends_at: t.ends_at, all_day,
+            timezone: tz.clone(), recurrence: rule.clone(), color: None, item_id: None, remind_minutes: None, is_private: false, project_id: None,
+            sequence: 0, room_id: Some(r), slot_link_id: None, updated_at: Utc::now(), uid: None, parent_id: None, recurrence_id: None,
+        };
+        check_room(&state, r, &draft, &[]).await?;
+    }
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO cal_events (owner_id, title, description, location, starts_at, ends_at, all_day, timezone, recurrence, color, item_id, remind_minutes, is_private, project_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
+        "INSERT INTO cal_events (owner_id, title, description, location, starts_at, ends_at, all_day, timezone, recurrence, color, item_id, remind_minutes, is_private, project_id, created_by, room_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id",
     )
-    .bind(auth.id)
+    .bind(owner)
     .bind(&title)
     .bind(clean(b.description.flatten()))
     .bind(clean(b.location.flatten()))
@@ -542,31 +651,40 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Eve
     .bind(reminder(b.remind_minutes.flatten())?)
     .bind(b.is_private.unwrap_or(false))
     .bind(b.project_id)
+    .bind(auth.id)
+    .bind(room)
     .fetch_one(&mut *tx)
     .await?;
     for g in &guests {
         sqlx::query("INSERT INTO cal_attendees (event_id, user_id) VALUES ($1, $2)").bind(id).bind(g).execute(&mut *tx).await?;
     }
+    for g in &email_guests {
+        sqlx::query("INSERT INTO cal_email_guests (event_id, email, name) VALUES ($1, $2, $3)").bind(id).bind(&g.email).bind(&g.name).execute(&mut *tx).await?;
+    }
     tx.commit().await?;
     let (e, _) = load_events(&state, &[id]).await?.remove(0);
-    invite(&state, &auth, &e, &guests, "invited you to").await;
+    invite(&state, auth.id, &e, &guests, "invited you to").await;
+    if owner != auth.id {
+        invite(&state, auth.id, &e, &[owner], "put on your calendar").await;
+    }
+    invites::send(&state, &e, &invites::guests_of(&state, id).await?, invites::Change::Invited).await;
     if let Some(i) = item {
         timeline_event(&state, i, &auth, &e, "planned").await;
     }
     event_view(&state, &auth, id).await.map(Json)
 }
 
-async fn invite(state: &AppState, auth: &AuthUser, e: &Event, who: &[Uuid], verb: &str) {
+pub(crate) async fn invite(state: &AppState, actor: Uuid, e: &Event, who: &[Uuid], verb: &str) {
     if who.is_empty() {
         return;
     }
-    let me: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await.unwrap_or_default();
+    let me: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(actor).fetch_one(&state.db).await.unwrap_or_default();
     notify(state, who, NewNotification {
         kind: "calendar.invite",
         title: format!("{me} {verb} “{}” on {}", e.title, when(e, e.starts_at)),
         body: e.location.clone(),
         link: Some(format!("/calendar?event={}", e.id)),
-        actor: Some(auth.id),
+        actor: Some(actor),
     })
     .await;
 }
@@ -577,7 +695,7 @@ async fn timeline_event(state: &AppState, item: Uuid, auth: &AuthUser, e: &Event
 
 async fn owned(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(Event, Vec<Uuid>)> {
     let (e, g) = load_events(state, &[id]).await?.into_iter().next().ok_or(AppError::NotFound("event"))?;
-    if e.owner_id != auth.id {
+    if e.owner_id != auth.id && access::level(state, auth.id, e.owner_id).await? < Level::Edit {
         let hidden_group = match e.project_id {
             Some(p) => !g.contains(&auth.id) && crate::tasks::access::project_access(state, auth, p).await.is_err(),
             None => false,
@@ -588,6 +706,13 @@ async fn owned(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(Event,
 }
 
 async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<EventInput>) -> AppResult<Json<Value>> {
+    let current: Option<Uuid> = sqlx::query_scalar("SELECT room_id FROM cal_events WHERE id = $1").bind(id).fetch_optional(&state.db).await?.flatten();
+    let rooms: Vec<Uuid> = b.room_id.flatten().into_iter().chain(current).collect();
+    let st = state.clone();
+    crate::booking::with_resource_locks(&state, &rooms, || update_locked(st, auth, id, b)).await
+}
+
+async fn update_locked(state: AppState, auth: AuthUser, id: Uuid, b: EventInput) -> AppResult<Json<Value>> {
     let (e, old_guests) = owned(&state, &auth, id).await?;
     let all_day = b.all_day.unwrap_or(e.all_day);
     let t = match (&b.start, &b.end) {
@@ -602,7 +727,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     let rule = match b.repeat {
         Some(r) => r.map(|r| rule_for(r, &t, &tz)).transpose()?,
         None => match e.rule() {
-            Some(old) if moved => Some(rule_for(RepeatInput { freq: old.freq, interval: old.interval, weekdays: old.weekdays, month_day: old.month_day, ends_on: old.ends_on, max_runs: old.max_runs }, &t, &tz)?),
+            Some(old) if moved => Some(rule_for(RepeatInput { freq: old.freq, interval: old.interval, weekdays: old.weekdays, month_day: old.month_day, month: old.month, week_of_month: old.week_of_month, ends_on: old.ends_on, max_runs: old.max_runs }, &t, &tz)?),
             _ => e.recurrence.clone(),
         },
     };
@@ -610,13 +735,33 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         check_item(&state, &auth, Some(i)).await?;
     }
     let title = b.title.as_deref().map(|x| required("title", x, 300)).transpose()?;
+    let room = match b.room_id {
+        Some(r) => r,
+        None => e.room_id,
+    };
+    let location = match &b.location {
+        Some(l) => clean(l.clone()),
+        None => e.location.clone(),
+    };
+    // Guests' calendar apps need to hear about changes to the time, place, title or repeats.
+    let changed = moved || room != e.room_id || location != e.location || title.as_ref().is_some_and(|t| *t != e.title) || rule != e.recurrence || all_day != e.all_day;
+    if let Some(r) = room {
+        if moved || room != e.room_id || rule != e.recurrence {
+            let draft = Event { starts_at: t.starts_at, ends_at: t.ends_at, all_day, timezone: tz.clone(), recurrence: rule.clone(), room_id: Some(r), ..e.clone() };
+            let ex: Vec<DateTime<Utc>> = exceptions(&state, &[id]).await?.into_iter().map(|(_, t)| t).collect();
+            check_room(&state, r, &draft, &ex).await?;
+        }
+    }
+    let email_guests = b.email_guests.map(invites::clean_guests).transpose()?;
+    let old_email = invites::guests_of(&state, id).await?;
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE cal_events SET title = COALESCE($2, title),
              description = CASE WHEN $3 THEN $4 ELSE description END, location = CASE WHEN $5 THEN $6 ELSE location END,
              starts_at = $7, ends_at = $8, all_day = $9, timezone = $10, recurrence = $11,
              color = CASE WHEN $12 THEN $13 ELSE color END, item_id = CASE WHEN $14 THEN $15 ELSE item_id END,
-             remind_minutes = CASE WHEN $16 THEN $17 ELSE remind_minutes END, is_private = COALESCE($18, is_private), updated_at = now()
+             remind_minutes = CASE WHEN $16 THEN $17 ELSE remind_minutes END, is_private = COALESCE($18, is_private),
+             room_id = $19, sequence = sequence + CASE WHEN $20 THEN 1 ELSE 0 END, updated_at = now()
          WHERE id = $1",
     )
     .bind(id)
@@ -637,8 +782,26 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     .bind(b.remind_minutes.is_some())
     .bind(reminder(b.remind_minutes.flatten())?)
     .bind(b.is_private)
+    .bind(room)
+    .bind(changed)
     .execute(&mut *tx)
     .await?;
+    // Guests by email: the removed ones are told it's cancelled (after the save), new ones invited.
+    let mut email_removed = Vec::new();
+    if let Some(list) = &email_guests {
+        for g in &old_email {
+            if !list.iter().any(|x| x.email == g.email) {
+                email_removed.push(g.clone());
+            }
+        }
+        let gone: Vec<Uuid> = email_removed.iter().map(|g| g.id).collect();
+        sqlx::query("DELETE FROM cal_email_guests WHERE id = ANY($1)").bind(&gone).execute(&mut *tx).await?;
+        for g in list {
+            if !old_email.iter().any(|x| x.email == g.email) {
+                sqlx::query("INSERT INTO cal_email_guests (event_id, email, name) VALUES ($1, $2, $3)").bind(id).bind(&g.email).bind(&g.name).execute(&mut *tx).await?;
+            }
+        }
+    }
     let mut added = Vec::new();
     if let Some(mut guests) = b.attendees {
         guests.retain(|g| *g != auth.id);
@@ -656,15 +819,27 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     // A new time asks everyone again.
     if moved {
         sqlx::query("UPDATE cal_attendees SET status = 'pending' WHERE event_id = $1").bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE cal_email_guests SET status = 'pending', answered_at = NULL WHERE event_id = $1").bind(id).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM cal_reminders_sent WHERE event_id = $1").bind(id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     crate::im::sync_linked_chat(&state, crate::im::Link::Event(id)).await?;
     let (e, guests) = load_events(&state, &[id]).await?.remove(0);
-    invite(&state, &auth, &e, &added, "invited you to").await;
+    invite(&state, auth.id, &e, &added, "invited you to").await;
     if moved {
         let others: Vec<Uuid> = guests.iter().copied().filter(|g| !added.contains(g)).collect();
-        invite(&state, &auth, &e, &others, "moved").await;
+        invite(&state, auth.id, &e, &others, "moved").await;
+    }
+    // A colleague changing my calendar tells me.
+    if e.owner_id != auth.id {
+        invite(&state, auth.id, &e, &[e.owner_id], "changed").await;
+    }
+    invites::send(&state, &e, &email_removed, invites::Change::Cancelled).await;
+    let now_email = invites::guests_of(&state, id).await?;
+    let (fresh, kept): (Vec<_>, Vec<_>) = now_email.into_iter().partition(|g| !old_email.iter().any(|x| x.email == g.email));
+    invites::send(&state, &e, &fresh, invites::Change::Invited).await;
+    if changed {
+        invites::send(&state, &e, &kept, invites::Change::Updated).await;
     }
     event_view(&state, &auth, id).await.map(Json)
 }
@@ -687,15 +862,23 @@ struct RemoveQuery {
 }
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Query(q): Query<RemoveQuery>) -> AppResult<Json<Value>> {
-    let (e, guests) = owned(&state, &auth, id).await?;
+    let (e, mut guests) = owned(&state, &auth, id).await?;
+    if e.owner_id != auth.id {
+        guests.push(e.owner_id);
+    }
+    let email = invites::guests_of(&state, id).await?;
     let me: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
     match q.occurrence.filter(|_| e.recurrence.is_some()) {
         Some(occ) => {
             sqlx::query("INSERT INTO cal_exceptions (event_id, occurrence_start) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(occ).execute(&state.db).await?;
+            sqlx::query("UPDATE cal_events SET sequence = sequence + 1, updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+            let e2 = load_events(&state, &[id]).await?.remove(0).0;
+            invites::send(&state, &e2, &email, invites::Change::OccurrenceCancelled(occ)).await;
             notify(&state, &guests, NewNotification { kind: "calendar.cancelled", title: format!("{me} cancelled “{}” on {}", e.title, when(&e, occ)), body: None, link: Some("/calendar".into()), actor: Some(auth.id) }).await;
         }
         None => {
             let chat = crate::im::linked_chat_people(&state, crate::im::Link::Event(id)).await?;
+            invites::send(&state, &Event { sequence: e.sequence + 1, ..e.clone() }, &email, invites::Change::Cancelled).await;
             sqlx::query("DELETE FROM cal_events WHERE id = $1").bind(id).execute(&state.db).await?;
             crate::im::linked_chat_gone(&state, chat).await;
             notify(&state, &guests, NewNotification { kind: "calendar.cancelled", title: format!("{me} cancelled “{}”", e.title), body: None, link: Some("/calendar".into()), actor: Some(auth.id) }).await;
@@ -710,24 +893,130 @@ struct RespondBody {
 }
 
 async fn respond(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<RespondBody>) -> AppResult<Json<Value>> {
-    if !["accepted", "declined", "tentative"].contains(&b.status.as_str()) {
+    answer(&state, auth.id, id, &b.status).await?;
+    event_view(&state, &auth, id).await.map(Json)
+}
+
+/// A guest's answer (from NERP or their calendar app); the organiser is told when it changes.
+pub(crate) async fn answer(state: &AppState, user: Uuid, id: Uuid, status: &str) -> AppResult<()> {
+    if !["accepted", "declined", "tentative"].contains(&status) {
         return Err(AppError::bad("answer accepted, declined or tentative"));
     }
-    let n = sqlx::query("UPDATE cal_attendees SET status = $3 WHERE event_id = $1 AND user_id = $2")
-        .bind(id)
-        .bind(auth.id)
-        .bind(&b.status)
-        .execute(&state.db)
-        .await?
-        .rows_affected();
-    if n == 0 {
+    let old: Option<String> = sqlx::query_scalar("SELECT status FROM cal_attendees WHERE event_id = $1 AND user_id = $2").bind(id).bind(user).fetch_optional(&state.db).await?;
+    let Some(old) = old else {
         return Err(AppError::NotFound("invitation"));
+    };
+    if old == status {
+        return Ok(());
     }
-    let (e, _) = load_events(&state, &[id]).await?.remove(0);
-    let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
-    let verb = match b.status.as_str() { "accepted" => "accepted", "declined" => "declined", _ => "might come to" };
-    notify(&state, &[e.owner_id], NewNotification { kind: "calendar.answer", title: format!("{me} {verb} “{}”", e.title), body: None, link: Some(format!("/calendar?event={id}")), actor: Some(auth.id) }).await;
-    event_view(&state, &auth, id).await.map(Json)
+    sqlx::query("UPDATE cal_attendees SET status = $3 WHERE event_id = $1 AND user_id = $2").bind(id).bind(user).bind(status).execute(&state.db).await?;
+    let (e, _) = load_events(state, &[id]).await?.remove(0);
+    let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await?;
+    let verb = match status { "accepted" => "accepted", "declined" => "declined", _ => "might come to" };
+    notify(state, &[e.owner_id], NewNotification { kind: "calendar.answer", title: format!("{me} {verb} “{}”", e.title), body: None, link: Some(format!("/calendar?event={id}")), actor: Some(user) }).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Meeting rooms (the booking module's rooms)
+// ---------------------------------------------------------------------------
+
+/// Events holding a room during [from, to): one interval per occurrence (`except`: an event
+/// being changed).
+pub(crate) async fn room_events(state: &AppState, room: Uuid, from: DateTime<Utc>, to: DateTime<Utc>, except: Option<Uuid>) -> AppResult<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM cal_events WHERE room_id = $1 AND ($4::uuid IS NULL OR id <> $4) AND starts_at < $3 AND (recurrence IS NOT NULL OR ends_at > $2)",
+    )
+    .bind(room)
+    .bind(from)
+    .bind(to)
+    .bind(except)
+    .fetch_all(&state.db)
+    .await?;
+    let events = load_events(state, &ids).await?;
+    let ex = exceptions(state, &ids).await?;
+    let mut out = Vec::new();
+    for (e, _) in &events {
+        let excs: Vec<DateTime<Utc>> = ex.iter().filter(|(id, _)| *id == e.id).map(|(_, t)| *t).collect();
+        for s in occurrences(e, &excs, from, to) {
+            out.push((s, s + (e.ends_at - e.starts_at)));
+        }
+    }
+    Ok(out)
+}
+
+/// Everything holding a room during [from, to): events and bookings, each with the room's
+/// buffer after it.
+async fn room_busy(state: &AppState, r: &crate::booking::Resource, from: DateTime<Utc>, to: DateTime<Utc>, except: Option<Uuid>) -> AppResult<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
+    let buf = Duration::minutes(r.buffer_minutes as i64);
+    let mut out: Vec<(DateTime<Utc>, DateTime<Utc>)> = room_events(state, r.id, from - buf, to, except).await?.into_iter().map(|(s, e)| (s, e + buf)).collect();
+    let bookings: Vec<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT b.starts_at, b.ends_at FROM bookings b JOIN booking_resources_used u ON u.booking_id = b.id
+         WHERE u.resource_id = $1 AND b.status IN ('booked', 'confirmed', 'came') AND b.starts_at < $3 AND b.ends_at + $4 > $2",
+    )
+    .bind(r.id)
+    .bind(from)
+    .bind(to)
+    .bind(buf)
+    .fetch_all(&state.db)
+    .await?;
+    out.extend(bookings.into_iter().map(|(s, e)| (s, e + buf)));
+    Ok(out)
+}
+
+/// Refuses a room that isn't a meeting room, or is fully taken at any occurrence of the event
+/// (within the next 400 days for a repeating one).
+async fn check_room(state: &AppState, room: Uuid, e: &Event, excs: &[DateTime<Utc>]) -> AppResult<()> {
+    let r = crate::booking::load_resource(state, room).await.map_err(|_| AppError::bad("choose a meeting room"))?;
+    if r.kind != "room" || !r.is_active {
+        return Err(AppError::bad("choose a meeting room"));
+    }
+    let dur = e.ends_at - e.starts_at;
+    let horizon = if e.recurrence.is_some() { e.starts_at.max(Utc::now()) + Duration::days(400) } else { e.ends_at + Duration::seconds(1) };
+    let from = if e.recurrence.is_some() { e.starts_at.max(Utc::now() - Duration::days(1)) } else { e.starts_at };
+    let occs = occurrences(e, excs, from, horizon);
+    let (Some(first), Some(last)) = (occs.first().copied(), occs.last().copied()) else {
+        return Ok(());
+    };
+    let except = (e.id != Uuid::nil()).then_some(e.id);
+    let busy = room_busy(state, &r, first, last + dur, except).await?;
+    let buf = Duration::minutes(r.buffer_minutes as i64);
+    for o in occs {
+        let n = busy.iter().filter(|(s, en)| *s < o + dur + buf && *en > o).count();
+        if n as i32 >= r.capacity {
+            return Err(AppError::Conflict(format!("{} is taken on {}", r.name, when(e, o))));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RoomsQuery {
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    /// An event being changed (its own time doesn't count).
+    except: Option<Uuid>,
+}
+
+/// Meeting rooms with what holds them during [from, to) and whether they are free then.
+async fn rooms(State(state): State<AppState>, _auth: AuthUser, Query(q): Query<RoomsQuery>) -> AppResult<Json<Value>> {
+    if q.to < q.from || q.to - q.from > Duration::days(31) {
+        return Err(AppError::bad("ask for at most 31 days"));
+    }
+    let list: Vec<crate::booking::Resource> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{} WHERE r.kind = 'room' AND r.is_active ORDER BY r.sort, r.name", crate::booking::RESOURCE_SELECT)))
+        .fetch_all(&state.db)
+        .await?;
+    let mut out = Vec::new();
+    for r in &list {
+        let busy = room_busy(&state, r, q.from, q.to, q.except).await?;
+        let taken = busy.iter().filter(|(s, e)| *s < q.to && *e > q.from).count() as i32;
+        out.push(json!({
+            "id": r.id, "name": r.name, "description": r.description, "capacity": r.capacity, "color": r.color,
+            "free": taken < r.capacity,
+            "busy": busy.iter().map(|(s, e)| json!({ "start": s, "end": e })).collect::<Vec<_>>(),
+        }));
+    }
+    Ok(Json(json!({ "items": out })))
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +1105,7 @@ mod tests {
         Event {
             id: Uuid::nil(), owner_id: Uuid::nil(), title: "x".into(), description: None, location: None, starts_at: s, ends_at: s + Duration::minutes(mins),
             all_day: false, timezone: "Europe/Berlin".into(), recurrence: rule, color: None, item_id: None, remind_minutes: None, is_private: false, project_id: None,
+            sequence: 0, room_id: None, slot_link_id: None, updated_at: s, uid: None, parent_id: None, recurrence_id: None,
         }
     }
     fn at(s: &str) -> DateTime<Utc> {

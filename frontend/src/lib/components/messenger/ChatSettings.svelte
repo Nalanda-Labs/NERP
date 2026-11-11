@@ -7,6 +7,7 @@
 	import { toasts } from '#lib/toast.svelte.ts';
 	import Avatar from '../Avatar.svelte';
 	import Modal from '../Modal.svelte';
+	import GuestInvite from '#lib/components/GuestInvite.svelte';
 	import MultiUserPicker from '../MultiUserPicker.svelte';
 
 	let {
@@ -152,7 +153,7 @@
 					{#each chat.people as p (p.id)}
 						<li class="flex items-center gap-3 py-2" data-person={p.name}>
 							<Avatar name={p.name} fileId={p.avatar_file_id} size="sm" />
-							<span class="flex-1 text-sm">{p.name}</span>
+							<span class="flex-1 text-sm">{p.name}{#if p.is_guest}<span class="badge ml-1.5 bg-amber-50 text-amber-800">Guest</span>{/if}</span>
 							{#if isOwner && p.id !== me && !chat.project_id && !chat.task_id && !chat.event_id}
 								<select class="input w-28 py-1 text-xs" aria-label="Role of {p.name}" value={p.role} onchange={(e) => setRole(p, e.currentTarget.value)}>
 									<option value="member">Member</option><option value="admin">Admin</option><option value="owner">Owner</option>
@@ -167,6 +168,9 @@
 			</div>
 			{#if chat.can.add_people}
 				<div class="flex gap-2"><div class="flex-1"><MultiUserPicker bind:value={adding} exclude={chat.people.map((p) => p.id)} placeholder="Add people…" /></div><button type="button" class="btn btn-secondary" onclick={addPeople}>Add</button></div>
+			{/if}
+			{#if (chat.my_role === 'owner' || chat.my_role === 'admin') && chat.audience === 'manual' && !chat.is_general && !chat.project_id && !chat.task_id && !chat.event_id}
+				<GuestInvite endpoint="/im/chats/{chat.id}/guests" oninvited={async () => onchange(await api.get<ChatDetail>(`/im/chats/${chat.id}`))} />
 			{/if}
 		{/if}
 

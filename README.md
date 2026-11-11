@@ -760,6 +760,7 @@ All settings are environment variables (see `backend/.env.example`):
 | `LUALATEX_BIN` / `SOFFICE_BIN` | `lualatex` / `soffice` | external document engines (optional; Typst is built in) |
 | `DOC_RENDER_TIMEOUT_SECS` / `DOC_RENDER_CONCURRENCY` | `60` / `2` | limits for LuaLaTeX and LibreOffice runs |
 | `CRM_WEBHOOK_ALLOW_PRIVATE` | `false` | let automation webhooks call private-network addresses (loopback, LAN) |
+| `COLLABORA_URL` | unset | Collabora Online for editing office files in the browser, e.g. `http://127.0.0.1:9980`. Run the official `collabora/code` image (see `tests/e2e/tools/collabora-up.sh`) with NERP's address in its `aliasgroup1`; without it files still get previews through LibreOffice |
 | `MAIL_ALLOW_PRIVATE` | `false` | let mailboxes use mail servers on private networks (loopback, LAN), e.g. a company mail server |
 | `DATA_ENCRYPTION_KEY` | derived from `JWT_SECRET` | key for secrets stored in the database (mailbox passwords); 32+ characters |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | enables "Connect Gmail" (see Email → OAuth) |
@@ -771,6 +772,9 @@ All settings are environment variables (see `backend/.env.example`):
 | `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` | — | required with `LIVEKIT_URL` |
 | `LIVEKIT_RECORDINGS_DIR` | empty | folder LiveKit Egress writes recordings to (as NERP sees it); empty: no recording |
 | `LIVEKIT_EGRESS_DIR` | `LIVEKIT_RECORDINGS_DIR` | the same folder as Egress sees it, if different (e.g. in a container) |
+| `BACKUP_DIR` | `/var/backups/nerp` | where `deploy/backup/nerp-backup.sh` writes backups; the System → Backups page lists them and runs the scripts |
+| `BACKUP_SCRIPTS` | `../deploy/backup` | the folder holding the backup scripts, as the server sees it |
+| `NERP_TEST_SIGNIN_BASE` | empty | tests only: send every outside sign-in provider (Google, Microsoft, Apple, Facebook, X) to a stand-in at this address; never set it in production |
 
 ## Database notes
 
@@ -1085,8 +1089,20 @@ Handbooks, how-tos and policies, under Knowledge base in the sidebar.
   by chosen editors, whoever made it, and knowledge base managers. Owners change who reads
   and edits a space, or delete it.
 - **Pages** form a tree inside a space (sub-pages, breadcrumbs, "In this section"). They are
-  written in Markdown (headings, bold, lists, links, tables, code) with a live preview, and
-  shown as cleaned HTML: scripts and unsafe links are removed.
+  written in Markdown and shown as cleaned HTML: scripts, unsafe links and foreign ids and
+  classes are removed.
+- **The editor** shows the Markdown source (highlighted, with find and replace, undo, and
+  lists and quotes that continue on Enter) beside a live preview rendered exactly as readers
+  will see it, across the full width (the page tree steps aside); switch to writing only or
+  preview only, or go full screen. A toolbar and
+  shortcuts cover headings, bold, italic, strikethrough, code, lists, checklists, quotes,
+  links, code blocks, tables, dividers, footnotes and callouts (note, tip, important,
+  warning, caution). Pictures and files go in by button, paste or drag and drop; they are
+  stored with the page, so whoever may read the page may open them. Type `[[` (or use
+  "Page") to link another page by its title. Ctrl+S saves; going to another page with unsaved
+  changes asks first, while reloading keeps you in the editor with them (kept in the browser); a word count and reading time show at the bottom.
+- **Reading:** headings get links to copy, longer pages show their contents beside the text,
+  code is highlighted by language, and pictures and files open with your sign-in.
 - **History:** every save is a version; any version can be viewed and restored (restoring
   saves it as the newest version, so nothing is lost). If someone else saved the page while
   you were editing, your save is refused instead of overwriting theirs.

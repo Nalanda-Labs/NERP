@@ -200,7 +200,7 @@ fn code_of(label: &str) -> String {
     if s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()) { format!("f_{s}") } else { s }
 }
 
-async fn save_fields(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, list: Uuid, list_fields: &[Field]) -> AppResult<()> {
+pub(crate) async fn save_fields(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, list: Uuid, list_fields: &[Field]) -> AppResult<()> {
     if list_fields.len() > 60 {
         return Err(AppError::bad("at most 60 fields"));
     }

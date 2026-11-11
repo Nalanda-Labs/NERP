@@ -61,7 +61,7 @@
 	}
 
 	let q = $state('');
-	let data = $state<Page<TaskSummary> | null>(null);
+	let data = $state<(Page<TaskSummary> & { summary?: { by_status: Record<string, number>; overdue: number } }) | null>(null);
 	let counters = $state<TaskCounters | null>(null);
 	let formOpen = $state(false);
 	let loading = $state(false);
@@ -94,7 +94,7 @@
 			// A board shows every column, so it ignores the open/done filter.
 			const statuses = layout === 'board' ? 'new,in_progress,review,done' : STATES.find((s) => s.id === stateFilter)?.statuses;
 			const [d, c] = await Promise.all([
-				api.get<Page<TaskSummary>>(
+				api.get<Page<TaskSummary> & { summary?: { by_status: Record<string, number>; overdue: number } }>(
 					'/tasks' +
 						query({
 							view: view === 'all' ? undefined : view,
@@ -103,7 +103,8 @@
 							overdue: overdueOnly || undefined,
 							unread: unreadOnly || undefined,
 							sort: layout === 'board' ? 'position' : (sort ?? (stateFilter === 'done' ? 'activity' : 'deadline')),
-							limit: 200
+							limit: 200,
+							summary: true
 						})
 				),
 				api.get<TaskCounters>('/tasks/counters')
@@ -219,6 +220,12 @@
 			<TaskBoard bind:tasks={data.items} showProject onchanged={load} />
 		{:else if data}
 			<TaskTable tasks={data.items} empty={q ? 'No tasks match your search.' : 'Nothing here. Enjoy the calm!'} />
+			{#if data.summary && layout !== 'board'}
+				<p class="mt-2 flex flex-wrap gap-x-4 text-xs text-slate-500" data-task-summary>
+					{#each [['new', 'New'], ['in_progress', 'In progress'], ['review', 'Under review'], ['done', 'Done'], ['deferred', 'Deferred']] as [k, l] (k)}{#if data.summary.by_status[k]}<span>{l}: <span class="font-medium text-slate-700">{data.summary.by_status[k]}</span></span>{/if}{/each}
+					{#if data.summary.overdue}<span class="text-red-700">Overdue: <span class="font-medium">{data.summary.overdue}</span></span>{/if}
+				</p>
+			{/if}
 			{#if data.total > data.items.length}<p class="mt-2 text-sm text-slate-500">Showing {data.items.length} of {data.total}. Narrow the search to see more.</p>{/if}
 		{/if}
 	</div>

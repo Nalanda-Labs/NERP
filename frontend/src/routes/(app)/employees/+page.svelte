@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { api, query } from '#lib/api.ts';
+	import { api, downloadUrl, query } from '#lib/api.ts';
 	import Avatar from '#lib/components/Avatar.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import Modal from '#lib/components/Modal.svelte';
@@ -94,6 +94,8 @@
 			<h1 class="text-2xl font-semibold text-slate-900">Employees</h1>
 			<p class="text-sm text-slate-500">{data ? `${data.total} ${data.total === 1 ? 'person' : 'people'}` : ' '}</p>
 		</div>
+		<button class="btn btn-secondary ml-auto" onclick={() => downloadUrl('/api/users/export.csv', 'employees.csv').catch(toasts.error)}>Export CSV</button>
+		{#if canManage || session.can(PERM.USERS_INVITE)}<a class="btn btn-secondary" href="/employees/invitations">Invitations</a> <a class="btn btn-secondary" href="/employees/guests">Guests</a>{/if}
 		{#if canManage}
 			<button
 				class="btn btn-primary"

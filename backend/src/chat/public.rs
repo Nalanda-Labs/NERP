@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/public/chat/{key}/session", get(poll))
         .route("/public/chat/{key}/messages", post(send))
         .route("/public/chat/{key}/end", post(visitor_end))
+        .route("/public/chat/{key}/rate", post(rate))
 }
 
 #[derive(sqlx::FromRow)]
@@ -39,10 +40,19 @@ struct Channel {
     color: String,
     ask_details: bool,
     operators: Vec<Uuid>,
+    hours: Option<Value>,
+    timezone: String,
+    offline_message: Option<String>,
+    auto_reply: Option<String>,
+    consent_text: Option<String>,
+    ask_rating: bool,
 }
 
 async fn active(state: &AppState, key: &str) -> AppResult<Channel> {
-    sqlx::query_as("SELECT id, name, title, greeting, color, ask_details, operators FROM chat_channels WHERE key = $1 AND is_active")
+    sqlx::query_as(
+        "SELECT id, name, title, greeting, color, ask_details, operators, hours, timezone, offline_message, auto_reply, consent_text, ask_rating
+         FROM chat_channels WHERE key = $1 AND is_active",
+    )
         .bind(key)
         .fetch_optional(&state.db)
         .await?
@@ -64,7 +74,12 @@ async fn limited(state: &AppState, key: String, max: i64, secs: i64) -> AppResul
 
 async fn channel(State(state): State<AppState>, Path(key): Path<String>) -> AppResult<Json<Value>> {
     let c = active(&state, &key).await?;
-    Ok(Json(json!({ "title": c.title, "greeting": c.greeting, "color": c.color, "ask_details": c.ask_details })))
+    let online = super::ops::online(&c.hours, &c.timezone, Utc::now());
+    Ok(Json(json!({
+        "title": c.title, "greeting": c.greeting, "color": c.color, "ask_details": c.ask_details,
+        "online": online, "offline_message": if online { None } else { c.offline_message.clone() },
+        "consent_text": c.consent_text, "ask_rating": c.ask_rating,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -74,6 +89,9 @@ struct Start {
     #[serde(default)]
     email: String,
     page_url: Option<String>,
+    /// Agreed to the channel's consent text.
+    #[serde(default)]
+    consent: bool,
 }
 
 fn opt(v: &str, max: usize) -> Option<String> {
@@ -94,17 +112,25 @@ async fn start(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(key):
     if c.ask_details && name.is_none() {
         return Err(AppError::bad("please tell us your name"));
     }
+    if c.consent_text.is_some() && !b.consent {
+        return Err(AppError::bad("please agree before starting the chat"));
+    }
     let token = random_token(24);
     // Chats nobody wrote in are not kept.
     sqlx::query("DELETE FROM chat_sessions s WHERE s.started_at < now() - interval '1 day' AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.author = 'visitor')")
         .execute(&state.db)
         .await?;
-    sqlx::query("INSERT INTO chat_sessions (channel_id, token_hash, visitor_name, visitor_email, page_url) VALUES ($1, $2, $3, $4, $5)")
+    sqlx::query(
+        "INSERT INTO chat_sessions (channel_id, token_hash, visitor_name, visitor_email, page_url, consent_at, offline)
+         VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, $7)",
+    )
         .bind(c.id)
         .bind(hash(&token))
         .bind(name)
         .bind(email)
         .bind(b.page_url.and_then(|p| opt(&p, 2000)).filter(|p| p.starts_with("http")))
+        .bind(c.consent_text.is_some())
+        .bind(!super::ops::online(&c.hours, &c.timezone, Utc::now()))
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "token": token })))
@@ -119,10 +145,12 @@ struct Session {
     visitor_name: Option<String>,
     visitor_email: Option<String>,
     page_url: Option<String>,
+    offline: bool,
+    rating: Option<i16>,
 }
 
 async fn find(state: &AppState, channel: Uuid, token: &str) -> AppResult<Session> {
-    sqlx::query_as("SELECT id, status, item_id, assigned_to, visitor_name, visitor_email, page_url FROM chat_sessions WHERE channel_id = $1 AND token_hash = $2")
+    sqlx::query_as("SELECT id, status, item_id, assigned_to, visitor_name, visitor_email, page_url, offline, rating FROM chat_sessions WHERE channel_id = $1 AND token_hash = $2")
         .bind(channel)
         .bind(hash(token))
         .fetch_optional(&state.db)
@@ -155,7 +183,7 @@ async fn poll(State(state): State<AppState>, Path(key): Path<String>, Query(q): 
             })
         })
         .collect();
-    Ok(Json(json!({ "status": s.status, "operator": operator, "messages": list })))
+    Ok(Json(json!({ "status": s.status, "operator": operator, "messages": list, "ask_rating": c.ask_rating, "rating": s.rating })))
 }
 
 #[derive(Deserialize)]
@@ -193,6 +221,11 @@ async fn send(State(state): State<AppState>, Path(key): Path<String>, Json(b): J
         if let Err(e) = welcome(&state, &c, &s, body).await {
             tracing::warn!(session = %s.id, error = ?e, "could not link a chat to the CRM");
         }
+        // The channel's automatic answer (or its away message, out of hours).
+        let reply = if s.offline { c.offline_message.clone().or(c.auto_reply.clone()) } else { c.auto_reply.clone() };
+        if let Some(r) = reply {
+            super::ops::auto(&state, s.id, &r).await?;
+        }
     } else if let Some(u) = s.assigned_to.filter(|_| unread == 1) {
         // Once per batch: further messages before the operator reads them only update the chat.
         notify(&state, &[u], NewNotification {
@@ -214,14 +247,8 @@ async fn welcome(state: &AppState, c: &Channel, s: &Session, body: &str) -> AppR
         .bind(&c.operators)
         .fetch_all(&state.db)
         .await?;
-    let operator = match active_ops.len() {
-        0 => None,
-        n => {
-            let mut redis = state.redis.clone();
-            let i: i64 = redis.incr(format!("chat:rr:{}", c.id), 1).await?;
-            Some(active_ops[((i - 1) as usize) % n])
-        }
-    };
+    // In turn (skipping those with their fill of chats), or offered to everyone.
+    let operator = super::ops::pick(state, c.id, &[]).await?;
     let auth = system_auth();
     let mut item = s.item_id;
     if item.is_none()
@@ -263,7 +290,7 @@ async fn welcome(state: &AppState, c: &Channel, s: &Session, body: &str) -> AppR
         broadcast(state, LEAD, id, false).await;
         item = Some(id);
     }
-    sqlx::query("UPDATE chat_sessions SET item_id = $2, assigned_to = COALESCE(assigned_to, $3) WHERE id = $1")
+    sqlx::query("UPDATE chat_sessions SET item_id = $2, assigned_to = COALESCE(assigned_to, $3), offered_at = CASE WHEN $3 IS NULL THEN offered_at ELSE now() END WHERE id = $1")
         .bind(s.id)
         .bind(item)
         .bind(operator)
@@ -291,5 +318,33 @@ async fn visitor_end(State(state): State<AppState>, Path(key): Path<String>, Jso
     let c = active(&state, &key).await?;
     let s = find(&state, c.id, &b.token).await?;
     end(&state, s.id, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct RateBody {
+    token: String,
+    rating: i16,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+/// The visitor's mark for the chat (once it has started; can be changed).
+async fn rate(State(state): State<AppState>, Path(key): Path<String>, Json(b): Json<RateBody>) -> AppResult<Json<Value>> {
+    let c = active(&state, &key).await?;
+    if !c.ask_rating {
+        return Err(AppError::bad("this chat doesn't take ratings"));
+    }
+    let s = find(&state, c.id, &b.token).await?;
+    if !(1..=5).contains(&b.rating) {
+        return Err(AppError::bad("rate 1 to 5"));
+    }
+    sqlx::query("UPDATE chat_sessions SET rating = $2, rating_comment = $3 WHERE id = $1")
+        .bind(s.id)
+        .bind(b.rating)
+        .bind(b.comment.and_then(|x| opt(&x, 2000)))
+        .execute(&state.db)
+        .await?;
+    announce(&state, s.id, "chat.changed").await;
     Ok(Json(json!({ "ok": true })))
 }

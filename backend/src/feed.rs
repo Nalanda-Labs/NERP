@@ -32,8 +32,9 @@ pub fn router() -> Router<AppState> {
         .route("/feed/important", get(important))
         .route("/feed/{id}", get(get_post).patch(update).delete(remove))
         .route("/feed/{id}/comments", get(comments).post(comment))
-        .route("/feed/comments/{id}", delete(remove_comment))
+        .route("/feed/comments/{id}", delete(remove_comment).patch(edit_comment))
         .route("/feed/{id}/like", post(like).delete(unlike))
+        .route("/users/{id}/badges", get(badges_of))
         .route("/feed/{id}/read", post(read))
         .route("/feed/{id}/vote", post(vote))
 }
@@ -52,13 +53,23 @@ const VISIBLE: &str = "((p.project_id IS NULL AND (p.to_all OR p.author_id = $1 
 /// SQL: in user $1's main feed, workgroup posts are those of their own groups.
 const IN_MY_FEED: &str = "(p.project_id IS NULL OR p.author_id = $1 OR EXISTS (SELECT 1 FROM project_members gm WHERE gm.project_id = p.project_id AND gm.user_id = $1))";
 
+/// Guests see only posts in the workgroups they are in.
+fn visible(auth: &AuthUser) -> String {
+    if auth.is_guest() {
+        format!("({VISIBLE} AND p.project_id IN (SELECT project_id FROM project_members WHERE user_id = $1))")
+    } else {
+        VISIBLE.to_string()
+    }
+}
+
 fn moderator(auth: &AuthUser) -> bool {
-    auth.can(perm::SETTINGS_MANAGE)
+    auth.can(perm::FEED_MODERATE) || auth.can(perm::SETTINGS_MANAGE)
 }
 
 /// Files on posts are readable by whoever can see the post.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
-    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS (SELECT 1 FROM feed_posts p WHERE $2 = ANY(p.file_ids) AND {VISIBLE})"))).bind(auth.id).bind(file).fetch_one(&state.db).await?)
+    let vis = visible(auth);
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS (SELECT 1 FROM feed_posts p WHERE $2 = ANY(p.file_ids) AND {vis})"))).bind(auth.id).bind(file).fetch_one(&state.db).await?)
 }
 
 /// Everyone a post goes to (for notifications and live updates).
@@ -107,6 +118,12 @@ struct PostRow {
     /// A workgroup's post.
     project_id: Option<Uuid>,
     project_name: Option<String>,
+    /// Reactions by kind, and mine.
+    reactions: Value,
+    my_reaction: Option<String>,
+    /// An appreciation post: the badge and who got it.
+    badge: Option<String>,
+    badge_people: Value,
 }
 
 const POST_SELECT: &str = "SELECT p.id, p.author_id, trim(u.first_name || ' ' || u.last_name) AS author_name, u.avatar_file_id AS author_avatar, p.body,
@@ -121,7 +138,12 @@ const POST_SELECT: &str = "SELECT p.id, p.author_id, trim(u.first_name || ' ' ||
     (SELECT option FROM feed_votes v WHERE v.post_id = p.id AND v.user_id = $1) AS my_vote,
     COALESCE((SELECT jsonb_agg(COALESCE(trim(au.first_name || ' ' || au.last_name), d.name)) FROM feed_audience a
         LEFT JOIN users au ON au.id = a.user_id LEFT JOIN departments d ON d.id = a.department_id WHERE a.post_id = p.id), '[]') AS \"to\",
-    p.project_id, (SELECT g.name FROM projects g WHERE g.id = p.project_id) AS project_name
+    p.project_id, (SELECT g.name FROM projects g WHERE g.id = p.project_id) AS project_name,
+    COALESCE((SELECT jsonb_object_agg(r.reaction, r.n) FROM (SELECT reaction, COUNT(*) AS n FROM feed_likes WHERE post_id = p.id GROUP BY reaction) r), '{}') AS reactions,
+    (SELECT l.reaction FROM feed_likes l WHERE l.post_id = p.id AND l.user_id = $1) AS my_reaction,
+    p.badge,
+    COALESCE((SELECT jsonb_agg(jsonb_build_object('id', bu.id, 'name', trim(bu.first_name || ' ' || bu.last_name), 'avatar_file_id', bu.avatar_file_id))
+        FROM feed_badges b JOIN users bu ON bu.id = b.user_id WHERE b.post_id = p.id), '[]') AS badge_people
     FROM feed_posts p LEFT JOIN users u ON u.id = p.author_id";
 
 #[derive(Deserialize)]
@@ -131,17 +153,21 @@ struct ListQuery {
     q: Option<String>,
     /// A workgroup's feed.
     project_id: Option<Uuid>,
+    /// Moderators: every post, whoever it is for.
+    #[serde(default)]
+    all: bool,
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<ListQuery>) -> AppResult<Json<Value>> {
+    let vis = visible(&auth);
     let limit = q.limit.unwrap_or(20).clamp(1, 100);
     let term = q.q.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).map(|t| format!("%{}%", t.replace('%', "\\%").replace('_', "\\_")));
     if let Some(g) = q.project_id {
         crate::tasks::access::project_access(&state, &auth, g).await?;
     }
     let mut items: Vec<PostRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{POST_SELECT} WHERE {VISIBLE} AND ($2::timestamptz IS NULL OR p.created_at < $2) AND ($3::text IS NULL OR lower(p.body) LIKE $3)
-           AND (CASE WHEN $5::uuid IS NULL THEN {IN_MY_FEED} ELSE p.project_id = $5 END)
+        "{POST_SELECT} WHERE ($6 OR {vis}) AND ($2::timestamptz IS NULL OR p.created_at < $2) AND ($3::text IS NULL OR lower(p.body) LIKE $3)
+           AND (CASE WHEN $5::uuid IS NULL THEN ($6 OR {IN_MY_FEED}) ELSE p.project_id = $5 END)
          ORDER BY p.created_at DESC LIMIT $4"
     )))
     .bind(auth.id)
@@ -149,6 +175,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Lis
     .bind(term)
     .bind(limit + 1)
     .bind(q.project_id)
+    .bind(q.all && moderator(&auth))
     .fetch_all(&state.db)
     .await?;
     let more = items.len() as i64 > limit;
@@ -158,8 +185,9 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Lis
 
 /// Important posts I haven't confirmed yet (shown at the top).
 async fn important(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    let vis = visible(&auth);
     let items: Vec<PostRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{POST_SELECT} WHERE {VISIBLE} AND {IN_MY_FEED} AND p.important AND p.author_id IS DISTINCT FROM $1
+        "{POST_SELECT} WHERE {vis} AND {IN_MY_FEED} AND p.important AND p.author_id IS DISTINCT FROM $1
            AND NOT EXISTS (SELECT 1 FROM feed_reads r WHERE r.post_id = p.id AND r.user_id = $1)
          ORDER BY p.created_at DESC LIMIT 20"
     )))
@@ -170,9 +198,12 @@ async fn important(State(state): State<AppState>, auth: AuthUser) -> AppResult<J
 }
 
 async fn post_row(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<PostRow> {
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("{POST_SELECT} WHERE {VISIBLE} AND p.id = $2")))
+    // Moderators reach every post (to look at what was reported to them).
+    let vis = visible(auth);
+    sqlx::query_as(sqlx::AssertSqlSafe(format!("{POST_SELECT} WHERE ({vis} OR $3) AND p.id = $2")))
         .bind(auth.id)
         .bind(id)
+        .bind(moderator(auth))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("post"))
@@ -219,6 +250,10 @@ struct PostInput {
     poll: Option<PollInput>,
     /// Post in a workgroup's feed (to its members).
     project_id: Option<Uuid>,
+    /// Appreciation: a badge for these colleagues.
+    badge: Option<String>,
+    #[serde(default)]
+    badge_user_ids: Vec<Uuid>,
 }
 fn yes() -> bool {
     true
@@ -245,6 +280,10 @@ pub async fn create_post(state: &AppState, auth: &AuthUser, input: Value) -> App
 
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<PostInput>) -> AppResult<Json<Value>> {
     let body = required("post", b.body.as_deref().unwrap_or(""), 20_000)?;
+    // Guests post only in their workgroups.
+    if auth.is_guest() && b.project_id.is_none() {
+        return Err(AppError::Forbidden);
+    }
     if b.file_ids.len() > 20 {
         return Err(AppError::bad("at most 20 files"));
     }
@@ -254,6 +293,19 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
     }
     let mut b = b;
     let poll = clean_poll(b.poll.take())?;
+    // Appreciation: a known badge, for one to 50 active colleagues (not oneself).
+    if let Some(badge) = &b.badge {
+        if !BADGES.iter().any(|(k, _)| k == badge) {
+            return Err(AppError::bad("choose one of the badges"));
+        }
+        b.badge_user_ids.retain(|u| *u != auth.id);
+        b.badge_user_ids.sort();
+        b.badge_user_ids.dedup();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&b.badge_user_ids).fetch_one(&state.db).await?;
+        if b.badge_user_ids.is_empty() || b.badge_user_ids.len() > 50 || n as usize != b.badge_user_ids.len() {
+            return Err(AppError::bad("give the badge to one to 50 colleagues"));
+        }
+    }
     if let Some(g) = b.project_id {
         if !crate::tasks::access::project_access(&state, &auth, g).await?.contribute {
             return Err(AppError::Forbidden);
@@ -272,7 +324,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
         }
     }
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO feed_posts (author_id, body, file_ids, to_all, important, poll, project_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id")
+    let id: Uuid = sqlx::query_scalar("INSERT INTO feed_posts (author_id, body, file_ids, to_all, important, poll, project_id, badge) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id")
         .bind(auth.id)
         .bind(&body)
         .bind(&b.file_ids)
@@ -280,8 +332,12 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
         .bind(b.important)
         .bind(poll)
         .bind(b.project_id)
+        .bind(&b.badge)
         .fetch_one(&mut *tx)
         .await?;
+    for u in &b.badge_user_ids {
+        sqlx::query("INSERT INTO feed_badges (post_id, user_id) VALUES ($1, $2)").bind(id).bind(u).execute(&mut *tx).await?;
+    }
     if !b.to_all {
         for u in &b.users {
             sqlx::query("INSERT INTO feed_audience (post_id, user_id) VALUES ($1, $2)").bind(id).bind(u).execute(&mut *tx).await?;
@@ -303,8 +359,48 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
         })
         .await;
     }
+    if let Some(badge) = &b.badge {
+        let label = BADGES.iter().find(|(k, _)| k == badge).map(|(_, l)| *l).unwrap_or("A badge");
+        notify(&state, &b.badge_user_ids, NewNotification { kind: "feed.badge", title: format!("{name} gave you “{label}”"), body: Some(body.chars().take(200).collect()), link: Some(format!("/feed?post={id}")), actor: Some(auth.id) }).await;
+    }
     crate::realtime::publish(&state, Some(who), "feed.post", json!({ "post_id": id })).await;
     get_post(State(state), auth, Path(id)).await
+}
+
+/// Appreciation badges: (code, label).
+pub const BADGES: &[(&str, &str)] = &[
+    ("thanks", "Thank you"),
+    ("team_player", "Team player"),
+    ("great_idea", "Great idea"),
+    ("problem_solver", "Problem solver"),
+    ("leader", "Leader"),
+    ("above_beyond", "Above and beyond"),
+];
+
+/// Someone's badges: how many of each, and the latest.
+async fn badges_of(State(state): State<AppState>, _auth: AuthUser, Path(user): Path<Uuid>) -> AppResult<Json<Value>> {
+    let counts: Vec<(String, i64)> = sqlx::query_as("SELECT p.badge, COUNT(*) FROM feed_badges b JOIN feed_posts p ON p.id = b.post_id WHERE b.user_id = $1 GROUP BY p.badge ORDER BY 2 DESC")
+        .bind(user)
+        .fetch_all(&state.db)
+        .await?;
+    let recent: Vec<(Uuid, String, Option<String>, String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT p.id, p.badge, trim(a.first_name || ' ' || a.last_name), p.body, p.created_at FROM feed_badges b JOIN feed_posts p ON p.id = b.post_id
+         LEFT JOIN users a ON a.id = p.author_id WHERE b.user_id = $1 ORDER BY p.created_at DESC LIMIT 20",
+    )
+    .bind(user)
+    .fetch_all(&state.db)
+    .await?;
+    let label = |k: &str| BADGES.iter().find(|(c, _)| *c == k).map(|(_, l)| *l).unwrap_or(k).to_string();
+    Ok(Json(json!({
+        "badges": BADGES.iter().map(|(k, l)| json!({ "code": k, "label": l })).collect::<Vec<_>>(),
+        "counts": counts.iter().map(|(k, n)| json!({ "code": k, "label": label(k), "count": n })).collect::<Vec<_>>(),
+        "recent": recent.iter().map(|(id, k, from, body, at)| json!({ "post_id": id, "code": k, "label": label(k), "from": from, "body": body.chars().take(200).collect::<String>(), "at": at })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize, Default)]
+struct ReactInput {
+    reaction: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -314,7 +410,7 @@ struct PostPatch {
 
 async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PostPatch>) -> AppResult<Json<Value>> {
     let p = post_row(&state, &auth, id).await?;
-    if p.author_id != Some(auth.id) {
+    if p.author_id != Some(auth.id) && !moderator(&auth) {
         return Err(AppError::Forbidden);
     }
     if let Some(body) = b.body {
@@ -387,6 +483,27 @@ async fn comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
     comments(State(state), auth, Path(id)).await
 }
 
+#[derive(Deserialize)]
+struct CommentPatch {
+    body: String,
+}
+
+/// Its author, or a moderator, changes a comment.
+async fn edit_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<CommentPatch>) -> AppResult<Json<Value>> {
+    let (post, author): (Uuid, Option<Uuid>) = sqlx::query_as("SELECT post_id, author_id FROM feed_comments WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound("comment"))?;
+    post_row(&state, &auth, post).await?;
+    if author != Some(auth.id) && !moderator(&auth) {
+        return Err(AppError::Forbidden);
+    }
+    let body = required("comment", &b.body, 10_000)?;
+    sqlx::query("UPDATE feed_comments SET body = $2 WHERE id = $1").bind(id).bind(body).execute(&state.db).await?;
+    comments(State(state), auth, Path(post)).await
+}
+
 async fn remove_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let (post, author): (Uuid, Option<Uuid>) = sqlx::query_as("SELECT post_id, author_id FROM feed_comments WHERE id = $1")
         .bind(id)
@@ -401,9 +518,14 @@ async fn remove_comment(State(state): State<AppState>, auth: AuthUser, Path(id):
     comments(State(state), auth, Path(post)).await
 }
 
-async fn like(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+/// Reacts to a post (a like unless another reaction is named); reacting again changes it.
+async fn like(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, body: Option<Json<ReactInput>>) -> AppResult<Json<Value>> {
     post_row(&state, &auth, id).await?;
-    sqlx::query("INSERT INTO feed_likes (post_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(auth.id).execute(&state.db).await?;
+    let reaction = body.and_then(|b| b.0.reaction).unwrap_or_else(|| "like".into());
+    if !["like", "love", "laugh", "wow", "sad", "clap"].contains(&reaction.as_str()) {
+        return Err(AppError::bad("react with like, love, laugh, wow, sad or clap"));
+    }
+    sqlx::query("INSERT INTO feed_likes (post_id, user_id, reaction) VALUES ($1, $2, $3) ON CONFLICT (post_id, user_id) DO UPDATE SET reaction = $3").bind(id).bind(auth.id).bind(&reaction).execute(&state.db).await?;
     get_post(State(state), auth, Path(id)).await
 }
 

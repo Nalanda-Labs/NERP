@@ -105,7 +105,8 @@ pub(crate) async fn seat(state: &AppState, auth: &AuthUser, chat: Uuid) -> AppRe
     let Some((kind, audience, visibility, post_policy, is_general, linked, _dept, role, is_head)) = row else {
         return Err(AppError::NotFound("chat"));
     };
-    if role.is_none() && visibility != "open" {
+    // Open chats are open to the company, not to guests.
+    if role.is_none() && (visibility != "open" || auth.is_guest()) {
         return Err(AppError::NotFound("chat"));
     }
     let company = match audience.as_str() {
@@ -128,10 +129,11 @@ pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> App
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM im_messages m JOIN im_chats c ON c.id = m.chat_id
                         WHERE $1 = ANY(m.file_ids) AND m.deleted_at IS NULL
-                          AND (c.visibility = 'open' OR EXISTS (SELECT 1 FROM im_members mm WHERE mm.chat_id = m.chat_id AND mm.user_id = $2)))",
+                          AND ((c.visibility = 'open' AND NOT $3) OR EXISTS (SELECT 1 FROM im_members mm WHERE mm.chat_id = m.chat_id AND mm.user_id = $2)))",
     )
     .bind(file)
     .bind(auth.id)
+    .bind(auth.is_guest())
     .fetch_one(&state.db)
     .await?)
 }
@@ -227,10 +229,11 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Lis
 
 async fn chat_row(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<ChatRow> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {CHAT_COLUMNS} {CHAT_FROM} WHERE c.id = $2 AND (me.user_id IS NOT NULL OR c.visibility = 'open')"
+        "SELECT {CHAT_COLUMNS} {CHAT_FROM} WHERE c.id = $2 AND (me.user_id IS NOT NULL OR (c.visibility = 'open' AND NOT $3))"
     )))
     .bind(auth.id)
     .bind(id)
+    .bind(auth.is_guest())
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("chat"))
@@ -239,15 +242,15 @@ async fn chat_row(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Chat
 pub(crate) async fn chat_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Value> {
     let c = chat_row(state, auth, id).await?;
     let s = seat(state, auth, id).await?;
-    let people: Vec<(Uuid, String, Option<Uuid>, DateTime<Utc>, String)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id, m.last_read_at, m.role FROM im_members m JOIN users u ON u.id = m.user_id
+    let people: Vec<(Uuid, String, Option<Uuid>, DateTime<Utc>, String, bool)> = sqlx::query_as(
+        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id, m.last_read_at, m.role, u.is_guest FROM im_members m JOIN users u ON u.id = m.user_id
          WHERE m.chat_id = $1 ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, u.first_name, u.last_name LIMIT 1000",
     )
     .bind(id)
     .fetch_all(&state.db)
     .await?;
     let mut v = serde_json::to_value(c).unwrap();
-    v["people"] = json!(people.into_iter().map(|(id, name, a, read, role)| json!({ "id": id, "name": name, "avatar_file_id": a, "last_read_at": read, "role": role })).collect::<Vec<_>>());
+    v["people"] = json!(people.into_iter().map(|(id, name, a, read, role, guest)| json!({ "id": id, "name": name, "avatar_file_id": a, "last_read_at": read, "role": role, "is_guest": guest })).collect::<Vec<_>>());
     v["can"] = json!({
         "manage": s.manage,
         "post": s.post,
@@ -276,6 +279,10 @@ async fn active_users(state: &AppState, ids: &[Uuid]) -> AppResult<()> {
 async fn direct(State(state): State<AppState>, auth: AuthUser, Path(user): Path<Uuid>) -> AppResult<Json<Value>> {
     if user == auth.id {
         return Err(AppError::bad("pick someone else"));
+    }
+    // Guests write privately only to people they already share a chat or workgroup with.
+    if auth.is_guest() && !crate::guests::shares_with(&state, auth.id, user).await? {
+        return Err(AppError::Forbidden);
     }
     active_users(&state, &[user]).await?;
     let mut pair = [auth.id, user];
@@ -342,6 +349,9 @@ fn check_choice(field: &str, v: &str, allowed: &[&str]) -> AppResult<()> {
 }
 
 async fn create_group(State(state): State<AppState>, auth: AuthUser, Json(b): Json<GroupInput>) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Err(AppError::Forbidden);
+    }
     let title = required("title", b.title.as_deref().unwrap_or(""), 120)?;
     let kind = b.kind.unwrap_or_else(|| "group".into());
     check_choice("kind", &kind, &["group", "channel"])?;

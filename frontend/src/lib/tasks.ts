@@ -239,6 +239,8 @@ export interface ProjectSummary {
 	/** I asked to join (closed groups). */
 	requested: boolean;
 	request_count: number;
+	last_activity_at?: string;
+	unread?: number;
 }
 
 export const KIND_LABEL: Record<ProjectSummary['kind'], string> = { group: 'Workgroup', project: 'Project', scrum: 'Scrum team' };
@@ -256,6 +258,7 @@ export interface ProjectMember {
 	position: string | null;
 	avatar_file_id: string | null;
 	role: 'owner' | 'member' | 'viewer';
+	is_guest?: boolean;
 }
 
 export interface ProjectDetail extends ProjectSummary {

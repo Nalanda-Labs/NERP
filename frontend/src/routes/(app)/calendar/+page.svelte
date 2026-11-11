@@ -6,6 +6,9 @@
 	import { onMount } from 'svelte';
 	import { api, query } from '#lib/api.ts';
 	import EventEditor from '#lib/components/EventEditor.svelte';
+	import CalendarSharing from '#lib/components/calendar/CalendarSharing.svelte';
+	import SlotLinks from '#lib/components/calendar/SlotLinks.svelte';
+	import ConnectedCalendars from '#lib/components/calendar/ConnectedCalendars.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import Modal from '#lib/components/Modal.svelte';
 	import MultiUserPicker from '#lib/components/MultiUserPicker.svelte';
@@ -13,7 +16,7 @@
 	import { toasts } from '#lib/toast.svelte.ts';
 
 	type Entry = {
-		kind: 'event' | 'task' | 'activity';
+		kind: 'event' | 'task' | 'activity' | 'booking';
 		id: string;
 		user_id: string;
 		title: string;
@@ -35,6 +38,13 @@
 	let mode = $state<'month' | 'week'>((() => { try { return (localStorage.getItem(KEY) as 'month' | 'week') ?? 'month'; } catch { return 'month'; } })());
 	let cursor = $state(new Date());
 	let entries = $state<Entry[]>([]);
+	// Colleagues whose calendars are closed to me.
+	let closed = $state<string[]>([]);
+	// Colleagues who shared their calendar with me (or my departments).
+	let sharedWithMe = $state<(Person & { level: string })[]>([]);
+	let sharingOpen = $state(false);
+	let linksOpen = $state(false);
+	let accountsOpen = $state(false);
 	let extras = $state(true);
 	let colleagues = $state<Person[]>([]);
 	// Colleagues' colours; mine is the brand colour.
@@ -56,8 +66,11 @@
 		const mine = ++seq;
 		const from = days[0], to = addDays(days[days.length - 1], 1);
 		try {
-			const r = await api.get<{ items: Entry[] }>('/calendar' + query({ from: from.toISOString(), to: to.toISOString(), users: colleagues.map((c) => c.id).join(',') || undefined, extras: extras || undefined }));
-			if (mine === seq) entries = r.items;
+			const r = await api.get<{ items: Entry[]; closed: string[] }>('/calendar' + query({ from: from.toISOString(), to: to.toISOString(), users: colleagues.map((c) => c.id).join(',') || undefined, extras: extras || undefined }));
+			if (mine === seq) {
+				entries = r.items;
+				closed = r.closed ?? [];
+			}
 		} catch (e) {
 			toasts.error(e);
 		}
@@ -102,6 +115,14 @@
 		editorOpen = true;
 	}
 	onMount(() => {
+		api.get<{ items: (Person & { level: string })[] }>('/calendar/shared-with-me').then((r) => (sharedWithMe = r.items)).catch(() => {});
+		// Back from Google or Microsoft sign-in.
+		const connected = page.url.searchParams.get('connected'), failed = page.url.searchParams.get('error');
+		if (connected || failed) {
+			connected ? toasts.success(`Connected ${connected}; syncing now`) : toasts.error(failed);
+			accountsOpen = true;
+			goto('/calendar', { replaceState: true });
+		}
 		const ev = page.url.searchParams.get('event');
 		if (ev) {
 			editing = { id: ev, occurrence: null, at: null };
@@ -152,11 +173,24 @@
 			<div class="flex rounded-full bg-slate-100 p-0.5" role="group" aria-label="View">
 				{#each [['month', 'Month'], ['week', 'Week']] as [m, l] (m)}<button class="rounded-full px-3 py-1 text-sm font-medium {mode === m ? 'bg-white shadow-sm' : 'text-slate-600'}" aria-pressed={mode === m} onclick={() => setMode(m as 'month' | 'week')}>{l}</button>{/each}
 			</div>
+			<button class="btn btn-secondary" onclick={() => (sharingOpen = true)}>Sharing</button>
+			<button class="btn btn-secondary" onclick={() => (linksOpen = true)}>Booking links</button>
+			<button class="btn btn-secondary" onclick={() => (accountsOpen = true)}>Connected calendars</button>
 			<button class="btn btn-secondary" onclick={openFeed}><Icon name="calendar" class="size-4" /> Subscribe</button>
 			<button class="btn btn-primary" onclick={() => newAt(new Date(Math.ceil(Date.now() / 1800000) * 1800000))}><Icon name="plus" class="size-4" /> New event</button>
 		</div>
 	</div>
-	<div class="max-w-xl"><MultiUserPicker bind:value={colleagues} exclude={session.user ? [session.user.id] : []} placeholder="Show colleagues' calendars…" /></div>
+	<div class="max-w-xl space-y-1.5">
+		<MultiUserPicker bind:value={colleagues} exclude={session.user ? [session.user.id] : []} placeholder="Show colleagues' calendars…" />
+		{#if sharedWithMe.some((p) => !colleagues.some((c) => c.id === p.id))}
+			<p class="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">Shared with you:
+				{#each sharedWithMe.filter((p) => !colleagues.some((c) => c.id === p.id)) as p (p.id)}
+					<button class="rounded-full border border-slate-200 px-2 py-0.5 text-slate-700 hover:border-brand-400" onclick={() => (colleagues = [...colleagues, p])}>+ {p.name}</button>
+				{/each}
+			</p>
+		{/if}
+		{#if closed.length}<p class="text-xs text-amber-700" data-closed>{colleagues.filter((c) => closed.includes(c.id)).map((c) => c.name).join(', ')} {closed.length === 1 ? "doesn't" : "don't"} share their calendar with you.</p>{/if}
+	</div>
 
 	{#if mode === 'month'}
 		<div class="card overflow-hidden">
@@ -213,9 +247,17 @@
 </div>
 
 <EventEditor bind:open={editorOpen} eventId={editing.id} occurrence={editing.occurrence} startAt={editing.at} onchanged={load} />
+<CalendarSharing bind:open={sharingOpen} />
+<SlotLinks bind:open={linksOpen} />
+<ConnectedCalendars bind:open={accountsOpen} onchanged={load} />
 
-<Modal bind:open={feedOpen} title="Subscribe from another calendar">
+<Modal bind:open={feedOpen} title="Use your calendar in other apps">
 	<div class="space-y-3 text-sm text-slate-600">
+		<div class="space-y-1 rounded-xl bg-slate-50 p-3" data-caldav>
+			<p class="font-medium text-slate-800">Two-way sync (CalDAV)</p>
+			<p>Apple Calendar, Thunderbird, DAVx5 on Android and other CalDAV apps can show and change your events. Use the server <code class="rounded bg-white px-1 text-slate-800">{typeof location !== 'undefined' ? location.origin : ''}/dav/</code>, your email, and an <a class="text-brand-600 hover:underline" href="/profile">app password from your profile</a>.</p>
+		</div>
+		<p class="font-medium text-slate-800">Read-only link</p>
 		<p>Add your NERP calendar to Google Calendar, Outlook or your phone with a private link. It shows your events and CRM calls and meetings, and refreshes on its own (how often depends on the app).</p>
 		{#if feed?.url}
 			<div class="space-y-1"><p class="font-medium text-slate-800">Your link (shown once; keep it private):</p><code class="block rounded-lg bg-slate-50 px-3 py-2 text-xs break-all text-slate-800" data-feed>{feed.url}</code></div>

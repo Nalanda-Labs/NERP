@@ -173,6 +173,14 @@ pub(crate) struct Made {
 /// Checks and stores a booking. `actor`: the employee making it (None: a client, through a
 /// form). Resources must be free unless it goes on the waiting list or over capacity.
 pub(crate) async fn make(state: &AppState, actor: Option<&AuthUser>, b: NewBooking, source: &str, form: Option<Uuid>) -> AppResult<Made> {
+    if b.resource_ids.len() > 10 {
+        return Err(AppError::bad("choose one to ten resources"));
+    }
+    let ids = b.resource_ids.clone();
+    super::with_resource_locks(state, &ids, || make_locked(state, actor, b, source, form)).await
+}
+
+async fn make_locked(state: &AppState, actor: Option<&AuthUser>, b: NewBooking, source: &str, form: Option<Uuid>) -> AppResult<Made> {
     let name = clean(Some(b.client_name.clone())).ok_or_else(|| AppError::bad("who is it for?"))?;
     if name.chars().count() > 200 {
         return Err(AppError::bad("the name is too long"));
@@ -433,6 +441,13 @@ struct UpdateBooking {
 
 /// Moves a booking (or places one from the waiting list), or changes its details.
 async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<UpdateBooking>) -> AppResult<Json<Booking>> {
+    let mut ids = load(&state, id).await?.resource_ids;
+    ids.extend(b.resource_ids.iter().flatten().take(10));
+    super::with_resource_locks(&state, &ids, || update_locked(&state, auth, id, b)).await
+}
+
+async fn update_locked(state: &AppState, auth: AuthUser, id: Uuid, b: UpdateBooking) -> AppResult<Json<Booking>> {
+    let state = state.clone();
     let cur = load(&state, id).await?;
     if cur.status == "cancelled" {
         return Err(AppError::bad("a cancelled booking can't be changed"));

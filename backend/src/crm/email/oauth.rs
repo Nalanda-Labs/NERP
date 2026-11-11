@@ -33,7 +33,7 @@ pub struct Provider<'a> {
     pub client: &'a OAuthClient,
     auth_url: String,
     token_url: String,
-    scope: &'static str,
+    pub(crate) scope: &'static str,
     extra: &'static [(&'static str, &'static str)],
     pub imap: (&'static str, i32, &'static str),
     pub smtp: (&'static str, i32, &'static str),
@@ -148,11 +148,11 @@ pub async fn start(State(state): State<AppState>, auth: AuthUser, Path(kind): Pa
 }
 
 #[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: Option<i64>,
-    id_token: Option<String>,
+pub(crate) struct TokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<i64>,
+    pub id_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -161,7 +161,7 @@ struct TokenError {
     error_description: Option<String>,
 }
 
-async fn token_request(p: &Provider<'_>, form: &[(&str, &str)]) -> Result<TokenResponse, String> {
+pub(crate) async fn token_request(p: &Provider<'_>, form: &[(&str, &str)]) -> Result<TokenResponse, String> {
     let mut all = vec![("client_id", p.client.client_id.as_str()), ("client_secret", p.client.client_secret.as_str())];
     all.extend_from_slice(form);
     let res = http()?.post(&p.token_url).form(&all).send().await.map_err(|e| format!("cannot reach {}: {e}", p.kind))?;
@@ -170,7 +170,7 @@ async fn token_request(p: &Provider<'_>, form: &[(&str, &str)]) -> Result<TokenR
     if !status.is_success() {
         let e: Option<TokenError> = serde_json::from_str(&text).ok();
         return Err(match e {
-            Some(e) if e.error == "invalid_grant" => "access was revoked or expired; reconnect the mailbox".into(),
+            Some(e) if e.error == "invalid_grant" => "access was revoked or expired; connect the account again".into(),
             Some(e) => format!("{}: {}", e.error, e.error_description.unwrap_or_default()),
             None => format!("token request failed ({status})"),
         });
@@ -193,27 +193,38 @@ pub struct Callback {
     error_description: Option<String>,
 }
 
-/// The provider sends the browser here; the result goes back to the Mailboxes page.
+/// The provider sends the browser here (for mailboxes and for calendars, one redirect URI);
+/// the result goes back to the page the sign-in started from.
 pub async fn callback(State(state): State<AppState>, Query(q): Query<Callback>) -> Redirect {
-    let base = format!("{}/crm/mailboxes", state.config.public_url);
+    // One use only.
+    let saved: Option<Value> = match q.state.as_deref().filter(|t| !t.is_empty()) {
+        Some(t) => {
+            let mut redis = state.redis.clone();
+            let v: Option<String> = redis.get_del(format!("crm:oauth:{t}")).await.unwrap_or(None);
+            v.and_then(|v| serde_json::from_str(&v).ok())
+        }
+        None => None,
+    };
+    let calendar = saved.as_ref().is_some_and(|s| s["purpose"] == "calendar");
+    let base = format!("{}{}", state.config.public_url, if calendar { "/calendar" } else { "/crm/mailboxes" });
     let back = |k: &str, v: &str| Redirect::to(&format!("{base}?{}", url_encode(&[(k, v)])));
     if let Some(e) = q.error {
         return back("error", &q.error_description.unwrap_or(e));
     }
-    match finish(&state, q.code.unwrap_or_default(), q.state.unwrap_or_default()).await {
+    let code = q.code.unwrap_or_default();
+    let result = match saved {
+        None => Err("the sign-in took too long or was already used; try again".to_string()),
+        Some(_) if code.is_empty() => Err("the sign-in was not completed".to_string()),
+        Some(s) if calendar => crate::calendar::sync::oauth_finish(&state, s, code).await,
+        Some(s) => finish(&state, code, s).await,
+    };
+    match result {
         Ok(email) => back("connected", &email),
         Err(e) => back("error", &e),
     }
 }
 
-async fn finish(state: &AppState, code: String, token: String) -> Result<String, String> {
-    if code.is_empty() || token.is_empty() {
-        return Err("the sign-in was not completed".into());
-    }
-    let mut redis = state.redis.clone();
-    // One use only.
-    let saved: Option<String> = redis.get_del(format!("crm:oauth:{token}")).await.map_err(|e| e.to_string())?;
-    let saved: Value = serde_json::from_str(&saved.ok_or("the sign-in took too long or was already used; try again")?).map_err(|e| e.to_string())?;
+async fn finish(state: &AppState, code: String, saved: Value) -> Result<String, String> {
     let user: Uuid = serde_json::from_value(saved["user"].clone()).map_err(|e| e.to_string())?;
     let kind = saved["kind"].as_str().unwrap_or_default().to_string();
     let p = provider(state, &kind).ok_or("this provider is no longer configured")?;

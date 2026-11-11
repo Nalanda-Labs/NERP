@@ -102,6 +102,9 @@ async fn can_read(state: &AppState, file: &FileMeta, auth: &AuthUser) -> AppResu
     if crate::meetings::can_view_file(state, auth, file.id).await? {
         return Ok(true);
     }
+    if crate::kb::can_view_file(state, auth, file.id).await? {
+        return Ok(true);
+    }
     crate::drive::can_view_file(state, auth, file.id).await
 }
 
@@ -267,7 +270,7 @@ async fn upload(
     let mut is_public = false;
     let mut stored: Option<(Uuid, String, String, i64, String, PathBuf)> = None;
 
-    while let Some(mut field) = multipart.next_field().await.map_err(|e| AppError::bad(e.to_string()))? {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| multipart_error(&state, e))? {
         match field.name() {
             Some("public") => {
                 let v = field.text().await.map_err(|e| AppError::bad(e.to_string()))?;
@@ -289,7 +292,7 @@ async fn upload(
                 let mut hasher = Sha256::new();
                 let mut size: usize = 0;
                 let result: AppResult<()> = async {
-                    while let Some(chunk) = field.chunk().await.map_err(|e| AppError::bad(e.to_string()))? {
+                    while let Some(chunk) = field.chunk().await.map_err(|e| multipart_error(&state, e))? {
                         size += chunk.len();
                         if size > state.config.max_upload_bytes {
                             return Err(AppError::PayloadTooLarge(format!(
@@ -442,16 +445,23 @@ fn range(headers: &HeaderMap, size: u64) -> Result<Option<(u64, u64)>, ()> {
 /// Sends a stored file from disk as it is read (never all in memory), with byte ranges so
 /// videos can be played and seeked, and the download headers.
 pub async fn stream(state: &AppState, file: &FileMeta, name: &str, headers: &HeaderMap) -> AppResult<Response> {
+    send_file(&state.config.upload_dir.join(&file.storage_path), &file.mime_type, file.is_public, name, headers).await
+}
+
+/// The same for a file elsewhere on disk (a backup), always as a private download.
+pub async fn stream_disk(path: &std::path::Path, name: &str, mime: &str, headers: &HeaderMap) -> AppResult<Response> {
+    send_file(path, mime, false, name, headers).await
+}
+
+async fn send_file(path: &std::path::Path, mime: &str, public: bool, name: &str, headers: &HeaderMap) -> AppResult<Response> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let mut handle = tokio::fs::File::open(state.config.upload_dir.join(&file.storage_path))
-        .await
-        .map_err(|_| AppError::NotFound("file"))?;
-    let size = handle.metadata().await.map(|m| m.len()).unwrap_or(file.size_bytes as u64);
+    let mut handle = tokio::fs::File::open(path).await.map_err(|_| AppError::NotFound("file"))?;
+    let size = handle.metadata().await.map(|m| m.len()).map_err(|_| AppError::NotFound("file"))?;
 
     // Raster images, PDFs, audio and video may show in the page; everything else downloads.
     // SVG/HTML never render inline because they can carry scripts.
     let inline = matches!(
-        file.mime_type.as_str(),
+        mime,
         "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "application/pdf"
             | "video/mp4" | "video/webm" | "audio/mpeg" | "audio/ogg" | "audio/webm" | "audio/mp4"
     );
@@ -481,7 +491,7 @@ pub async fn stream(state: &AppState, file: &FileMeta, name: &str, headers: &Hea
     let mut res = Body::from_stream(ReaderStream::with_capacity(handle.take(len), 64 * 1024)).into_response();
     *res.status_mut() = status;
     let h = res.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_str(&file.mime_type).unwrap_or(HeaderValue::from_static("application/octet-stream")));
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_str(mime).unwrap_or(HeaderValue::from_static("application/octet-stream")));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     if let Some(cr) = content_range {
@@ -492,7 +502,7 @@ pub async fn stream(state: &AppState, file: &FileMeta, name: &str, headers: &Hea
     h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'none'"));
     h.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(if file.is_public { "public, max-age=86400, immutable" } else { "private, max-age=0" }),
+        HeaderValue::from_static(if public { "public, max-age=86400, immutable" } else { "private, max-age=0" }),
     );
     Ok(res)
 }
@@ -534,4 +544,22 @@ async fn remove(
     }
     audit::record(&state.db, Some(auth.id), "file.delete", "file", Some(id.to_string()), json!({ "name": file.original_name }), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// A body cut off by the size limit is "too large", whichever read noticed it first.
+fn multipart_error(state: &AppState, e: axum::extract::multipart::MultipartError) -> AppError {
+    if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        AppError::PayloadTooLarge(format!("files may be at most {} MB", state.config.max_upload_bytes / (1024 * 1024)))
+    } else {
+        AppError::bad(e.to_string())
+    }
+}
+
+/// Whether a person may read a stored file (for other modules).
+pub async fn may_read(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<bool> {
+    match fetch(state, id).await {
+        Ok(f) => can_read(state, &f, auth).await,
+        Err(AppError::NotFound(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
 }

@@ -115,6 +115,9 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Star
             m
         }
         None => {
+            if auth.is_guest() {
+                return Err(AppError::bad("start the call from one of your chats"));
+            }
             let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&b.users).fetch_one(&state.db).await?;
             if n as usize != b.users.len() || b.users.is_empty() {
                 return Err(AppError::bad("call one or more active colleagues"));

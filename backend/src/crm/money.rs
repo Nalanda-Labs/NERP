@@ -224,9 +224,11 @@ pub struct Product {
     /// Variants: the product they are a variant of, and their property values.
     parent_id: Option<Uuid>,
     props: Value,
+    /// A service: sold like a product, never kept in stock.
+    is_service: bool,
 }
 
-const PRODUCT_COLUMNS: &str = "id, name, sku, description, price, currency, tax_rate, tax_included, unit, is_active, updated_at, in_shop, slug, shop_category_id, image_file_id, stock, parent_id, props";
+const PRODUCT_COLUMNS: &str = "id, name, sku, description, price, currency, tax_rate, tax_included, unit, is_active, updated_at, in_shop, slug, shop_category_id, image_file_id, stock, parent_id, props, is_service";
 
 #[derive(Deserialize)]
 struct ProductQuery {
@@ -283,6 +285,7 @@ struct ProductInput {
     image_file_id: Option<Option<Uuid>>,
     #[serde(default, deserialize_with = "crate::routes::double_option")]
     stock: Option<Option<String>>,
+    is_service: Option<bool>,
 }
 
 pub(super) fn can_manage_products(auth: &AuthUser) -> AppResult<()> {
@@ -318,7 +321,10 @@ async fn save_product(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: Pr
     let name = required("name", b.name.as_deref().unwrap_or(""), 300)?;
     let tax_rate = tax(&b.tax_rate)?;
     let unit = clean(b.unit).unwrap_or_else(|| "pcs".into());
-    let shop = ShopFields { in_shop: b.in_shop, shop_category_id: b.shop_category_id, image_file_id: b.image_file_id, stock: b.stock };
+    // Services are never counted in stock.
+    let stock = if b.is_service == Some(true) { None } else { b.stock };
+    let shop = ShopFields { in_shop: b.in_shop, shop_category_id: b.shop_category_id, image_file_id: b.image_file_id, stock };
+    let is_service = b.is_service;
     let id = match id {
         Some(id) => {
             sqlx::query(
@@ -355,6 +361,17 @@ async fn save_product(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: Pr
         .fetch_one(&state.db)
         .await?,
     };
+    if let Some(sv) = is_service {
+        // A service holds no stock: a product still in a warehouse can't become one.
+        if sv {
+            let held: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM inv_stock WHERE product_id = $1 AND quantity <> 0)").bind(id).fetch_one(&state.db).await?;
+            if held {
+                return Err(AppError::bad("this product is in stock; write it off before making it a service"));
+            }
+            sqlx::query("UPDATE crm_products SET stock = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+        }
+        sqlx::query("UPDATE crm_products SET is_service = $2 WHERE id = $1").bind(id).bind(sv).execute(&state.db).await?;
+    }
     save_shop_fields(state, auth, id, shop).await?;
     Ok(id)
 }

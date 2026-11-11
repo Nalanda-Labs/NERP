@@ -354,6 +354,27 @@
 		}
 	}
 
+	// ----- fields a stage asks for before records may enter it -----
+	const REQUIRABLE = ['opportunity', 'company_id', 'contact_ids', 'close_date', 'probability', 'source', 'source_details', 'comments', 'first_name', 'last_name', 'company_name', 'job_title', 'assigned_to'];
+	const requirable = $derived(fields.filter((f) => REQUIRABLE.includes(f.code) || f.code.startsWith('uf.')));
+	let req = $state<{ stage_id: string; name: string; fields: string[] } | null>(null);
+	let reqOpen = $state(false);
+	function editRequired(s: CrmCategory['stages'][number]) {
+		req = { stage_id: s.id, name: s.name, fields: [...(s.required_fields ?? [])] };
+		reqOpen = true;
+	}
+	async function saveRequired() {
+		if (!req) return;
+		try {
+			await api.patch(`/crm/stages/${req.stage_id}`, { required_fields: req.fields });
+			reqOpen = false;
+			await crm.load(true);
+			toasts.success('Required fields saved');
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
+
 	function personLabel(v: string) {
 		return v === 'assigned' ? 'Responsible person' : v === 'creator' ? 'Creator' : (names[v] ?? '…');
 	}
@@ -646,6 +667,10 @@
 								{s.sla_minutes ? `Time limit ${durationText(s.sla_minutes)}${s.sla_escalate ? ', escalates' : ''}` : '+ Time limit'}
 							</button>
 						{/if}
+						<button class="flex items-center gap-1.5 border-b border-slate-100 px-4 py-1.5 text-left text-xs {s.required_fields?.length ? 'text-slate-700' : 'text-slate-400 hover:text-slate-700'}" onclick={() => editRequired(s)} data-required-fields>
+							<Icon name="check" class="size-3.5" />
+							{s.required_fields?.length ? `Requires ${s.required_fields.length} field${s.required_fields.length === 1 ? '' : 's'}` : '+ Required fields'}
+						</button>
 						<div class="space-y-1.5 border-b border-slate-100 p-2">
 							{#each triggers.filter((t) => t.stage_id === s.id) as t (t.id)}
 								<button class="flex w-full items-center gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-left text-xs text-amber-900 hover:bg-amber-100 {t.is_active ? '' : 'opacity-50'}" onclick={() => editTrigger(t)}>
@@ -875,6 +900,24 @@
 		{#if draft?.id}<button class="btn btn-ghost mr-auto text-red-600" onclick={remove}><Icon name="trash" class="size-4" /> Delete</button>{/if}
 		<button class="btn btn-secondary" onclick={() => (open = false)}>Cancel</button>
 		<button class="btn btn-primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
+	{/snippet}
+</Modal>
+
+<Modal bind:open={reqOpen} title="Required in: {req?.name ?? ''}" size="md">
+	{#if req}
+		{@const r = req}
+		<div class="space-y-3 text-sm">
+			<p class="text-slate-600">A record can only move into this stage once these are filled in.</p>
+			<div class="grid max-h-80 grid-cols-2 gap-x-4 gap-y-1.5 overflow-y-auto">
+				{#each requirable as f (f.code)}
+					<label class="flex items-center gap-2"><input type="checkbox" class="rounded border-slate-300 text-brand-600" value={f.code} bind:group={r.fields} /> {f.label}</label>
+				{/each}
+			</div>
+		</div>
+	{/if}
+	{#snippet footer()}
+		<button class="btn btn-secondary" onclick={() => (reqOpen = false)}>Cancel</button>
+		<button class="btn btn-primary" onclick={saveRequired}>Save</button>
 	{/snippet}
 </Modal>
 

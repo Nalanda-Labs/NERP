@@ -1,3 +1,5 @@
+pub mod app_passwords;
+pub mod ip;
 pub mod password;
 pub mod permissions;
 pub mod tokens;
@@ -29,6 +31,11 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
+    /// Someone from outside the company (see `GUEST`).
+    pub fn is_guest(&self) -> bool {
+        self.permissions.contains(GUEST)
+    }
+
     pub fn can(&self, permission: &str) -> bool {
         self.permissions.contains(permissions::ALL) || self.permissions.contains(permission)
     }
@@ -70,14 +77,39 @@ pub async fn invalidate_authz(state: &AppState, user_ids: &[Uuid]) -> AppResult<
 }
 
 pub async fn load_permissions(state: &AppState, user_id: Uuid) -> AppResult<Vec<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
+    let mut perms = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT rp.permission FROM user_roles ur
          JOIN role_permissions rp ON rp.role_id = ur.role_id
          WHERE ur.user_id = $1",
     )
     .bind(user_id)
     .fetch_all(&state.db)
-    .await?)
+    .await?;
+    // A guest from outside the company carries a marker (never a grantable permission).
+    let guest: bool = sqlx::query_scalar("SELECT is_guest FROM users WHERE id = $1").bind(user_id).fetch_optional(&state.db).await?.unwrap_or(false);
+    if guest {
+        perms.retain(|p| p != permissions::ALL);
+        perms.push(GUEST.into());
+    }
+    Ok(perms)
+}
+
+/// The marker of a guest's permission set.
+pub const GUEST: &str = "@guest";
+
+/// What a guest may reach: their chats, calls, workgroups and tasks, files, boards shared with
+/// them by name, notifications, and their own account. Everything else answers 403.
+const GUEST_PATHS: &[&str] = &[
+    "/auth/", "/me/", "/profile", "/notifications", "/realtime/", "/files", "/download-links", "/im/", "/calls", "/projects", "/tasks", "/feed", "/boards",
+];
+
+fn guest_may(path: &str, method: &axum::http::Method) -> bool {
+    let path = path.strip_prefix("/api").unwrap_or(path);
+    let under = |base: &str| {
+        let base = base.trim_end_matches('/');
+        path == base || path.strip_prefix(base).is_some_and(|rest| rest.starts_with('/'))
+    };
+    GUEST_PATHS.iter().any(|p| under(p)) || (path == "/settings" && *method == axum::http::Method::GET)
 }
 
 async fn load_authz(state: &AppState, user_id: Uuid) -> AppResult<Option<AuthzEntry>> {
@@ -135,6 +167,21 @@ impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        let user = identify(parts, state).await?;
+        ip::check(state, &user, client_ip(parts, state).as_deref()).await?;
+        if user.is_guest() {
+            let path = parts.extensions.get::<axum::extract::OriginalUri>().map(|u| u.0.path().to_string()).unwrap_or_else(|| parts.uri.path().to_string());
+            if !guest_may(&path, &parts.method) {
+                return Err(AppError::Forbidden);
+            }
+        }
+        Ok(user)
+    }
+}
+
+/// Who is calling: a session's access token, an API key or a download link.
+async fn identify(parts: &mut Parts, state: &AppState) -> Result<AuthUser, AppError> {
+    {
         let Some(token) = bearer_token(parts) else {
             // A download link (GET only, for the one path it was made for).
             return match download_token(parts) {
@@ -157,6 +204,11 @@ impl FromRequestParts<AppState> for AuthUser {
         let entry = load_authz(state, claims.sub).await?.ok_or(AppError::Unauthorized)?;
         if !entry.active || claims.iat < entry.valid_after {
             return Err(AppError::Unauthorized);
+        }
+        // When someone was last active (written at most every two minutes).
+        let fresh: Option<String> = redis::cmd("SET").arg(format!("seen:{}", claims.sub)).arg(1).arg("NX").arg("EX").arg(120).query_async(&mut redis).await.unwrap_or(None);
+        if fresh.is_some() {
+            let _ = sqlx::query("UPDATE users SET last_seen_at = now() WHERE id = $1").bind(claims.sub).execute(&state.db).await;
         }
 
         Ok(AuthUser {
@@ -277,4 +329,20 @@ pub(crate) fn client_ip(parts: &Parts, state: &AppState) -> Option<String> {
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(a)| a.ip().to_string())
+}
+
+#[cfg(test)]
+mod guest_tests {
+    use axum::http::Method;
+
+    #[test]
+    fn guests_reach_only_their_areas() {
+        for p in ["/api/im/chats", "/api/calls/1/join", "/api/projects", "/api/tasks/5", "/api/auth/me", "/api/files/x/content", "/api/realtime/ticket", "/api/notifications"] {
+            assert!(super::guest_may(p, &Method::GET), "{p}");
+        }
+        for p in ["/api/users", "/api/crm/deal/items", "/api/hr/my-day", "/api/bi/dashboards", "/api/kb/spaces", "/api/drive/nodes", "/api/feedback", "/api/imx", "/api/tasksX"] {
+            assert!(!super::guest_may(p, &Method::GET), "{p}");
+        }
+        assert!(super::guest_may("/api/settings", &Method::GET) && !super::guest_may("/api/settings", &Method::PUT));
+    }
 }

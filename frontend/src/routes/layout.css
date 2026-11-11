@@ -137,4 +137,87 @@
 	.prose-kb hr {
 		@apply border-slate-200;
 	}
+	.prose-kb h4,
+	.prose-kb h5,
+	.prose-kb h6 {
+		@apply mt-5 font-semibold text-slate-900;
+	}
+	.prose-kb h1,
+	.prose-kb h2,
+	.prose-kb h3,
+	.prose-kb h4 {
+		@apply scroll-mt-20;
+	}
+	.prose-kb .anchor {
+		@apply ml-2 text-slate-300 no-underline opacity-0 transition-opacity hover:text-brand-600;
+	}
+	.prose-kb :is(h1, h2, h3, h4):hover .anchor,
+	.prose-kb .anchor:focus {
+		@apply opacity-100;
+	}
+	.prose-kb ul:has(> li > input[type='checkbox']) {
+		@apply list-none pl-1;
+	}
+	.prose-kb li > input[type='checkbox'] {
+		@apply mr-2 size-4 translate-y-0.5 rounded border-slate-300 text-brand-600;
+	}
+	.prose-kb del {
+		@apply text-slate-500;
+	}
+	.prose-kb blockquote[class^='markdown-alert-'] {
+		@apply rounded-r-lg border-l-4 py-2 pr-3 not-italic text-slate-800;
+	}
+	.prose-kb blockquote[class^='markdown-alert-']::before {
+		@apply mb-1 block text-sm font-semibold;
+	}
+	.prose-kb blockquote.markdown-alert-note {
+		@apply border-sky-500 bg-sky-50;
+	}
+	.prose-kb blockquote.markdown-alert-note::before {
+		content: 'ℹ Note';
+		@apply text-sky-700;
+	}
+	.prose-kb blockquote.markdown-alert-tip {
+		@apply border-emerald-500 bg-emerald-50;
+	}
+	.prose-kb blockquote.markdown-alert-tip::before {
+		content: '💡 Tip';
+		@apply text-emerald-700;
+	}
+	.prose-kb blockquote.markdown-alert-important {
+		@apply border-violet-500 bg-violet-50;
+	}
+	.prose-kb blockquote.markdown-alert-important::before {
+		content: '❗ Important';
+		@apply text-violet-700;
+	}
+	.prose-kb blockquote.markdown-alert-warning {
+		@apply border-amber-500 bg-amber-50;
+	}
+	.prose-kb blockquote.markdown-alert-warning::before {
+		content: '⚠ Warning';
+		@apply text-amber-800;
+	}
+	.prose-kb blockquote.markdown-alert-caution {
+		@apply border-red-500 bg-red-50;
+	}
+	.prose-kb blockquote.markdown-alert-caution::before {
+		content: '⛔ Caution';
+		@apply text-red-700;
+	}
+	.prose-kb .footnote-reference a {
+		@apply text-xs no-underline;
+	}
+	.prose-kb .footnote-definition {
+		@apply mt-2 flex gap-2 border-t border-slate-100 pt-2 text-sm text-slate-600 first-of-type:mt-8;
+	}
+	.prose-kb .footnote-definition > p {
+		@apply mt-0;
+	}
+	.prose-kb .footnote-definition-label {
+		@apply text-xs text-slate-400;
+	}
+	.prose-kb pre code.hljs {
+		@apply bg-transparent p-0;
+	}
 }

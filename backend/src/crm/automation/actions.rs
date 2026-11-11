@@ -458,7 +458,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
                     return done(format!("emailed “{subject}”{with} to {to} from {}", mb.email));
                 }
             let html = format!("<div style=\"font-family:sans-serif;font-size:14px;line-height:1.5\">{}</div>", html_escape(&body).replace('\n', "<br>"));
-            jobs::send_email(state, mail::Email { to: to.clone(), subject: subject.clone(), text: body.clone(), html, attachments: files }).await.map_err(err)?;
+            jobs::send_email(state, mail::Email { to: to.clone(), subject: subject.clone(), text: body.clone(), html, attachments: files, calendar: None }).await.map_err(err)?;
             let id: Uuid = sqlx::query_scalar(
                 "INSERT INTO crm_activities (item_id, kind, subject, description, direction, responsible_id, created_by, is_completed, completed_at)
                  VALUES ($1, 'email', $2, $3, 'outgoing', COALESCE($4, $5), $5, TRUE, now()) RETURNING id",

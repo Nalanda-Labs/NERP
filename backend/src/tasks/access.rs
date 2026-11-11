@@ -90,7 +90,7 @@ fn compute(t: &TaskCore, auth: &AuthUser) -> TaskAccess {
         || is_responsible
         || t.member_role.is_some()
         || t.project_role.is_some()
-        || t.project_visibility.as_deref() == Some("open")
+        || (t.project_visibility.as_deref() == Some("open") && !auth.is_guest())
         || t.is_supervisor;
     let edit = all || is_creator || project_owner || t.is_supervisor;
     TaskAccess {
@@ -114,7 +114,7 @@ pub fn push_visible(qb: &mut QueryBuilder<Postgres>, auth: &AuthUser) {
     qb.push(" AND (t.created_by = ").push_bind(u)
         .push(" OR t.responsible_id = ").push_bind(u)
         .push(" OR EXISTS (SELECT 1 FROM task_members m WHERE m.task_id = t.id AND m.user_id = ").push_bind(u).push(")")
-        .push(" OR (t.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM projects p WHERE p.id = t.project_id AND (p.visibility = 'open' OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = ").push_bind(u).push("))))")
+        .push(if auth.is_guest() { " OR (t.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM projects p WHERE p.id = t.project_id AND (FALSE OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = " } else { " OR (t.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM projects p WHERE p.id = t.project_id AND (p.visibility = 'open' OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = " }).push_bind(u).push("))))")
         // Heads of the responsible person's department or of any department above it.
         .push(" OR t.responsible_id IN (WITH RECURSIVE tree AS (SELECT id FROM departments WHERE head_user_id = ").push_bind(u)
         .push(" UNION ALL SELECT d.id FROM departments d JOIN tree ON d.parent_id = tree.id) SELECT ud.user_id FROM user_departments ud JOIN tree ON tree.id = ud.department_id))");
@@ -187,7 +187,8 @@ pub async fn project_access(state: &AppState, auth: &AuthUser, project: Uuid) ->
         _ => None,
     };
     let access = ProjectAccess {
-        view: all || role.is_some() || visibility == "open",
+        // Open groups are open to the company, not to guests.
+        view: all || role.is_some() || (visibility == "open" && !auth.is_guest()),
         manage: all || role == Some("owner"),
         contribute: all || matches!(role, Some("owner") | Some("member")),
         role,

@@ -27,7 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/departments/{id}/members/{user_id}", delete(remove_member))
 }
 
-#[derive(Serialize, FromRow)]
+#[derive(Serialize, FromRow, Clone)]
 pub struct Department {
     id: Uuid,
     parent_id: Option<Uuid>,
@@ -36,14 +36,57 @@ pub struct Department {
     head_user_id: Option<Uuid>,
     head_name: Option<String>,
     head_avatar_file_id: Option<Uuid>,
+    /// Manages and approves along with the head.
+    deputy_user_id: Option<Uuid>,
+    deputy_name: Option<String>,
     sort: i32,
     member_count: i64,
     created_at: DateTime<Utc>,
+    /// Seen only by its own people (and its sub-departments') and by administrators.
+    hidden: bool,
 }
 
 /// Returns the whole structure as a flat list; clients assemble the tree from `parent_id`.
-async fn list(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Vec<Department>>> {
-    Ok(Json(load_all(&state).await?))
+/// Hidden departments (and everything under them) only for their people and administrators.
+async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Vec<Department>>> {
+    let all = load_all(&state).await?;
+    if auth.can(perm::DEPARTMENTS_MANAGE) || auth.can(perm::USERS_MANAGE) {
+        return Ok(Json(all));
+    }
+    let mine: Vec<Uuid> = sqlx::query_scalar("SELECT department_id FROM user_departments WHERE user_id = $1").bind(auth.id).fetch_all(&state.db).await?;
+    let parent = |id: Uuid| all.iter().find(|d| d.id == id).and_then(|d| d.parent_id);
+    // A department is out of sight when it, or one above it, is hidden and I'm not inside it.
+    let visible = |d: &Department| {
+        let mut cur = Some(d.id);
+        let mut chain = Vec::new();
+        while let Some(c) = cur {
+            chain.push(c);
+            cur = parent(c);
+            if chain.len() > 100 {
+                break;
+            }
+        }
+        // Inside: I belong to it or to a department under it.
+        let under = |root: Uuid| {
+            mine.iter().any(|m| {
+                let mut x = Some(*m);
+                let mut n = 0;
+                while let Some(y) = x {
+                    if y == root {
+                        return true;
+                    }
+                    x = parent(y);
+                    n += 1;
+                    if n > 100 {
+                        break;
+                    }
+                }
+                false
+            })
+        };
+        !chain.iter().any(|c| all.iter().any(|x| x.id == *c && x.hidden) && !under(*c))
+    };
+    Ok(Json(all.iter().filter(|d| visible(d)).cloned().collect()))
 }
 
 async fn load_all(state: &AppState) -> AppResult<Vec<Department>> {
@@ -51,10 +94,11 @@ async fn load_all(state: &AppState) -> AppResult<Vec<Department>> {
         "SELECT d.id, d.parent_id, d.name, d.description, d.head_user_id,
                 CASE WHEN h.id IS NULL THEN NULL ELSE h.first_name || ' ' || h.last_name END AS head_name,
                 h.avatar_file_id AS head_avatar_file_id,
+                d.deputy_user_id, (SELECT dp.first_name || ' ' || dp.last_name FROM users dp WHERE dp.id = d.deputy_user_id) AS deputy_name,
                 d.sort,
                 (SELECT COUNT(*) FROM user_departments ud JOIN users u ON u.id = ud.user_id
                   WHERE ud.department_id = d.id AND u.is_active) AS member_count,
-                d.created_at
+                d.created_at, d.hidden
          FROM departments d LEFT JOIN users h ON h.id = d.head_user_id
          ORDER BY d.sort, d.name",
     )
@@ -99,7 +143,10 @@ pub struct CreateDepartment {
     parent_id: Option<Uuid>,
     description: Option<String>,
     head_user_id: Option<Uuid>,
+    deputy_user_id: Option<Uuid>,
     sort: Option<i32>,
+    #[serde(default)]
+    hidden: bool,
 }
 
 async fn create(
@@ -119,16 +166,21 @@ async fn create(
 
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO departments (name, parent_id, description, head_user_id, sort)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO departments (name, parent_id, description, head_user_id, sort, hidden)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(&name)
     .bind(body.parent_id)
     .bind(clean(body.description))
     .bind(body.head_user_id)
     .bind(body.sort.unwrap_or(100))
+    .bind(body.hidden)
     .fetch_one(&mut *tx)
     .await?;
+    if let Some(d) = body.deputy_user_id {
+        ensure_user_exists(&state, d).await?;
+        sqlx::query("UPDATE departments SET deputy_user_id = $2 WHERE id = $1").bind(id).bind(d).execute(&mut *tx).await?;
+    }
     // The head of a department is also a member of it.
     if let Some(h) = body.head_user_id {
         sqlx::query("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
@@ -154,7 +206,10 @@ pub struct UpdateDepartment {
     description: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     head_user_id: Option<Option<Uuid>>,
+    #[serde(default, deserialize_with = "double_option")]
+    deputy_user_id: Option<Option<Uuid>>,
     sort: Option<i32>,
+    hidden: Option<bool>,
 }
 
 async fn update(
@@ -186,8 +241,17 @@ async fn update(
         }
         qb.push(", head_user_id = ").push_bind(v);
     }
+    if let Some(v) = body.deputy_user_id {
+        if let Some(h) = v {
+            ensure_user_exists(&state, h).await?;
+        }
+        qb.push(", deputy_user_id = ").push_bind(v);
+    }
     if let Some(v) = body.sort {
         qb.push(", sort = ").push_bind(v);
+    }
+    if let Some(v) = body.hidden {
+        qb.push(", hidden = ").push_bind(v);
     }
     qb.push(" WHERE id = ").push_bind(id);
 

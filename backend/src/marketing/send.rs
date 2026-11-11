@@ -150,13 +150,13 @@ fn ready(c: &Campaign) -> AppResult<()> {
 /// Turns the segments into recipients and queues sending. Returns how many.
 async fn start(state: &AppState, c: &Campaign) -> AppResult<i64> {
     let optouts: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT email FROM mkt_optouts").fetch_all(&state.db).await?.into_iter().collect();
-    let segments: Vec<(i16, Value)> = sqlx::query_as("SELECT entity_type, filter FROM mkt_segments WHERE id = ANY($1)").bind(&c.segment_ids).fetch_all(&state.db).await?;
+    let segments: Vec<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query_as("SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1)").bind(&c.segment_ids).fetch_all(&state.db).await?;
     let mut seen: HashSet<String> = HashSet::new();
     let (mut items, mut emails, mut toks) = (Vec::new(), Vec::new(), Vec::new());
     let mut considered = 0i64;
-    for (et, filter) in segments {
+    for (et, filter, ids) in segments {
         let t = entity_type_by_id(state, et).await?;
-        for (id, _, email) in members(state, &t, &parse_filter(&filter)?, MAX_RECIPIENTS).await? {
+        for (id, _, email) in members(state, &t, &parse_filter(&filter)?, ids.as_deref(), MAX_RECIPIENTS).await? {
             considered += 1;
             let Some(email) = email.map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()) else { continue };
             if optouts.contains(&email) || !seen.insert(email.clone()) || items.len() as i64 >= MAX_RECIPIENTS {
@@ -334,9 +334,9 @@ pub(crate) async fn test_send(State(state): State<AppState>, auth: AuthUser, Pat
     let item = match b.item_id {
         Some(i) => Some(i),
         None => {
-            let first: Option<(i16, Value)> = sqlx::query_as("SELECT entity_type, filter FROM mkt_segments WHERE id = ANY($1) LIMIT 1").bind(&c.segment_ids).fetch_optional(&state.db).await?;
+            let first: Option<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query_as("SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1) LIMIT 1").bind(&c.segment_ids).fetch_optional(&state.db).await?;
             match first {
-                Some((et, f)) => members(&state, &entity_type_by_id(&state, et).await?, &parse_filter(&f)?, 1).await?.first().map(|m| m.0),
+                Some((et, f, ids)) => members(&state, &entity_type_by_id(&state, et).await?, &parse_filter(&f)?, ids.as_deref(), 1).await?.first().map(|m| m.0),
                 None => None,
             }
         }

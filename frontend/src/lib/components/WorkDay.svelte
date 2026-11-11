@@ -13,6 +13,8 @@
 		try {
 			t = await api.get<Today>('/hr/workday');
 			loadedAt = Date.now();
+			// Keep the clock in step, or the time counted on from here would go negative.
+			now = loadedAt;
 		} catch {
 			t = null;
 		}

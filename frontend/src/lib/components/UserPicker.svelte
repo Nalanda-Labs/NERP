@@ -35,7 +35,7 @@
 		const n = ++seq;
 		timer = setTimeout(async () => {
 			const q = term.trim();
-			const page = await api.get<Page<User>>('/users' + query({ q, limit: 8 }));
+			const page = await api.get<Page<User>>('/users' + query({ with_guests: true, q, limit: 8 }));
 			if (n !== seq) return;
 			results = page.items.filter((u) => !exclude.includes(u.id));
 			resultsFor = q;

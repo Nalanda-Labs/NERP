@@ -5,6 +5,7 @@
 	import ChatCallButtons from '#lib/components/ChatCallButtons.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import Modal from '#lib/components/Modal.svelte';
+	import ProfileActivity from '#lib/components/ProfileActivity.svelte';
 	import SessionsCard from '#lib/components/SessionsCard.svelte';
 	import { formatDate, formatDateTime } from '#lib/format.ts';
 	import { session } from '#lib/session.svelte.ts';
@@ -162,6 +163,7 @@
 			<h1 class="mt-4 text-xl font-semibold text-slate-900">{user.full_name}</h1>
 			{#if user.middle_name}<p class="text-sm text-slate-400">{user.first_name} {user.middle_name} {user.last_name}</p>{/if}
 			<p class="text-slate-500">{user.position ?? '—'}</p>
+			<p class="mt-1 text-xs {user.online ? 'text-emerald-700' : 'text-slate-400'}" data-presence>{user.online ? '● Online' : user.last_seen_at ? `Last seen ${formatDateTime(user.last_seen_at)}` : 'Not seen yet'}</p>
 			<div class="mt-3 flex flex-wrap justify-center gap-1.5">
 				{#if !user.is_active}<span class="badge bg-red-50 text-red-700">Deactivated</span>{/if}
 				{#if user.invite_pending}<span class="badge bg-amber-50 text-amber-700">Invitation pending</span>{/if}
@@ -245,6 +247,7 @@
 					<p class="p-5 text-sm whitespace-pre-line text-slate-700">{user.about}</p>
 				</section>
 			{/if}
+			<ProfileActivity userId={user.id} />
 		</div>
 	</div>
 

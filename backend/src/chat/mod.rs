@@ -9,7 +9,10 @@
 //! Operators see the chats of their channels; people with "Manage live chat" see all chats
 //! and set channels up.
 
+mod ops;
 mod public;
+
+pub use ops::{maintenance, MAINTENANCE_JOB};
 
 use axum::{
     extract::{Path, Query, State},
@@ -41,6 +44,7 @@ pub fn router() -> Router<AppState> {
         .route("/chat/sessions/{id}/read", post(mark_read))
         .route("/chat/counters", get(counters))
         .merge(public::router())
+        .merge(ops::router())
 }
 
 fn manager(auth: &AuthUser) -> bool {
@@ -62,10 +66,25 @@ struct Channel {
     ask_details: bool,
     operators: Vec<Uuid>,
     is_active: bool,
+    distribution: String,
+    max_chats: Option<i32>,
+    requeue_minutes: Option<i32>,
+    hours: Option<Value>,
+    timezone: String,
+    offline_message: Option<String>,
+    auto_reply: Option<String>,
+    no_answer_minutes: Option<i32>,
+    no_answer_message: Option<String>,
+    close_message: Option<String>,
+    idle_close_minutes: Option<i32>,
+    consent_text: Option<String>,
+    ask_rating: bool,
     open_chats: i64,
 }
 
 const CHANNEL_SELECT: &str = "SELECT c.id, c.name, c.key, c.title, c.greeting, c.color, c.ask_details, c.operators, c.is_active,
+    c.distribution, c.max_chats, c.requeue_minutes, c.hours, c.timezone, c.offline_message, c.auto_reply, c.no_answer_minutes, c.no_answer_message,
+    c.close_message, c.idle_close_minutes, c.consent_text, c.ask_rating,
     (SELECT COUNT(*) FROM chat_sessions s WHERE s.channel_id = c.id AND s.status = 'open') AS open_chats
     FROM chat_channels c";
 
@@ -98,6 +117,96 @@ struct ChannelInput {
     ask_details: Option<bool>,
     operators: Option<Vec<Uuid>>,
     is_active: Option<bool>,
+    distribution: Option<String>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    max_chats: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    requeue_minutes: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    hours: Option<Option<Vec<(u32, i32, i32)>>>,
+    timezone: Option<String>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    offline_message: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    auto_reply: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    no_answer_minutes: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    no_answer_message: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    close_message: Option<Option<String>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    idle_close_minutes: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    consent_text: Option<Option<String>>,
+    ask_rating: Option<bool>,
+}
+
+/// Checks the running settings (hand-out, hours, automatic messages).
+fn check_ops(b: &ChannelInput) -> AppResult<()> {
+    if b.distribution.as_deref().is_some_and(|d| !["queue", "all"].contains(&d)) {
+        return Err(AppError::bad("chats go out in turn (queue) or to everyone (all)"));
+    }
+    let within = |v: Option<Option<i32>>, lo: i32, hi: i32| v.flatten().is_none_or(|v| (lo..=hi).contains(&v));
+    if !within(b.max_chats, 1, 100) || !within(b.requeue_minutes, 1, 240) || !within(b.no_answer_minutes, 1, 240) || !within(b.idle_close_minutes, 5, 10080) {
+        return Err(AppError::bad("check the numbers: chats each 1–100, minutes 1–240, idle closing 5 minutes to a week"));
+    }
+    if let Some(Some(h)) = &b.hours {
+        if h.is_empty() || h.len() > 21 || h.iter().any(|(d, f, t)| !(1..=7).contains(d) || !(0..1440).contains(f) || !(1..=1440).contains(t) || f >= t) {
+            return Err(AppError::bad("hours are weekdays (1–7) with from and to minutes"));
+        }
+    }
+    if let Some(tz) = &b.timezone {
+        tz.parse::<chrono_tz::Tz>().map_err(|_| AppError::bad(format!("unknown time zone: {tz}")))?;
+    }
+    for t in [&b.offline_message, &b.auto_reply, &b.no_answer_message, &b.close_message, &b.consent_text].into_iter().flatten().flatten() {
+        if t.chars().count() > 2000 {
+            return Err(AppError::bad("messages can be at most 2000 characters"));
+        }
+    }
+    Ok(())
+}
+
+/// Saves the running settings that were sent.
+async fn save_ops(state: &AppState, id: Uuid, b: &ChannelInput) -> AppResult<()> {
+    let text = |v: &Option<Option<String>>| v.clone().map(|x| crate::routes::clean(x));
+    sqlx::query(
+        "UPDATE chat_channels SET distribution = COALESCE($2, distribution),
+             max_chats = CASE WHEN $3 THEN $4 ELSE max_chats END, requeue_minutes = CASE WHEN $5 THEN $6 ELSE requeue_minutes END,
+             hours = CASE WHEN $7 THEN $8 ELSE hours END, timezone = COALESCE($9, timezone),
+             offline_message = CASE WHEN $10 THEN $11 ELSE offline_message END, auto_reply = CASE WHEN $12 THEN $13 ELSE auto_reply END,
+             no_answer_minutes = CASE WHEN $14 THEN $15 ELSE no_answer_minutes END, no_answer_message = CASE WHEN $16 THEN $17 ELSE no_answer_message END,
+             close_message = CASE WHEN $18 THEN $19 ELSE close_message END, idle_close_minutes = CASE WHEN $20 THEN $21 ELSE idle_close_minutes END,
+             consent_text = CASE WHEN $22 THEN $23 ELSE consent_text END, ask_rating = COALESCE($24, ask_rating)
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&b.distribution)
+    .bind(b.max_chats.is_some())
+    .bind(b.max_chats.flatten())
+    .bind(b.requeue_minutes.is_some())
+    .bind(b.requeue_minutes.flatten())
+    .bind(b.hours.is_some())
+    .bind(b.hours.clone().flatten().map(|h| json!(h)))
+    .bind(&b.timezone)
+    .bind(b.offline_message.is_some())
+    .bind(text(&b.offline_message).flatten())
+    .bind(b.auto_reply.is_some())
+    .bind(text(&b.auto_reply).flatten())
+    .bind(b.no_answer_minutes.is_some())
+    .bind(b.no_answer_minutes.flatten())
+    .bind(b.no_answer_message.is_some())
+    .bind(text(&b.no_answer_message).flatten())
+    .bind(b.close_message.is_some())
+    .bind(text(&b.close_message).flatten())
+    .bind(b.idle_close_minutes.is_some())
+    .bind(b.idle_close_minutes.flatten())
+    .bind(b.consent_text.is_some())
+    .bind(text(&b.consent_text).flatten())
+    .bind(b.ask_rating)
+    .execute(&state.db)
+    .await?;
+    Ok(())
 }
 
 async fn check_operators(state: &AppState, ops: &[Uuid]) -> AppResult<()> {
@@ -120,12 +229,13 @@ fn color(c: &str) -> AppResult<String> {
 async fn create_channel(State(state): State<AppState>, auth: AuthUser, Json(b): Json<ChannelInput>) -> AppResult<Json<Value>> {
     auth.require(perm::CHAT)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 120)?;
-    let mut ops = b.operators.unwrap_or_else(|| vec![auth.id]);
+    check_ops(&b)?;
+    let mut ops = b.operators.clone().unwrap_or_else(|| vec![auth.id]);
     ops.dedup();
     check_operators(&state, &ops).await?;
-    sqlx::query(
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO chat_channels (name, key, title, greeting, color, ask_details, operators, created_by)
-         VALUES ($1, $2, COALESCE($3, 'Chat with us'), COALESCE($4, 'Hi! How can we help?'), COALESCE($5, '#1a73e8'), COALESCE($6, TRUE), $7, $8)",
+         VALUES ($1, $2, COALESCE($3, 'Chat with us'), COALESCE($4, 'Hi! How can we help?'), COALESCE($5, '#1a73e8'), COALESCE($6, TRUE), $7, $8) RETURNING id",
     )
     .bind(&name)
     .bind(random_token(12))
@@ -135,13 +245,15 @@ async fn create_channel(State(state): State<AppState>, auth: AuthUser, Json(b): 
     .bind(b.ask_details)
     .bind(&ops)
     .bind(auth.id)
-    .execute(&state.db)
+    .fetch_one(&state.db)
     .await?;
+    save_ops(&state, id, &b).await?;
     list_channels(State(state), auth).await
 }
 
 async fn update_channel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<ChannelInput>) -> AppResult<Json<Value>> {
     auth.require(perm::CHAT)?;
+    check_ops(&b)?;
     if let Some(ops) = &b.operators {
         check_operators(&state, ops).await?;
     }
@@ -156,7 +268,7 @@ async fn update_channel(State(state): State<AppState>, auth: AuthUser, Path(id):
     .bind(b.greeting.as_deref().map(|t| required("greeting", t, 500)).transpose()?)
     .bind(b.color.as_deref().map(color).transpose()?)
     .bind(b.ask_details)
-    .bind(b.operators)
+    .bind(b.operators.clone())
     .bind(b.is_active)
     .execute(&state.db)
     .await?
@@ -164,6 +276,7 @@ async fn update_channel(State(state): State<AppState>, auth: AuthUser, Path(id):
     if n == 0 {
         return Err(AppError::NotFound("channel"));
     }
+    save_ops(&state, id, &b).await?;
     list_channels(State(state), auth).await
 }
 
@@ -196,12 +309,18 @@ struct Session {
     started_at: DateTime<Utc>,
     last_message_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
+    first_reply_at: Option<DateTime<Utc>>,
+    offline: bool,
+    rating: Option<i16>,
+    rating_comment: Option<String>,
+    review_score: Option<i16>,
+    review_comment: Option<String>,
 }
 
 const SESSION_SELECT: &str = "SELECT s.id, s.channel_id, c.name AS channel_name, s.visitor_name, s.visitor_email, s.page_url, s.status,
     s.assigned_to, trim(u.first_name || ' ' || u.last_name) AS assigned_name, s.item_id, t.code AS item_code, i.title AS item_title, s.unread,
     (SELECT m.body FROM chat_messages m WHERE m.session_id = s.id AND m.author <> 'system' ORDER BY m.created_at DESC LIMIT 1) AS last_message,
-    s.started_at, s.last_message_at, s.closed_at
+    s.started_at, s.last_message_at, s.closed_at, s.first_reply_at, s.offline, s.rating, s.rating_comment, s.review_score, s.review_comment
     FROM chat_sessions s JOIN chat_channels c ON c.id = s.channel_id
     LEFT JOIN users u ON u.id = s.assigned_to
     LEFT JOIN crm_items i ON i.id = s.item_id LEFT JOIN crm_entity_types t ON t.id = i.entity_type";
@@ -315,7 +434,10 @@ async fn reply(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     let mut tx = state.db.begin().await?;
     sqlx::query("INSERT INTO chat_messages (session_id, author, user_id, body) VALUES ($1, 'operator', $2, $3)").bind(id).bind(auth.id).bind(&body).execute(&mut *tx).await?;
     // Answering takes an unassigned chat, and means the operator has read it.
-    sqlx::query("UPDATE chat_sessions SET assigned_to = COALESCE(assigned_to, $2), unread = 0, last_message_at = now() WHERE id = $1")
+    sqlx::query(
+        "UPDATE chat_sessions SET offered_at = CASE WHEN assigned_to IS NULL THEN now() ELSE offered_at END, assigned_to = COALESCE(assigned_to, $2), unread = 0,
+             last_message_at = now(), first_reply_at = COALESCE(first_reply_at, now()) WHERE id = $1",
+    )
         .bind(id)
         .bind(auth.id)
         .execute(&mut *tx)
@@ -327,7 +449,7 @@ async fn reply(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 
 async fn take(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     session(&state, &auth, id).await?;
-    sqlx::query("UPDATE chat_sessions SET assigned_to = $2 WHERE id = $1").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query("UPDATE chat_sessions SET assigned_to = $2, offered_at = now() WHERE id = $1").bind(id).bind(auth.id).execute(&state.db).await?;
     let name: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
     sqlx::query("INSERT INTO chat_messages (session_id, author, body) VALUES ($1, 'system', $2)").bind(id).bind(format!("{name} joined the chat")).execute(&state.db).await?;
     announce(&state, id, "chat.changed").await;
@@ -352,6 +474,15 @@ async fn close(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 }
 
 pub(crate) async fn end(state: &AppState, id: Uuid, by: Option<Uuid>) -> AppResult<()> {
+    // The channel's goodbye, while the chat is still open.
+    let goodbye: Option<String> = sqlx::query_scalar("SELECT c.close_message FROM chat_sessions s JOIN chat_channels c ON c.id = s.channel_id WHERE s.id = $1 AND s.status = 'open'")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .flatten();
+    if let Some(g) = goodbye {
+        ops::auto(state, id, &g).await?;
+    }
     let n = sqlx::query("UPDATE chat_sessions SET status = 'closed', closed_at = now(), unread = 0 WHERE id = $1 AND status = 'open'")
         .bind(id)
         .execute(&state.db)

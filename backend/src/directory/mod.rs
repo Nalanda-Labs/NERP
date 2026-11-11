@@ -4,10 +4,13 @@
 //!   those accounts sign in with their directory password (checked by binding as them).
 //!   Someone in the directory who has no NERP account yet gets one on first sign-in.
 //! - OpenID Connect: a "Sign in with …" button on the login page.
+//! - Other accounts (Google, Microsoft, Apple, Facebook, X, more OpenID Connect providers)
+//!   for existing employees (see `social`).
 //!
 //! Settings live in the one-row `directory_config` table; secrets are sealed with the data key.
 
 pub mod ldap;
+pub mod social;
 pub mod sso;
 
 use axum::{
@@ -39,6 +42,15 @@ pub fn router() -> Router<AppState> {
         .route("/auth/sso", get(sso::public_info))
         .route("/auth/sso/start", get(sso::start))
         .route("/auth/sso/callback", get(sso::callback))
+        // Other accounts (Google, Microsoft, Apple, Facebook, X, OpenID Connect).
+        .route("/directory/providers", get(social::list).post(social::create))
+        .route("/directory/providers/{id}", put(social::change).delete(social::remove))
+        .route("/auth/providers", get(social::public_list))
+        .route("/auth/providers/{id}/start", get(social::start))
+        .route("/auth/providers/{id}/link", post(social::link_start))
+        .route("/auth/providers/callback", get(social::callback_get).post(social::callback_post))
+        .route("/auth/identities", get(social::my_identities))
+        .route("/auth/identities/{provider}", axum::routing::delete(social::unlink))
 }
 
 pub(crate) struct Stored {

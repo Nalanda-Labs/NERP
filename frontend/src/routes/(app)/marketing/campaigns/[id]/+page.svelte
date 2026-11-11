@@ -63,6 +63,50 @@
 		}
 	}
 	const reach = $derived(segments.filter((s) => c?.segment_ids.includes(s.id)).reduce((a, s) => a + s.reachable, 0));
+	// ----- starting points for the message -----
+	const READY: { name: string; subject: string; body: string }[] = [
+		{ name: 'Newsletter', subject: 'News from us this month', body: 'Hello {{first_name}},\n\nHere is what is new this month:\n\n• …\n• …\n• …\n\nRead more: https://yourcompany.com/news\n\nBest regards,\n{{assigned}}' },
+		{ name: 'Special offer', subject: '{{first_name}}, an offer for you', body: 'Hello {{first_name}},\n\nUntil the end of the month you get … off …\n\nSee the offer: https://yourcompany.com/offer\n\nQuestions? Just reply to this email.\n\n{{assigned}}' },
+		{ name: 'Event invitation', subject: 'You are invited: …', body: 'Hello {{first_name}},\n\nWe would like to invite you to … on … at ….\n\nWhat to expect:\n• …\n• …\n\nSave your seat: https://yourcompany.com/event\n\nSee you there,\n{{assigned}}' },
+		{ name: 'Welcome', subject: 'Welcome, {{first_name}}', body: 'Hello {{first_name}},\n\nThank you for choosing us. Here is how to get started:\n\n1. …\n2. …\n\nYour contact person is {{assigned}} ({{assigned_email}}).\n\nWelcome aboard!' },
+		{ name: 'Win back', subject: 'We miss you, {{first_name}}', body: 'Hello {{first_name}},\n\nIt has been a while. Here is what changed since your last visit: …\n\nCome back and take a look: https://yourcompany.com\n\n{{assigned}}' },
+		{ name: 'Feedback request', subject: 'How did we do?', body: 'Hello {{first_name}},\n\nWe would love to hear how things went. It takes a minute:\n\nhttps://yourcompany.com/feedback\n\nThank you,\n{{assigned}}' }
+	];
+	type Source = { key: string; name: string; subject: string; body: string };
+	let mine = $state<Source[]>([]);
+	let previous = $state<Source[]>([]);
+	let startFrom = $state('');
+	async function loadSources() {
+		const [t, p] = await Promise.all([
+			api.get<{ items: { id: string; name: string; subject: string; body: string }[] }>('/crm/email-templates').catch(() => ({ items: [] })),
+			api.get<{ items: Campaign[] }>('/marketing/campaigns').catch(() => ({ items: [] as Campaign[] }))
+		]);
+		mine = t.items.map((x) => ({ key: `t:${x.id}`, name: x.name, subject: x.subject, body: x.body }));
+		previous = p.items.filter((x) => x.id !== id && x.body.trim()).map((x) => ({ key: `c:${x.id}`, name: x.name, subject: x.subject, body: x.body }));
+	}
+	function applySource(key: string) {
+		const src = [...READY.map((x, i) => ({ ...x, key: `r:${i}` })), ...mine, ...previous].find((x) => x.key === key);
+		startFrom = '';
+		if (!src || !c) return;
+		if (c.body.trim() && !confirm('Replace the subject and message with this one?')) return;
+		c.subject = src.subject;
+		c.body = src.body;
+		dirty = true;
+	}
+	async function saveAsTemplate() {
+		if (!c) return;
+		const name = prompt('Name the template', c.name);
+		if (!name?.trim()) return;
+		try {
+			await api.post('/crm/email-templates', { name, subject: c.subject, body: c.body });
+			toasts.success('Saved as a template');
+			await loadSources();
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
+	onMount(loadSources);
+
 	const PLACEHOLDERS = ['first_name', 'last_name', 'title', 'company', 'assigned', 'assigned_email'];
 	let bodyEl = $state<HTMLTextAreaElement | null>(null);
 	function insert(ph: string) {
@@ -162,7 +206,16 @@
 					</div>
 					<div><label class="label" for="cp-subject">Subject</label><input id="cp-subject" class="input" maxlength="300" bind:value={c.subject} oninput={() => (dirty = true)} /></div>
 					<div>
-						<label class="label" for="cp-body">Message</label>
+						<div class="flex flex-wrap items-center gap-2">
+							<label class="label mr-auto" for="cp-body">Message</label>
+							<select class="input w-48 py-1 text-xs" aria-label="Start from" bind:value={startFrom} onchange={() => applySource(startFrom)} data-start-from>
+								<option value="">Start from…</option>
+								<optgroup label="Ready-made">{#each READY as t, i (i)}<option value="r:{i}">{t.name}</option>{/each}</optgroup>
+								{#if mine.length}<optgroup label="Email templates">{#each mine as t (t.key)}<option value={t.key}>{t.name}</option>{/each}</optgroup>{/if}
+								{#if previous.length}<optgroup label="Earlier campaigns">{#each previous as t (t.key)}<option value={t.key}>{t.name}</option>{/each}</optgroup>{/if}
+							</select>
+							<button type="button" class="btn btn-ghost px-2 py-1 text-xs" disabled={!c.body.trim()} onclick={saveAsTemplate}>Save as template</button>
+						</div>
 						<textarea id="cp-body" class="input font-mono text-[13px]" rows="14" bind:this={bodyEl} bind:value={c.body} oninput={() => (dirty = true)} placeholder={'Hello {{first_name}},\n\n…\n\nhttps://yourcompany.com/offer'}></textarea>
 						<div class="mt-1 flex flex-wrap gap-1">
 							{#each PLACEHOLDERS as ph (ph)}<button type="button" class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600 hover:bg-brand-50 hover:text-brand-700" onclick={() => insert(ph)}>{`{{${ph}}}`}</button>{/each}

@@ -79,7 +79,7 @@ async fn close_forgotten(state: &AppState, user: Uuid, tz: Tz, today: NaiveDate)
     Ok(())
 }
 
-async fn today_view(state: &AppState, user: Uuid) -> AppResult<Value> {
+pub(crate) async fn today_view(state: &AppState, user: Uuid) -> AppResult<Value> {
     let tz = tz_of(state, user).await?;
     let today = Utc::now().with_timezone(&tz).date_naive();
     close_forgotten(state, user, tz, today).await?;
@@ -320,4 +320,23 @@ async fn edit_day(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
     sqlx::query("DELETE FROM hr_work_breaks WHERE day_id = $1 AND (started_at < $2 OR ($3::timestamptz IS NOT NULL AND started_at > $3))").bind(id).bind(b.started_at).bind(b.ended_at).execute(&state.db).await?;
     crate::audit::record(&state.db, Some(auth.id), "hr.workday.edit", "user", Some(user.to_string()), json!({ "day": day, "reason": reason }), None).await;
     sheet(&state, user, &day.format("%Y-%m").to_string()).await.map(Json)
+}
+
+/// Minutes someone worked on the days in [from, to] (their local dates).
+pub(crate) async fn worked_minutes(state: &AppState, user: Uuid, from: NaiveDate, to: NaiveDate) -> AppResult<i64> {
+    let days: Vec<Day> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{DAY_SELECT} WHERE d.user_id = $1 AND d.day BETWEEN $2 AND $3")))
+        .bind(user)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&state.db)
+        .await?;
+    let ids: Vec<Uuid> = days.iter().map(|d| d.id).collect();
+    let br = breaks_of(state, &ids).await?;
+    let now = Utc::now();
+    Ok(days.iter().map(|d| worked(d, &br, now)).sum())
+}
+
+/// When someone started work on each of these days.
+pub(crate) async fn starts(state: &AppState, users: &[Uuid], from: NaiveDate, to: NaiveDate) -> AppResult<Vec<(Uuid, NaiveDate, DateTime<Utc>)>> {
+    Ok(sqlx::query_as("SELECT user_id, day, started_at FROM hr_work_days WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3").bind(users).bind(from).bind(to).fetch_all(&state.db).await?)
 }

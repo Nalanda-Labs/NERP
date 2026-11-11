@@ -27,12 +27,15 @@ export interface User {
 	locale: string;
 	is_active: boolean;
 	invite_pending: boolean;
+	is_guest?: boolean;
 	invited_at: string | null;
 	two_factor_enabled: boolean;
 	last_login_at: string | null;
 	created_at: string;
 	departments: Ref[];
 	roles: RoleRef[];
+	last_seen_at?: string | null;
+	online?: boolean;
 }
 
 export interface Me extends User {
@@ -63,6 +66,9 @@ export interface Department {
 	sort: number;
 	member_count: number;
 	created_at: string;
+	deputy_user_id?: string | null;
+	hidden?: boolean;
+	deputy_name?: string | null;
 }
 
 export interface Role {
@@ -136,7 +142,10 @@ export const PERM = {
 	DRIVE: 'drive.manage',
 	ACCOUNTING_VIEW: 'accounting.view',
 	ACCOUNTING_POST: 'accounting.post',
-	ACCOUNTING_ADMIN: 'accounting.admin'
+	ACCOUNTING_ADMIN: 'accounting.admin',
+	BI: 'bi.manage',
+	USERS_INVITE: 'users.invite',
+	FEED_MODERATE: 'feed.moderate'
 } as const;
 
 export interface Notification {

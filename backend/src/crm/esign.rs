@@ -47,7 +47,7 @@ fn hash(s: &[u8]) -> String {
     hex::encode(Sha256::digest(s))
 }
 
-async fn company(state: &AppState) -> String {
+pub(crate) async fn company(state: &AppState) -> String {
     let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().map(str::to_string)).filter(|s| !s.is_empty()).unwrap_or_else(|| "Our company".into())
 }
@@ -474,6 +474,60 @@ recorded when it was sent and has not changed.
 ]
 "##;
 
+/// One signature on a certificate page.
+pub(crate) struct CertSigner {
+    pub name: String,
+    pub email: String,
+    pub signed_name: String,
+    pub signed_at: Option<DateTime<Utc>>,
+    pub ip: Option<String>,
+    pub agent: Option<String>,
+    pub signature: Option<Uuid>,
+}
+
+/// The signed copy: the original PDF with a certificate page (signers, times, addresses,
+/// the original's fingerprint) added at the end.
+pub(crate) async fn signed_copy(state: &AppState, title: &str, request: &str, sha: &str, sent: DateTime<Utc>, completed: DateTime<Utc>, list: &[CertSigner], original: &[u8]) -> AppResult<Vec<u8>> {
+    let mut files = Vec::new();
+    let mut signers = Vec::new();
+    for (i, s) in list.iter().enumerate() {
+        let image = format!("sig-{i}.png");
+        if let Some(f) = s.signature {
+            files.push((image.clone(), read_bytes(state, f).await?.3));
+        }
+        signers.push(json!({
+            "name": s.name, "email": s.email, "signed_name": s.signed_name,
+            "signed_at": s.signed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default(),
+            "ip": s.ip.clone().unwrap_or_else(|| "unknown".into()), "agent": s.agent.clone().unwrap_or_default().chars().take(90).collect::<String>(),
+            "image": format!("/{image}"),
+        }));
+    }
+    let data = json!({
+        "company": company(state).await, "title": title, "request": request, "sha": sha, "signers": signers,
+        "sent": sent.format("%Y-%m-%d %H:%M UTC").to_string(),
+        "completed": completed.format("%Y-%m-%d %H:%M UTC").to_string(),
+    });
+    let cert = tokio::task::spawn_blocking(move || super::docs::typst_engine::render_with(CERTIFICATE, &data, files))
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("certificate: {e}")))?;
+    let dir = std::env::temp_dir().join(format!("nerp-sign-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::write(dir.join("a.pdf"), original).await?;
+    tokio::fs::write(dir.join("b.pdf"), &cert).await?;
+    let joined = super::docs::process::run("pdfunite", &["a.pdf", "b.pdf", "signed.pdf"], &dir, &[], 60).await;
+    let signed = match joined {
+        Ok(_) => tokio::fs::read(dir.join("signed.pdf")).await.map_err(|e| AppError::Internal(e.into())),
+        Err(_) => Err(AppError::Internal(anyhow::anyhow!("pdfunite failed"))),
+    };
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    signed
+}
+
+pub(crate) fn sha256_hex(b: &[u8]) -> String {
+    hash(b)
+}
+
 async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
     let r: RequestRow = sqlx::query_as(sqlx::AssertSqlSafe(format!("{REQUEST_SELECT} WHERE r.id = $1"))).bind(id).fetch_one(&state.db).await?;
     let rows: Vec<(String, String, Option<String>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<Uuid>)> = sqlx::query_as(
@@ -482,42 +536,13 @@ async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    let mut files = Vec::new();
-    let mut signers = Vec::new();
-    for (i, (name, email, signed_name, at, ip, ua, sig)) in rows.iter().enumerate() {
-        let image = format!("sig-{i}.png");
-        if let Some(f) = sig {
-            files.push((image.clone(), read_bytes(state, *f).await?.3));
-        }
-        signers.push(json!({
-            "name": name, "email": email, "signed_name": signed_name.clone().unwrap_or_default(),
-            "signed_at": at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default(),
-            "ip": ip.clone().unwrap_or_else(|| "unknown".into()), "agent": ua.clone().unwrap_or_default().chars().take(90).collect::<String>(),
-            "image": format!("/{image}"),
-        }));
-    }
+    let list: Vec<CertSigner> = rows
+        .iter()
+        .map(|(name, email, sn, at, ip, ua, sig)| CertSigner { name: name.clone(), email: email.clone(), signed_name: sn.clone().unwrap_or_default(), signed_at: *at, ip: ip.clone(), agent: ua.clone(), signature: *sig })
+        .collect();
     let company = company(state).await;
-    let data = json!({
-        "company": company, "title": r.title, "request": id.to_string(), "sha": r.original_sha256, "signers": signers,
-        "sent": r.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-        "completed": r.completed_at.unwrap_or_else(Utc::now).format("%Y-%m-%d %H:%M UTC").to_string(),
-    });
-    let cert = tokio::task::spawn_blocking(move || super::docs::typst_engine::render_with(CERTIFICATE, &data, files))
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("certificate: {e}")))?;
     let original = read_bytes(state, r.original_file_id.ok_or(AppError::NotFound("document"))?).await?.3;
-    let dir = std::env::temp_dir().join(format!("nerp-sign-{}", Uuid::new_v4()));
-    tokio::fs::create_dir_all(&dir).await?;
-    tokio::fs::write(dir.join("a.pdf"), &original).await?;
-    tokio::fs::write(dir.join("b.pdf"), &cert).await?;
-    let joined = super::docs::process::run("pdfunite", &["a.pdf", "b.pdf", "signed.pdf"], &dir, &[], 60).await;
-    let signed = match joined {
-        Ok(_) => tokio::fs::read(dir.join("signed.pdf")).await.map_err(|e| AppError::Internal(e.into())),
-        Err(_) => Err(AppError::Internal(anyhow::anyhow!("pdfunite failed"))),
-    };
-    let _ = tokio::fs::remove_dir_all(&dir).await;
-    let signed = signed?;
+    let signed = signed_copy(state, &r.title, &id.to_string(), &r.original_sha256, r.created_at, r.completed_at.unwrap_or_else(Utc::now), &list, &original).await?;
     let file = store_bytes(state, None, &format!("{} (signed).pdf", r.title), "application/pdf", &signed).await?;
     sqlx::query("UPDATE sign_requests SET signed_file_id = $2, signed_sha256 = $3 WHERE id = $1").bind(id).bind(file).bind(hash(&signed)).execute(&state.db).await?;
     timeline(&state.db, r.item_id, "signature", None, None, json!({ "event": "completed", "request_id": id, "number": r.title, "file_id": file })).await?;

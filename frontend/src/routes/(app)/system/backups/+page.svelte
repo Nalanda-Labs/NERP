@@ -1,0 +1,177 @@
+<script lang="ts">
+	// Backups: the dated backups on the server, backing up now, proving the newest restores,
+	// downloading a database dump, and the command that restores one.
+	import { onDestroy, onMount } from 'svelte';
+	import { api, downloadUrl } from '#lib/api.ts';
+	import { formatBytes, formatDateTime } from '#lib/format.ts';
+	import { toasts } from '#lib/toast.svelte.ts';
+
+	type Run = { started_at: string; finished_at: string; ok: boolean; output: string } | null;
+	type Backup = {
+		name: string;
+		has_dump: boolean;
+		manifest: {
+			database_bytes?: number;
+			upload_files?: number;
+			last_migration?: number;
+			host?: string;
+		};
+	};
+	type Info = {
+		dir: string;
+		dir_exists: boolean;
+		scripts: boolean;
+		running: string | null;
+		items: Backup[];
+		last_backup: Run;
+		last_verify: Run;
+		restore_command: string | null;
+	};
+	let info = $state<Info | null>(null);
+	let showOutput = $state<'' | 'backup' | 'verify'>('');
+	let timer: ReturnType<typeof setInterval> | undefined;
+
+	async function load() {
+		try {
+			info = await api.get<Info>('/admin/backups');
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
+	onMount(() => {
+		load();
+		timer = setInterval(() => info?.running && load(), 3000);
+	});
+	onDestroy(() => clearInterval(timer));
+	async function start(path: string) {
+		try {
+			await api.post(path);
+			await load();
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
+	// 2026-11-10T020000Z → a date
+	const when = (n: string) =>
+		formatDateTime(`${n.slice(0, 13)}:${n.slice(13, 15)}:${n.slice(15, 17)}Z`);
+	const copy = (t: string) =>
+		navigator.clipboard?.writeText(t).then(() => toasts.success('Copied'));
+</script>
+
+<svelte:head><title>Backups · NERP</title></svelte:head>
+
+<div class="max-w-4xl space-y-5">
+	<div class="flex flex-wrap items-center gap-2">
+		<a class="btn btn-ghost px-2" href="/system" aria-label="System">‹</a>
+		<h1 class="text-2xl font-semibold text-slate-900">Backups</h1>
+		{#if info}
+			<div class="ml-auto flex gap-2">
+				<button
+					class="btn btn-primary"
+					disabled={!!info.running || !info.scripts}
+					onclick={() => start('/admin/backups')}
+					>{info.running === 'backup' ? 'Backing up…' : 'Back up now'}</button
+				>
+				<button
+					class="btn btn-secondary"
+					disabled={!!info.running || !info.scripts || !info.items.length}
+					onclick={() => start('/admin/backups/verify')}
+					>{info.running === 'backup_verify' ? 'Checking…' : 'Check the newest restores'}</button
+				>
+			</div>
+		{/if}
+	</div>
+	{#if info}
+		<p class="text-sm text-slate-500">
+			Each backup holds the database and the uploaded files, in <code>{info.dir}</code>. The server
+			also backs up every night when its timer is set up (see the deploy guide). Keep the server's
+			<code>.env</code> file safe separately: without its keys, stored passwords can't be read.
+		</p>
+		{#if !info.scripts}<p class="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+				The backup scripts were not found; set BACKUP_SCRIPTS to the deploy/backup folder.
+			</p>{/if}
+		<div class="grid gap-3 sm:grid-cols-2">
+			{#each [['backup', 'Last backup', info.last_backup], ['verify', 'Last restore check', info.last_verify]] as [k, label, r] (k)}
+				{@const run = r as Run}
+				<section class="card p-4 text-sm" data-run={k}>
+					<p class="text-xs text-slate-500">{label}</p>
+					{#if run}
+						<p
+							class="font-medium {run.ok ? 'text-emerald-700' : 'text-red-700'}"
+							data-run-ok={run.ok}
+						>
+							{run.ok ? 'Succeeded' : 'Failed'} · {formatDateTime(run.finished_at)}
+						</p>
+						<button
+							class="text-xs text-brand-600 hover:underline"
+							onclick={() => (showOutput = showOutput === k ? '' : (k as 'backup' | 'verify'))}
+							>{showOutput === k ? 'Hide' : 'Show'} the output</button
+						>
+						{#if showOutput === k}<pre
+								class="mt-2 max-h-64 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-100">{run.output}</pre>{/if}
+					{:else}<p class="text-slate-400">Never from here.</p>{/if}
+				</section>
+			{/each}
+		</div>
+		<section class="card" aria-label="Backups">
+			<table class="w-full text-sm">
+				<thead
+					><tr class="border-b border-slate-100 text-left text-xs text-slate-500"
+						><th class="px-4 py-2">Made</th><th>Database</th><th>Files</th><th>Migration</th><th
+						></th></tr
+					></thead
+				>
+				<tbody class="divide-y divide-slate-50">
+					{#each info.items as b (b.name)}
+						<tr data-backup={b.name}>
+							<td class="px-4 py-2"
+								>{when(b.name)}{#if b.manifest.host}<span class="text-xs text-slate-400">
+										· {b.manifest.host}</span
+									>{/if}</td
+							>
+							<td>{b.manifest.database_bytes ? formatBytes(b.manifest.database_bytes) : '—'}</td>
+							<td>{b.manifest.upload_files ?? '—'}</td>
+							<td>{b.manifest.last_migration ?? '—'}</td>
+							<td class="pr-4 text-right"
+								>{#if b.has_dump}<button
+										class="text-brand-600 hover:underline"
+										onclick={() =>
+											downloadUrl(
+												`/api/admin/backups/${b.name}/database.dump`,
+												`nerp-${b.name}.dump`
+											).catch(toasts.error)}>Database</button
+									>{/if}</td
+							>
+						</tr>
+					{:else}<tr
+							><td class="px-4 py-3 text-slate-400" colspan="5"
+								>{info.dir_exists
+									? 'No backups yet.'
+									: 'The folder does not exist yet; the first backup makes it.'}</td
+							></tr
+						>{/each}
+				</tbody>
+			</table>
+		</section>
+		{#if info.restore_command}
+			<section class="card space-y-2 p-4 text-sm" aria-label="Restoring">
+				<h2 class="font-semibold text-slate-900">Restoring</h2>
+				<p class="text-slate-600">
+					Restoring replaces everything with the backup, so it runs on the server, in the NERP folder, with NERP stopped.
+					For the newest backup:
+				</p>
+				<div class="flex items-start gap-2">
+					<code class="flex-1 rounded bg-slate-50 p-2 text-xs break-all" data-restore
+						>{info.restore_command}</code
+					><button class="btn btn-ghost" onclick={() => copy(info!.restore_command!)}>Copy</button>
+				</div>
+				<p class="text-xs text-slate-500">
+					To look something up without touching the live data, add <code>--target-db</code> with an
+					empty database instead of <code>--yes</code>.
+				</p>
+			</section>
+		{/if}
+	{:else}
+		<p class="text-sm text-slate-400">Loading…</p>
+	{/if}
+</div>

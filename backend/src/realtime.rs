@@ -62,6 +62,8 @@ enum Outgoing {
 
 struct Conn {
     session: Uuid,
+    /// Guests hear only what is addressed to them, never company-wide broadcasts.
+    guest: bool,
     tx: mpsc::UnboundedSender<Outgoing>,
 }
 
@@ -72,9 +74,9 @@ pub struct Hub {
 }
 
 impl Hub {
-    fn add(&self, user: Uuid, session: Uuid, tx: mpsc::UnboundedSender<Outgoing>) -> u64 {
+    fn add(&self, user: Uuid, session: Uuid, guest: bool, tx: mpsc::UnboundedSender<Outgoing>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.conns.write().unwrap().entry(user).or_default().insert(id, Conn { session, tx });
+        self.conns.write().unwrap().entry(user).or_default().insert(id, Conn { session, guest, tx });
         id
     }
 
@@ -112,7 +114,7 @@ impl Hub {
                     conns.get(u).into_iter().flat_map(HashMap::values).for_each(&mut send);
                 }
             }
-            None => conns.values().flat_map(HashMap::values).for_each(&mut send),
+            None => conns.values().flat_map(HashMap::values).filter(|c| !c.guest).for_each(&mut send),
         }
     }
 }
@@ -173,6 +175,8 @@ pub fn router() -> Router<AppState> {
 struct Ticket {
     user_id: Uuid,
     session_id: Uuid,
+    #[serde(default)]
+    guest: bool,
 }
 
 async fn ticket(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
@@ -182,7 +186,7 @@ async fn ticket(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json
     let _: () = redis
         .set_ex(
             format!("realtime:ticket:{ticket}"),
-            serde_json::to_string(&Ticket { user_id: auth.id, session_id: auth.session_id }).unwrap(),
+            serde_json::to_string(&Ticket { user_id: auth.id, session_id: auth.session_id, guest: auth.is_guest() }).unwrap(),
             TICKET_TTL_SECS,
         )
         .await?;
@@ -210,7 +214,7 @@ async fn connect(
 async fn serve(state: AppState, socket: WebSocket, ticket: Ticket) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
-    let conn_id = state.hub.add(ticket.user_id, ticket.session_id, tx);
+    let conn_id = state.hub.add(ticket.user_id, ticket.session_id, ticket.guest, tx);
     let _ = sink
         .send(Message::Text(json!({ "type": "hello", "data": {} }).to_string().into()))
         .await;

@@ -47,6 +47,9 @@ const MAX_FAILED_LOGINS_PER_IP: i64 = 100;
 const FAILED_LOGIN_WINDOW_SECS: i64 = 15 * 60;
 const TWO_FACTOR_CHALLENGE_SECS: u64 = 5 * 60;
 const TWO_FACTOR_MAX_ATTEMPTS: i64 = 5;
+/// Wrong second-step codes per account (over any number of sign-ins) before it must wait.
+const TWO_FACTOR_MAX_FAILS: i64 = 10;
+const TWO_FACTOR_LOCK_SECS: i64 = 15 * 60;
 const RESET_TTL_SECS: u64 = 3600;
 const MAX_RESET_REQUESTS_PER_HOUR: i64 = 3;
 pub const INVITE_TTL_SECS: u64 = 7 * 24 * 3600;
@@ -75,6 +78,7 @@ pub async fn load_me(state: &AppState, user_id: Uuid) -> AppResult<Me> {
 
 /// Starts a new session for a device: access token in the body, refresh token as a cookie.
 pub async fn start_session(state: &AppState, user_id: Uuid, meta: &ClientMeta) -> AppResult<Response> {
+    crate::auth::ip::check_user(state, user_id, meta.ip.as_deref()).await?;
     let (sid, refresh) = tokens::create_session(state, user_id, meta).await?;
     session_response(state, user_id, sid, Some(&refresh)).await
 }
@@ -187,6 +191,7 @@ async fn login(
         }
     };
     let _: () = redis.del(&fail_key).await?;
+    crate::auth::ip::check_user(&state, user_id, ip).await?;
 
     if let Some(next) = second_step(&state, user_id, has_2fa).await? {
         return Ok(Json(next).into_response());
@@ -367,10 +372,19 @@ async fn login_two_factor(
     let Some(secret) = secret else {
         return Err(AppError::Unauthorized);
     };
-
+    // Starting the sign-in again gives a new challenge, so wrong codes are also counted per
+    // account: otherwise someone with the password could keep guessing codes.
+    // Recovery codes are long and random, so they still work then: the real person, locked
+    // out by someone guessing, can still sign in.
+    let account_key = format!("auth:2fa_fail:{user_id}");
+    let account_fails: i64 = redis.get(&account_key).await.unwrap_or(0);
     let code = body.code.trim();
     let digits = code.chars().filter(|c| c.is_ascii_digit()).count();
-    let (ok, method) = if digits == 6 && code.len() <= 7 {
+    let is_totp = digits == 6 && code.len() <= 7;
+    if is_totp && account_fails >= TWO_FACTOR_MAX_FAILS {
+        return Err(AppError::TooManyRequests("too many wrong codes; try again in 15 minutes, or use a recovery code".into()));
+    }
+    let (ok, method) = if is_totp {
         (two_factor::verify_code(&state, user_id, &secret, code).await?, "totp")
     } else {
         (two_factor::use_recovery_code(&state, user_id, code).await?, "recovery_code")
@@ -380,6 +394,10 @@ async fn login_two_factor(
         let (attempts,): (i64,) = redis::pipe()
             .incr(&attempts_key, 1)
             .expire(&attempts_key, TWO_FACTOR_CHALLENGE_SECS as i64)
+            .ignore()
+            .incr(&account_key, 1)
+            .ignore()
+            .expire(&account_key, TWO_FACTOR_LOCK_SECS)
             .ignore()
             .query_async(&mut redis)
             .await?;
@@ -391,7 +409,7 @@ async fn login_two_factor(
         return Err(AppError::InvalidCredentials("that code is not valid".into()));
     }
 
-    let _: () = redis.del(&[&key, &attempts_key]).await?;
+    let _: () = redis.del(&[&key, &attempts_key, &account_key]).await?;
     if method == "recovery_code" {
         let left = two_factor::remaining_recovery_codes(&state, user_id).await?;
         notify(
@@ -423,6 +441,7 @@ async fn refresh(State(state): State<AppState>, meta: ClientMeta, headers: Heade
         tokens::revoke_session(&state, sid).await?;
         return Err(AppError::Unauthorized);
     }
+    crate::auth::ip::check_user(&state, user_id, meta.ip.as_deref()).await?;
     session_response(&state, user_id, sid, Some(&new_token)).await
 }
 

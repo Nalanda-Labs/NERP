@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "pg": "^8.23.1",
-    "playwright": "^1.65.0"
+    "playwright": "^1.65.0",
+    "tsdav": "^2.5.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

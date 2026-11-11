@@ -28,11 +28,17 @@ try {
     await page.locator(`h1:text-is("Playbook ${s}")`).waitFor();
   });
 
+  // The page text is a CodeMirror editor: replace everything in it.
+  const setText = async (text: string) => {
+    await page.locator('[aria-label="Page text (Markdown)"]').click();
+    await page.keyboard.press('Control+a');
+    await page.keyboard.insertText(text);
+  };
   await step('a page in Markdown, with a preview', async () => {
     answers.push('Onboarding');
     await page.click('button:has-text("New page")');
     await page.waitForURL(/\/kb\/page\/.+\?edit=1/);
-    await page.fill('textarea[aria-label="Page text (Markdown)"]', `## First day ${s}\n\n- Laptop\n- **Badge**`);
+    await setText(`## First day ${s}\n\n- Laptop\n- **Badge**`);
     await page.locator('[aria-label="Preview"] h2', { hasText: `First day ${s}` }).waitFor();
     await page.locator('[aria-label="Preview"] strong:text-is("Badge")').waitFor();
     await page.click('button:has-text("Save")');
@@ -42,7 +48,7 @@ try {
 
   await step('history and restoring', async () => {
     await page.click('button:has-text("Edit")');
-    await page.fill('textarea[aria-label="Page text (Markdown)"]', `Replaced ${s}`);
+    await setText(`Replaced ${s}`);
     await page.click('button:has-text("Save")');
     await page.locator('text=Version 3').waitFor();
     await page.click('button:has-text("History")');

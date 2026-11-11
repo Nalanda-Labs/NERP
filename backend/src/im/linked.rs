@@ -15,12 +15,12 @@ use crate::{
 
 /// A workgroup's chat follows the group: its name and members change with the group's.
 pub(super) async fn workgroup_guard(state: &AppState, chat: Uuid) -> AppResult<()> {
-    let linked: bool = sqlx::query_scalar("SELECT project_id IS NOT NULL OR task_id IS NOT NULL OR event_id IS NOT NULL FROM im_chats WHERE id = $1")
+    let linked: bool = sqlx::query_scalar("SELECT project_id IS NOT NULL OR task_id IS NOT NULL OR event_id IS NOT NULL OR board_id IS NOT NULL FROM im_chats WHERE id = $1")
         .bind(chat)
         .fetch_one(&state.db)
         .await?;
     if linked {
-        return Err(AppError::bad("this chat belongs to a workgroup, task or event: its name and members follow it"));
+        return Err(AppError::bad("this chat belongs to a workgroup, task, event or board: its name and members follow it"));
     }
     Ok(())
 }
@@ -31,12 +31,13 @@ pub enum Link {
     Project(Uuid),
     Task(Uuid),
     Event(Uuid),
+    Board(Uuid),
 }
 
 impl Link {
     fn id(self) -> Uuid {
         match self {
-            Link::Project(id) | Link::Task(id) | Link::Event(id) => id,
+            Link::Project(id) | Link::Task(id) | Link::Event(id) | Link::Board(id) => id,
         }
     }
     fn column(self) -> &'static str {
@@ -44,6 +45,7 @@ impl Link {
             Link::Project(_) => "project_id",
             Link::Task(_) => "task_id",
             Link::Event(_) => "event_id",
+            Link::Board(_) => "board_id",
         }
     }
     /// Everyone on it (`$2` is its id), active or not.
@@ -53,6 +55,8 @@ impl Link {
             Link::Task(_) => "SELECT created_by AS user_id FROM tasks WHERE id = $2 UNION SELECT responsible_id FROM tasks WHERE id = $2
                 UNION SELECT user_id FROM task_members WHERE task_id = $2",
             Link::Event(_) => "SELECT owner_id AS user_id FROM cal_events WHERE id = $2 UNION SELECT user_id FROM cal_attendees WHERE event_id = $2",
+            // The owner and the people it is shared with by name.
+            Link::Board(_) => "SELECT owner_id AS user_id FROM boards WHERE id = $2 UNION SELECT grantee_id FROM board_access WHERE board_id = $2 AND grantee_kind = 'user'",
         }
     }
     fn title(self) -> &'static str {
@@ -60,6 +64,7 @@ impl Link {
             Link::Project(_) => "SELECT name FROM projects WHERE id = $1",
             Link::Task(_) => "SELECT 'Task #' || number || ': ' || title FROM tasks WHERE id = $1",
             Link::Event(_) => "SELECT title FROM cal_events WHERE id = $1",
+            Link::Board(_) => "SELECT title FROM boards WHERE id = $1",
         }
     }
     fn welcome(self, name: &str) -> String {
@@ -67,6 +72,7 @@ impl Link {
             Link::Project(_) => format!("The chat of “{name}”"),
             Link::Task(_) => format!("The chat of {name}"),
             Link::Event(_) => format!("The chat of the event “{name}”"),
+            Link::Board(_) => format!("The chat of the board “{name}”"),
         }
     }
     fn left(self) -> &'static str {
@@ -74,6 +80,7 @@ impl Link {
             Link::Project(_) => "left the group",
             Link::Task(_) => "left the task",
             Link::Event(_) => "left the event",
+            Link::Board(_) => "left the board",
         }
     }
     /// Whether `user` is on it.

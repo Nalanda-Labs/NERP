@@ -60,8 +60,8 @@ try {
   ok('even the right code is refused then', (await guess.post('/auth/login/2fa', { challenge: guess.data.challenge, code: totp(ivy.secret, now() - 30) })).status === 401);
   const parallel = await login('ivy');
   const burst = await Promise.all(Array.from({ length: 12 }, (_, i) => new Client().post('/auth/login/2fa', { challenge: parallel.data.challenge, code: String(200000 + i) })));
-  ok('guessing in parallel gets nowhere', burst.every((r) => r.status === 401));
-  ok('and the attempt is gone', (await new Client().post('/auth/login/2fa', { challenge: parallel.data.challenge, code: totp(ivy.secret) })).status === 401);
+  ok('guessing in parallel gets nowhere', burst.every((r) => r.status === 401 || r.status === 429));
+  ok('and the attempt is gone', [401, 429].includes((await new Client().post('/auth/login/2fa', { challenge: parallel.data.challenge, code: totp(ivy.secret) })).status));
 
   // ---- recovery codes ----
   const r1 = await login('ivy');

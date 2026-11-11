@@ -6,6 +6,7 @@
 	import { page } from '$app/state';
 	import { onDestroy, onMount } from 'svelte';
 	import { api, sendOnUnload } from '#lib/api.ts';
+	import { blurTrack, type Blurred } from '#lib/blur.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import { realtime } from '#lib/realtime.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
@@ -57,7 +58,7 @@
 		if (found) return found;
 		const pc = new RTCPeerConnection({ iceServers: ice });
 		const r: Remote = { peerId: peer, userId, name, pc, stream: null, state: 'connecting', pending: [] };
-		if (local) for (const t of local.getTracks()) pc.addTrack(t, local);
+		if (local) for (const t of local.getTracks()) pc.addTrack(blur && t.kind === 'video' ? blur.track : t, local);
 		else {
 			pc.addTransceiver('audio', { direction: 'recvonly' });
 			pc.addTransceiver('video', { direction: 'recvonly' });
@@ -206,8 +207,45 @@
 	function leaveQuietly() {
 		if (peerId && status === 'in') sendOnUnload(`/calls/${id}/leave`, { peer_id: peerId });
 	}
+	// ----- background blur -----
+	let blur = $state<Blurred | null>(null);
+	let blurBusy = $state(false);
+	// What I see of myself: the blurred picture when blurring.
+	const selfView = $derived(blur ? new MediaStream([blur.track]) : local);
+	/** Sends this video track instead of the camera's (not while sharing the screen). */
+	async function sendVideo(track: MediaStreamTrack) {
+		if (room) {
+			for (const pub of room.localParticipant.trackPublications.values()) {
+				if (pub.source === 'camera' && pub.videoTrack) await pub.videoTrack.replaceTrack(track, true);
+			}
+		} else if (!sharing) {
+			for (const r of remotes) await r.pc?.getSenders().find((x) => x.track?.kind === 'video')?.replaceTrack(track);
+		}
+	}
+	async function toggleBlur() {
+		const camera = local?.getVideoTracks()[0];
+		if (!camera) return;
+		blurBusy = true;
+		try {
+			if (blur) {
+				await sendVideo(camera);
+				blur.stop();
+				blur = null;
+			} else {
+				const b = await blurTrack(camera);
+				await sendVideo(b.track);
+				blur = b;
+			}
+		} catch {
+			toasts.error('Background blur is not available in this browser');
+		} finally {
+			blurBusy = false;
+		}
+	}
+
 	function stopAll() {
 		clearInterval(beat);
+		blur?.stop();
 		offs.forEach((f) => f());
 		for (const r of remotes) r.pc?.close();
 		room?.disconnect();
@@ -253,7 +291,7 @@
 		const track = sharing?.getVideoTracks()[0];
 		if (room && track) room.localParticipant.unpublishTrack(track).catch(() => {});
 		else {
-			const cameraTrack = local?.getVideoTracks()[0] ?? null;
+			const cameraTrack = blur?.track ?? local?.getVideoTracks()[0] ?? null;
 			for (const r of remotes) r.pc?.getSenders().find((s) => s.track?.kind === 'video')?.replaceTrack(cameraTrack);
 		}
 		sharing?.getTracks().forEach((t) => t.stop());
@@ -281,7 +319,7 @@
 	{:else}
 		<div class="grid flex-1 auto-rows-fr gap-3 {remotes.length === 0 ? 'grid-cols-1' : remotes.length < 2 ? 'grid-cols-2' : 'grid-cols-2 lg:grid-cols-3'}">
 			<div class="relative overflow-hidden rounded-xl bg-slate-800">
-				<video use:video={sharing ?? local} autoplay playsinline muted class="size-full object-cover {sharing ? '' : '-scale-x-100'}"></video>
+				<video use:video={sharing ?? selfView} autoplay playsinline muted class="size-full object-cover {sharing ? '' : '-scale-x-100'}"></video>
 				<span class="absolute bottom-2 left-2 rounded bg-black/50 px-2 py-0.5 text-xs">You{mic ? '' : ' · muted'}</span>
 			</div>
 			{#each remotes as r (r.peerId)}
@@ -295,6 +333,7 @@
 		<div class="mt-4 flex justify-center gap-3">
 			<button class="flex size-12 items-center justify-center rounded-full disabled:opacity-40 {mic ? 'bg-slate-700' : 'bg-red-600'}" aria-pressed={!mic} aria-label={mic ? 'Mute' : 'Unmute'} disabled={!mic && !allow.audio && !isHost} title={!allow.audio && !isHost ? 'The host turned microphones off' : ''} onclick={() => toggle('audio')}>{mic ? '🎙' : '🔇'}</button>
 			<button class="flex size-12 items-center justify-center rounded-full disabled:opacity-40 {cam ? 'bg-slate-700' : 'bg-red-600'}" aria-pressed={!cam} aria-label={cam ? 'Turn camera off' : 'Turn camera on'} disabled={!cam && !allow.video && !isHost} title={!allow.video && !isHost ? 'The host turned cameras off' : ''} onclick={() => toggle('video')}><Icon name="monitor" class="size-5" /></button>
+			<button class="flex size-12 items-center justify-center rounded-full text-xs disabled:opacity-40 {blur ? 'bg-brand-600' : 'bg-slate-700'}" aria-pressed={!!blur} aria-label="Blur background" title="Blur the background" disabled={blurBusy || !cam || !local?.getVideoTracks().length} onclick={toggleBlur} data-blur>{blurBusy ? '…' : 'Blur'}</button>
 			<button class="flex size-12 items-center justify-center rounded-full disabled:opacity-40 {sharing ? 'bg-brand-600' : 'bg-slate-700'}" aria-pressed={!!sharing} aria-label="Share screen" disabled={!sharing && !allow.screen && !isHost} title={!allow.screen && !isHost ? 'The host turned screen sharing off' : ''} onclick={share}>⧉</button>
 			{#if isHost && status === 'in'}
 				<div class="relative">

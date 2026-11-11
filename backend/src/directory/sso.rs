@@ -100,6 +100,19 @@ async fn discover(issuer: &str) -> Result<Discovery, String> {
     Ok(d)
 }
 
+/// For other providers: (authorization, token, userinfo) endpoints of an issuer.
+pub(crate) async fn discover_pub(issuer: &str) -> Result<(String, String, Option<String>), String> {
+    if !issuer_ok(issuer) {
+        return Err("the issuer must be an https:// address".into());
+    }
+    let d = discover(issuer).await?;
+    Ok((d.authorization_endpoint, d.token_endpoint, d.userinfo_endpoint))
+}
+
+pub(crate) fn issuer_ok_pub(issuer: &str) -> bool {
+    issuer_ok(issuer)
+}
+
 // ---------------------------------------------------------------------------
 // Sign-in
 // ---------------------------------------------------------------------------

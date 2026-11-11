@@ -898,7 +898,69 @@ pub async fn apply(
                 .await?;
         }
     }
+    // Entering a stage that asks for fields: they must be filled (the transaction is undone).
+    if let Some((_, new_stage)) = ch.stage {
+        check_stage_fields(tx, t, id, new_stage).await?;
+    }
     Ok(ch)
+}
+
+/// Standard fields a stage can ask for, with their names.
+pub const REQUIRABLE: &[(&str, &str)] = &[
+    ("opportunity", "Amount"),
+    ("company_id", "Company"),
+    ("contact_ids", "Contact"),
+    ("close_date", "Expected close date"),
+    ("probability", "Probability"),
+    ("source", "Source"),
+    ("source_details", "Source details"),
+    ("comments", "Comment"),
+    ("first_name", "First name"),
+    ("last_name", "Last name"),
+    ("company_name", "Company name"),
+    ("job_title", "Job title"),
+    ("assigned_to", "Responsible person"),
+];
+
+async fn check_stage_fields(tx: &mut sqlx::Transaction<'_, Postgres>, t: &EntityType, id: Uuid, stage: Uuid) -> AppResult<()> {
+    let (required, stage_name): (Vec<String>, String) = sqlx::query_as("SELECT required_fields, name FROM crm_stages WHERE id = $1").bind(stage).fetch_one(&mut **tx).await?;
+    if required.is_empty() {
+        return Ok(());
+    }
+    let item: Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('opportunity', NULLIF(opportunity, 0), 'company_id', company_id, 'close_date', close_date, 'probability', probability,
+            'source', source, 'source_details', source_details, 'comments', comments, 'first_name', first_name, 'last_name', last_name,
+            'company_name', company_name, 'job_title', job_title, 'assigned_to', assigned_to, 'uf', uf,
+            'contact_ids', CASE WHEN EXISTS (SELECT 1 FROM crm_item_contacts c WHERE c.item_id = i.id) THEN TRUE END)
+         FROM crm_items i WHERE i.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let empty = |v: &Value| match v {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Array(a) => a.is_empty(),
+        _ => false,
+    };
+    let labels: Vec<(String, String)> = sqlx::query_as("SELECT code, label FROM crm_field_defs WHERE entity_type = $1").bind(t.id).fetch_all(&mut **tx).await?;
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|c| match c.strip_prefix("uf.") {
+            Some(u) => empty(&item["uf"][u]),
+            None => empty(&item[c.as_str()]),
+        })
+        .map(|c| match c.strip_prefix("uf.") {
+            Some(u) => labels.iter().find(|(k, _)| k == u).map(|(_, l)| l.clone()).unwrap_or_else(|| u.to_string()),
+            None => REQUIRABLE.iter().find(|(k, _)| *k == c).map(|(_, l)| l.to_string()).unwrap_or_else(|| c.clone()),
+        })
+        .map(|l| format!("“{l}”"))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::bad(format!("fill in {} before moving to “{stage_name}”", missing.join(", "))))
+    }
 }
 
 /// (number, title, honorific, first, middle, last, company, job, opportunity, currency)

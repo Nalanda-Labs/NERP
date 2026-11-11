@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { api, query } from '#lib/api.ts';
+	import GuestInvite from '#lib/components/GuestInvite.svelte';
 	import Avatar from '#lib/components/Avatar.svelte';
 	import Gantt from '#lib/components/Gantt.svelte';
 	import GroupCalendar from '#lib/components/groups/GroupCalendar.svelte';
@@ -28,12 +29,13 @@
 	import { formatDate } from '#lib/format.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
 	import type { Page } from '#lib/types.ts';
+	import BoardsList from '#lib/components/boards/BoardsList.svelte';
 
 	const id = $derived(page.params.id!);
 	let project = $state<ProjectDetail | null>(null);
 	let tasks = $state<TaskSummary[]>([]);
 	let notFound = $state(false);
-	type Tab = 'feed' | 'board' | 'list' | 'gantt' | 'files' | 'calendar' | 'members' | 'planning' | 'sprint' | 'reports';
+	type Tab = 'feed' | 'board' | 'list' | 'gantt' | 'files' | 'boards' | 'calendar' | 'members' | 'planning' | 'sprint' | 'reports';
 	let tab = $state<Tab>('board');
 	const TASK_TABS = ['board', 'list', 'gantt'];
 	let deps = $state<{ task_id: string; depends_on_id: string }[]>([]);
@@ -295,7 +297,7 @@
 		</div>
 	{:else}
 	<div class="mb-4 flex flex-wrap items-center gap-3 border-b border-slate-200" role="tablist">
-		{#each [...tabs, ['files', 'Files', 'folder'], ['calendar', 'Calendar', 'calendar'], ['members', `Members (${project.members.length})${project.access.manage && project.request_count ? ` · ${project.request_count} asking` : ''}`, 'users']] as [k, label, icon] (k)}
+		{#each [...tabs, ['files', 'Files', 'folder'], ['boards', 'Boards', 'board'], ['calendar', 'Calendar', 'calendar'], ['members', `Members (${project.members.length})${project.access.manage && project.request_count ? ` · ${project.request_count} asking` : ''}`, 'users']] as [k, label, icon] (k)}
 			<button
 				role="tab"
 				aria-selected={tab === k}
@@ -324,6 +326,8 @@
 		<GroupFeed projectId={project.id} canPost={project.access.contribute} owner={project.access.manage} />
 	{:else if tab === 'files'}
 		<GroupFiles projectId={project.id} />
+	{:else if tab === 'boards'}
+		<BoardsList projectId={project.id} canAdd={project.access.contribute && !project.is_archived} />
 	{:else if tab === 'calendar'}
 		<GroupCalendar projectId={project.id} canAdd={project.access.contribute} />
 	{:else if tab === 'planning' && scrum}
@@ -359,16 +363,17 @@
 		{/if}
 		<div class="card max-w-3xl">
 			{#if project.access.manage}
-				<div class="border-b border-slate-100 p-4">
+				<div class="space-y-2 border-b border-slate-100 p-4">
 					<UserPicker placeholder="Add a member…" exclude={project.members.map((m) => m.user_id)} onpick={(u) => setRole(u.id, 'member')} />
+					<GuestInvite endpoint="/projects/{project.id}/guests" oninvited={async () => (project = await api.get<ProjectDetail>(`/projects/${id}`))} />
 				</div>
 			{/if}
 			<ul class="divide-y divide-slate-100">
 				{#each project.members as m (m.user_id)}
 					<li class="flex items-center gap-3 px-4 py-3">
 						<Avatar name={m.full_name} fileId={m.avatar_file_id} size="sm" />
-						<a href="/employees/{m.user_id}" class="min-w-0 flex-1">
-							<span class="block truncate text-sm font-medium text-slate-800">{m.full_name}</span>
+						<a href={session.user?.is_guest ? undefined : `/employees/${m.user_id}`} class="min-w-0 flex-1">
+							<span class="block truncate text-sm font-medium text-slate-800">{m.full_name}{#if m.is_guest}<span class="badge ml-1.5 bg-amber-50 text-amber-800">Guest</span>{/if}</span>
 							<span class="block truncate text-xs text-slate-500">{m.position ?? ''}</span>
 						</a>
 						{#if project.access.manage}

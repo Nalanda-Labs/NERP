@@ -330,6 +330,8 @@ async fn set_crm(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
 
 #[derive(Deserialize)]
 struct ListQuery {
+    /// With counts by status (and overdue) for the whole filtered list.
+    summary: Option<String>,
     /// my (responsible or assistant) | created | assisting | watching | all (everything visible)
     view: Option<String>,
     /// Comma-separated statuses; default: everything.
@@ -354,7 +356,7 @@ struct ListQuery {
     page: PageParams,
 }
 
-async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<ListQuery>) -> AppResult<Json<Page<TaskSummary>>> {
+async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<ListQuery>) -> AppResult<Json<Value>> {
     let statuses: Vec<String> = q
         .status
         .as_deref()
@@ -457,7 +459,19 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Lis
     qb.push(", t.id LIMIT ").push_bind(q.page.limit()).push(" OFFSET ").push_bind(q.page.offset());
     let mut items: Vec<TaskSummary> = qb.build_query_as().fetch_all(&state.db).await?;
     super::depth::count_new_comments(&state, auth.id, &mut items).await?;
-    Ok(Json(Page { items, total, limit: q.page.limit(), offset: q.page.offset() }))
+    let mut v = serde_json::to_value(Page { items, total, limit: q.page.limit(), offset: q.page.offset() }).map_err(anyhow::Error::from)?;
+    // How the listed tasks stand: how many in each status, and overdue.
+    if q.summary.as_deref() == Some("true") {
+        let mut sq = build("SELECT t.status, COUNT(*), COUNT(*) FILTER (WHERE t.deadline < now() AND t.status IN ('new','in_progress','review')) FROM tasks t WHERE TRUE");
+        sq.push(" GROUP BY t.status");
+        let rows: Vec<(String, i64, i64)> = sq.build_query_as().fetch_all(&state.db).await?;
+        let mut by = serde_json::Map::new();
+        for st in STATUSES {
+            by.insert((*st).into(), json!(rows.iter().find(|r| r.0 == *st).map(|r| r.1).unwrap_or(0)));
+        }
+        v["summary"] = json!({ "by_status": by, "overdue": rows.iter().map(|r| r.2).sum::<i64>() });
+    }
+    Ok(Json(v))
 }
 
 /// Badge numbers for the sidebar and dashboard.

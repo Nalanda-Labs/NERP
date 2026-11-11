@@ -36,6 +36,7 @@ pub fn router() -> Router<AppState> {
         .route("/kb/pages/{id}/versions/{v}/restore", post(restore))
         .route("/kb/search", get(search))
         .route("/kb/preview", post(preview))
+        .route("/kb/pages/{id}/files", get(page_files).post(attach_file))
 }
 
 fn manager(auth: &AuthUser) -> bool {
@@ -58,12 +59,102 @@ fn access_sql(level: &str) -> String {
     if level == "edit" { format!("($2 OR s.created_by = $1 OR {base})") } else { format!("($2 OR s.to_all OR s.created_by = $1 OR {base})") }
 }
 
-/// Markdown to safe HTML.
+/// A heading's or footnote's anchor: lower-case letters, digits and dashes.
+fn slug(text: &str) -> String {
+    let s: String = text.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+    let s = s.split('-').filter(|x| !x.is_empty()).collect::<Vec<_>>().join("-");
+    s.chars().take(60).collect()
+}
+
+/// Markdown to safe HTML: GitHub-style tables, task lists, strikethrough, footnotes and
+/// callouts (`> [!NOTE]`), headings with anchors (`#h-…`) and fenced code marked with its
+/// language for highlighting. The result is cleaned: only those ids and classes survive.
 pub fn render(md: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
+    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_FOOTNOTES | Options::ENABLE_GFM;
+    let mut events: Vec<Event> = Parser::new_ext(md, opts).collect();
+    // Heading anchors from their text (unique on the page); footnote labels made safe.
+    let mut used = std::collections::HashMap::<String, usize>::new();
+    let mut i = 0;
+    while i < events.len() {
+        if let Event::Start(Tag::Heading { .. }) = &events[i] {
+            let mut text = String::new();
+            let mut j = i + 1;
+            while j < events.len() && !matches!(events[j], Event::End(TagEnd::Heading(_))) {
+                if let Event::Text(t) | Event::Code(t) = &events[j] {
+                    text.push_str(t);
+                }
+                j += 1;
+            }
+            let base = { let s = slug(&text); if s.is_empty() { "section".to_string() } else { s } };
+            let n = used.entry(base.clone()).or_insert(0);
+            *n += 1;
+            let anchor = if *n == 1 { format!("h-{base}") } else { format!("h-{base}-{n}") };
+            if let Event::Start(Tag::Heading { id, classes, attrs, .. }) = &mut events[i] {
+                *id = Some(CowStr::from(anchor));
+                classes.clear();
+                attrs.clear();
+            }
+        }
+        match &mut events[i] {
+            Event::FootnoteReference(l) => *l = CowStr::from(format!("fn-{}", slug(l))),
+            Event::Start(Tag::FootnoteDefinition(l)) => *l = CowStr::from(format!("fn-{}", slug(l))),
+            _ => {}
+        }
+        i += 1;
+    }
     let mut out = String::new();
-    html::push_html(&mut out, Parser::new_ext(md, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS));
-    ammonia::Builder::default().add_generic_attributes(["align"]).link_rel(Some("noopener noreferrer")).clean(&out).to_string()
+    html::push_html(&mut out, events.into_iter());
+    // Table columns are aligned with a style attribute, which cleaning removes: use `align`.
+    for side in ["left", "center", "right"] {
+        out = out.replace(&format!(r#" style="text-align: {side}""#), &format!(r#" align="{side}""#));
+    }
+    let safe_id = |v: &str| (v.starts_with("h-") || v.starts_with("fn-")) && v.len() <= 80 && v.chars().all(|c| c.is_alphanumeric() || c == '-');
+    let clean = ammonia::Builder::default()
+        .add_generic_attributes(["align"])
+        .add_tags(["input"])
+        .add_tag_attributes("input", ["type", "checked", "disabled"])
+        .add_tag_attributes("code", ["class"])
+        .add_tag_attributes("blockquote", ["class"])
+        .add_tag_attributes("div", ["class", "id"])
+        .add_tag_attributes("sup", ["class", "id"])
+        .add_tag_attributes("li", ["id"])
+        .add_tag_attributes("h1", ["id"]).add_tag_attributes("h2", ["id"]).add_tag_attributes("h3", ["id"])
+        .add_tag_attributes("h4", ["id"]).add_tag_attributes("h5", ["id"]).add_tag_attributes("h6", ["id"])
+        .attribute_filter(move |el, attr, value| match (el, attr) {
+            (_, "id") => safe_id(value).then(|| value.into()),
+            ("code", "class") => value
+                .strip_prefix("language-")
+                .filter(|l| !l.is_empty() && l.len() <= 30 && l.chars().all(|c| c.is_ascii_alphanumeric() || "+#-_".contains(c)))
+                .map(|_| value.into()),
+            ("blockquote", "class") => ["markdown-alert-note", "markdown-alert-tip", "markdown-alert-important", "markdown-alert-warning", "markdown-alert-caution"]
+                .contains(&value)
+                .then(|| value.into()),
+            ("div" | "sup", "class") => ["footnote-definition", "footnote-reference", "footnote-definition-label"].contains(&value).then(|| value.into()),
+            ("input", "type") => (value == "checkbox").then(|| value.into()),
+            _ => Some(value.into()),
+        })
+        .link_rel(Some("noopener noreferrer"))
+        .clean(&out)
+        .to_string();
+    drop_inputs(&clean)
+}
+
+/// Only checklist boxes are kept; any other `<input>` (from raw HTML) is removed.
+fn drop_inputs(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find("<input") {
+        out.push_str(&rest[..i]);
+        let end = rest[i..].find('>').map(|e| i + e + 1).unwrap_or(rest.len());
+        let tag = &rest[i..end];
+        if tag.contains(r#"type="checkbox""#) {
+            out.push_str(tag);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +560,53 @@ async fn preview(_auth: AuthUser, Json(b): Json<PreviewBody>) -> AppResult<Json<
     Ok(Json(json!({ "html": render(&b.body) })))
 }
 
+// ---------------------------------------------------------------------------
+// Pictures and files in pages
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AttachInput {
+    file_id: Uuid,
+}
+
+/// Places an uploaded file in a page (its editors only; the file must be theirs), so the
+/// page's readers may open it.
+async fn attach_file(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<AttachInput>) -> AppResult<Json<Value>> {
+    let p = page_row(&state, id).await?;
+    editable(&state, &auth, p.space_id).await?;
+    if !crate::routes::files::may_read(&state, &auth, b.file_id).await? {
+        return Err(AppError::NotFound("file"));
+    }
+    sqlx::query("INSERT INTO kb_files (page_id, file_id, added_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING").bind(id).bind(b.file_id).bind(auth.id).execute(&state.db).await?;
+    let (name, mime): (String, String) = sqlx::query_as("SELECT original_name, mime_type FROM files WHERE id = $1").bind(b.file_id).fetch_one(&state.db).await?;
+    Ok(Json(json!({ "id": b.file_id, "name": name, "mime_type": mime, "url": format!("/api/files/{}/content", b.file_id) })))
+}
+
+async fn page_files(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+    let p = page_row(&state, id).await?;
+    readable(&state, &auth, p.space_id).await.map_err(|_| AppError::NotFound("page"))?;
+    let rows: Vec<(Uuid, String, String, i64)> = sqlx::query_as(
+        "SELECT f.id, f.original_name, f.mime_type, f.size_bytes FROM kb_files k JOIN files f ON f.id = k.file_id WHERE k.page_id = $1 ORDER BY k.created_at",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!({ "items": rows.into_iter().map(|(fid, n, m, s)| json!({ "id": fid, "name": n, "mime_type": m, "size_bytes": s, "url": format!("/api/files/{fid}/content") })).collect::<Vec<_>>() })))
+}
+
+/// A file placed in a page the person may read.
+pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS (SELECT 1 FROM kb_files k JOIN kb_pages p ON p.id = k.page_id JOIN kb_spaces s ON s.id = p.space_id WHERE k.file_id = $3 AND {})",
+        access_sql("read")
+    )))
+    .bind(auth.id)
+    .bind(manager(auth))
+    .bind(file)
+    .fetch_one(&state.db)
+    .await?)
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
@@ -516,10 +654,32 @@ mod tests {
     #[test]
     fn markdown_is_rendered_and_made_safe() {
         let html = render("# Title\n\n**bold** [link](https://example.com) <script>alert(1)</script>\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- [x] done");
-        assert!(html.contains("<h1>Title</h1>") && html.contains("<strong>bold</strong>") && html.contains("<table>"));
+        assert!(html.contains(r#"<h1 id="h-title">Title</h1>"#) && html.contains("<strong>bold</strong>") && html.contains("<table>"));
         assert!(html.contains("rel=\"noopener noreferrer\""));
         assert!(!html.contains("<script"));
         assert!(!render("<img src=x onerror=alert(1)>").contains("onerror"));
         assert!(!render("[x](javascript:alert(1))").contains("javascript:"));
+    }
+
+    #[test]
+    fn renders_the_full_set_safely() {
+        let html = render("# Intro\n\n## Setup\n\n## Setup\n\n- [x] done\n- [ ] open\n\nNote[^a].\n\n[^a]: The note.\n\n> [!WARNING]\n> Careful.\n\n```rust\nfn main() {}\n```\n\n~~old~~ | a | b |\n");
+        assert!(html.contains(r#"<h1 id="h-intro">"#), "{html}");
+        assert!(html.contains(r#"id="h-setup""#) && html.contains(r#"id="h-setup-2""#), "{html}");
+        assert!(html.contains(r#"type="checkbox""#) && html.contains("checked"), "{html}");
+        assert!(html.contains("fn-a") && html.contains("footnote-definition"), "{html}");
+        assert!(html.contains("markdown-alert-warning"), "{html}");
+        assert!(html.contains(r#"class="language-rust""#), "{html}");
+        assert!(html.contains("<del>old</del>"), "{html}");
+    }
+
+    #[test]
+    fn keeps_only_its_own_ids_and_classes() {
+        let html = render("<h2 id=\"location\" class=\"x\">a</h2><div id=\"api\" class=\"evil\">b</div><input type=\"text\" value=\"x\"><code class=\"language-x onerror\">c</code>");
+        assert!(!html.contains("location") && !html.contains(r#"id="api""#) && !html.contains("evil"), "{html}");
+        assert!(!html.contains(r#"type="text""#) && !html.contains("value="), "{html}");
+        assert!(!html.contains("language-x onerror"), "{html}");
+        let h = render("```js\" onload=alert(1)\nx\n```");
+        assert!(!h.contains("onload"), "{h}");
     }
 }

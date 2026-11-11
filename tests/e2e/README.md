@@ -29,6 +29,25 @@ on `../db/cleanup.ts`). Leftovers from interrupted runs: `node ../db/cleanup-tes
   provider on 127.0.0.1:8099; start the server with
   `GOOGLE_CLIENT_ID=g GOOGLE_CLIENT_SECRET=shh GOOGLE_OAUTH_AUTH_URL=http://127.0.0.1:8099/google/authorize GOOGLE_OAUTH_TOKEN_URL=http://127.0.0.1:8099/google/token`
   (and the same with `MICROSOFT_…` and `/microsoft/…`). Without them, skip those two.
+- For `api60` (calendar sync): the Google and Microsoft parts use the same mock OAuth provider
+  on 127.0.0.1:8099 (which also mocks Google's CalDAV and Microsoft Graph); start the server
+  with the `GOOGLE_…`/`MICROSOFT_…` settings above plus
+  `GOOGLE_CALDAV_URL=http://127.0.0.1:8099/google/caldav/v2 MICROSOFT_GRAPH_URL=http://127.0.0.1:8099/microsoft/graph/v1.0`.
+  Without them those parts are skipped; the CalDAV-account part syncs with NERP's own CalDAV
+  server and needs `CRM_WEBHOOK_ALLOW_PRIVATE=true` (in the full-test environment).
+- For `api63` and `ui57` (office editing): start the server with
+  `COLLABORA_URL=http://127.0.0.1:9988`; the suites run a stand-in for Collabora Online there
+  (its discovery, and for `ui57` its editor page). Without it the editing parts are skipped;
+  the LibreOffice previews always run (they need `soffice`).
+- For `ui67` (editing with the real Collabora Online): run `tools/collabora-up.sh` (the
+  official `collabora/code` image in podman, on 127.0.0.1:9980, sharing the host network so it
+  reaches NERP's WOPI endpoints at http://localhost:8080) and start the server with
+  `COLLABORA_URL=http://127.0.0.1:9980 tools/restart-server.sh`. It edits a text document,
+  an xlsx workbook and a pptx deck (made and read back with `soffice`), saving with Ctrl+S
+  and on leaving; two people edit one file at once; a viewer cannot save.
+  With the real Collabora connected, `api63` and `ui57` skip their stand-in editing checks.
+  Stop it with `podman rm -f nerp-collabora`.
+- `api59` drives NERP's CalDAV server with the `tsdav` client (installed with `npm install`).
 - For `api36`, `ui37` and `api42` (directory and sign-on): OpenLDAP installed (`slapd` and `slapadd`,
   with the schemas in `/etc/openldap/schema` or, on Debian/Ubuntu, `/etc/ldap/schema`). The suites run their own throwaway `slapd` on
   127.0.0.1:3893 (configuration and database in the output folder, removed afterwards) and a

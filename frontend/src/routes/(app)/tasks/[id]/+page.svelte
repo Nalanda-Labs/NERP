@@ -33,6 +33,7 @@
 	} from '#lib/tasks.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
 	import type { FileMeta } from '#lib/types.ts';
+	import BoardsList from '#lib/components/boards/BoardsList.svelte';
 
 	const id = $derived(page.params.id!);
 	let task = $state<TaskDetail | null>(null);
@@ -551,6 +552,8 @@
 					{#if task.subtasks.length}<TaskTable tasks={task.subtasks} showProject={false} />{/if}
 				</section>
 			{/if}
+
+			<BoardsList taskId={task.id} />
 
 			<!-- Attachments -->
 			<section class="card">

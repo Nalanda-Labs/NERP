@@ -19,6 +19,8 @@
 	const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
 
 	onMount(async () => {
+		// Guests go to their messenger (the layout sends them); the company view isn't theirs.
+		if (session.user?.is_guest) return;
 		api.get<Page<TaskSummary>>('/tasks' + query({ view: 'my', status: 'new,in_progress,review', sort: 'deadline', limit: 6 })).then((p) => (myTasks = p.items));
 		departments = await api.get<Department[]>('/departments');
 		if (session.can(PERM.USERS_VIEW)) {

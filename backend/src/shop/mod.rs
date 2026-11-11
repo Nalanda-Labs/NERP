@@ -11,6 +11,7 @@
 //! Moving an order to a failure stage (Cancelled) puts its units back on the shelf once;
 //! reopening it takes them again. The customer gets an email when their order changes stage.
 
+mod extras;
 mod store;
 
 use axum::{
@@ -41,6 +42,7 @@ pub fn router() -> Router<AppState> {
         .route("/shop/categories/{id}", patch(update_category).delete(delete_category))
         .route("/shop/orders/{item}", get(order_details))
         .merge(store::router())
+        .merge(extras::router())
 }
 
 fn require(auth: &AuthUser) -> AppResult<()> {

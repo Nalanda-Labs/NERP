@@ -25,6 +25,7 @@
 		image_file_id: string | null;
 		stock: string | null;
 		parent_id: string | null;
+		is_service?: boolean;
 	};
 	let catalogOpen = $state(false);
 	let extras = $state<ReturnType<typeof ProductExtras> | null>(null);
@@ -99,7 +100,7 @@
 	let showInactive = $state(false);
 	let open = $state(false);
 	let editing = $state<Product | null>(null);
-	const blank = () => ({ name: '', sku: '', description: '', price: '', currency: crm.config?.base_currency ?? '', tax_rate: '', tax_included: false, unit: 'pcs', is_active: true, in_shop: false, shop_category_id: null as string | null, image_file_id: null as string | null, stock: '' });
+	const blank = () => ({ name: '', sku: '', description: '', price: '', currency: crm.config?.base_currency ?? '', tax_rate: '', tax_included: false, unit: 'pcs', is_active: true, in_shop: false, shop_category_id: null as string | null, image_file_id: null as string | null, stock: '', is_service: false });
 	let form = $state(blank());
 
 	async function load() {
@@ -128,7 +129,8 @@
 					in_shop: p.in_shop,
 					shop_category_id: p.shop_category_id,
 					image_file_id: p.image_file_id,
-					stock: num(p.stock)
+					stock: num(p.stock),
+					is_service: !!p.is_service
 				}
 			: blank();
 		showPhoto(form.image_file_id).catch(() => (photo = null));
@@ -194,7 +196,7 @@
 						<td class="px-4 py-2.5 text-right">{money(p.price, p.currency)} / {p.unit}</td>
 						<td class="px-4 py-2.5 text-right text-slate-500">{p.tax_rate !== null ? `${Number(p.tax_rate)}%${p.tax_included ? ' incl.' : ''}` : '—'}</td>
 						<td class="px-4 py-2.5 text-slate-600">{#if p.in_shop}<span class="badge bg-emerald-50 text-emerald-800">In the shop</span> <span class="text-xs text-slate-500">{categories.find((c) => c.id === p.shop_category_id)?.name ?? ''}</span>{:else}<span class="text-slate-400">—</span>{/if}</td>
-						<td class="px-4 py-2.5 text-right tabular-nums" data-stock={p.name}>{#if p.stock === null}<span class="text-slate-400">not counted</span>{:else if Number(p.stock) <= 0}<span class="font-medium text-red-700">Sold out</span>{:else}{num(p.stock)}{/if}</td>
+						<td class="px-4 py-2.5 text-right tabular-nums" data-stock={p.name}>{#if p.is_service}<span class="text-slate-400">service</span>{:else if p.stock === null}<span class="text-slate-400">not counted</span>{:else if Number(p.stock) <= 0}<span class="font-medium text-red-700">Sold out</span>{:else}{num(p.stock)}{/if}</td>
 						<td class="px-4 py-2.5 text-right">
 							{#if crm.config?.can_manage_products}
 								<button class="btn btn-ghost p-1.5" aria-label="Edit" onclick={() => edit(p)}><Icon name="edit" class="size-4" /></button>
@@ -221,7 +223,8 @@
 		<label class="flex items-end gap-2 pb-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={form.tax_included} /> Price includes tax</label>
 		<div class="sm:col-span-2"><label class="label" for="p-d">Description</label><textarea id="p-d" class="input" rows="2" bind:value={form.description}></textarea></div>
 		{#if editing}<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={form.is_active} /> Active</label>{/if}
-		<div class="sm:col-span-2"><label class="label" for="p-st">In stock</label><input id="p-st" class="input" type="number" min="0" step="1" placeholder="Not counted" bind:value={form.stock} /><p class="mt-1 text-xs text-slate-500">Total over all warehouses; leave empty if you don't count it. A change here goes in or out of the default warehouse. For receipts, write-offs and moves, use Inventory.</p></div>
+		<label class="flex items-center gap-2 text-sm sm:col-span-2"><input type="checkbox" class="rounded border-slate-300" bind:checked={form.is_service} data-service /> A service (sold like a product, never in stock)</label>
+		{#if !form.is_service}<div class="sm:col-span-2"><label class="label" for="p-st">In stock</label><input id="p-st" class="input" type="number" min="0" step="1" placeholder="Not counted" bind:value={form.stock} /><p class="mt-1 text-xs text-slate-500">Total over all warehouses; leave empty if you don't count it. A change here goes in or out of the default warehouse. For receipts, write-offs and moves, use Inventory.</p></div>{/if}
 		{#if editing}<ProductExtras bind:this={extras} productId={editing.id} onopen={openById} onchanged={load} />{/if}
 		<fieldset class="space-y-3 rounded-xl border border-slate-200 p-4 sm:col-span-2">
 			<legend class="px-1 text-sm font-medium text-slate-800">Online shop</legend>

@@ -48,6 +48,8 @@ pub const EVENTS: &[(&str, &str)] = &[
     ("task.updated", "A task was changed (title, people, dates, status…)"),
     ("task.completed", "A task was completed"),
     ("task.deleted", "A task was deleted"),
+    ("hr.document.signed", "An HR document was signed by everyone"),
+    ("hr.document.revoked", "An HR document was withdrawn or declared invalid"),
 ];
 
 pub fn router() -> Router<AppState> {

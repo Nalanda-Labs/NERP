@@ -45,11 +45,11 @@ const AUDIENCE_SQL: &str = "WITH RECURSIVE tree (root, id) AS (
         UNION ALL SELECT t.root, d.id FROM departments d JOIN tree t ON d.parent_id = t.id
     ), wanted AS (
         SELECT c.id AS chat_id, u.id AS user_id FROM im_chats c CROSS JOIN users u
-        WHERE c.audience = 'everyone' AND u.is_active AND ($1::uuid IS NULL OR u.id = $1) AND ($2::uuid IS NULL OR c.id = $2)
+        WHERE c.audience = 'everyone' AND u.is_active AND NOT u.is_guest AND ($1::uuid IS NULL OR u.id = $1) AND ($2::uuid IS NULL OR c.id = $2)
         UNION
         SELECT c.id, ud.user_id FROM im_chats c JOIN tree t ON t.root = c.department_id JOIN user_departments ud ON ud.department_id = t.id
         JOIN users u ON u.id = ud.user_id
-        WHERE c.audience = 'department' AND u.is_active AND ($1::uuid IS NULL OR u.id = $1) AND ($2::uuid IS NULL OR c.id = $2)
+        WHERE c.audience = 'department' AND u.is_active AND NOT u.is_guest AND ($1::uuid IS NULL OR u.id = $1) AND ($2::uuid IS NULL OR c.id = $2)
     )";
 
 /// Adds and removes members of the general chat and of department chats (for one user, or
@@ -94,6 +94,9 @@ async fn sync(state: &AppState, user: Option<Uuid>, chat: Option<Uuid>) -> AppRe
 
 /// The company's general chat, made the first time anyone asks for it.
 async fn general(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
+    if auth.is_guest() {
+        return Err(AppError::NotFound("chat"));
+    }
     let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM im_chats WHERE is_general").fetch_optional(&state.db).await?;
     let id = match id {
         Some(id) => id,
@@ -129,6 +132,10 @@ struct DiscoverQuery {
 
 /// Open chats and channels I'm not in.
 async fn discover(State(state): State<AppState>, auth: AuthUser, Query(q): Query<DiscoverQuery>) -> AppResult<Json<Value>> {
+    // Guests see only the chats they were invited to.
+    if auth.is_guest() {
+        return Ok(Json(json!({ "items": [] })));
+    }
     let term = q.q.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).map(|t| format!("%{}%", t.replace('%', "\\%").replace('_', "\\_")));
     let rows: Vec<(Uuid, String, String, Option<String>, i64)> = sqlx::query_as(
         "SELECT c.id, c.kind, c.title, c.description, (SELECT COUNT(*) FROM im_members x WHERE x.chat_id = c.id)
@@ -249,7 +256,7 @@ async fn clear(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Deletes messages past their chat's time limit, and keeps company-wide and department
+/// Deletes messages past their chat's time limit (or the company's), and keeps company-wide and department
 /// chats' members in step with the company.
 pub async fn run_maintenance(state: &AppState) -> Result<()> {
     let mut gone: Vec<Uuid> = sqlx::query_scalar(
@@ -260,6 +267,16 @@ pub async fn run_maintenance(state: &AppState) -> Result<()> {
     )
     .fetch_all(&state.db)
     .await?;
+    // The company's limit, for every chat.
+    let days: Option<serde_json::Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'chat_retention_days'").fetch_optional(&state.db).await?;
+    if let Some(d) = days.and_then(|v| v.as_i64()).filter(|d| *d > 0) {
+        gone.extend(
+            sqlx::query_scalar::<_, Uuid>("DELETE FROM im_messages WHERE created_at < now() - make_interval(days => $1) RETURNING chat_id")
+                .bind(d as i32)
+                .fetch_all(&state.db)
+                .await?,
+        );
+    }
     gone.sort();
     gone.dedup();
     for c in gone {

@@ -43,7 +43,7 @@ pub fn router() -> Router<AppState> {
         .route("/public/sites/{slug}/files/{file}", get(public_file))
 }
 
-fn require(auth: &AuthUser) -> AppResult<()> {
+pub(crate) fn require(auth: &AuthUser) -> AppResult<()> {
     auth.require(perm::SITES)
 }
 
@@ -51,7 +51,7 @@ fn require(auth: &AuthUser) -> AppResult<()> {
 // Blocks
 // ---------------------------------------------------------------------------
 
-const KINDS: &[&str] = &["hero", "text", "features", "image", "gallery", "cta", "contact", "form"];
+const KINDS: &[&str] = &["hero", "text", "features", "image", "gallery", "cta", "contact", "form", "html", "products"];
 
 fn text_field(b: &Map<String, Value>, k: &str, max: usize) -> AppResult<Option<String>> {
     match b.get(k) {
@@ -92,7 +92,7 @@ fn put(o: &mut Map<String, Value>, k: &str, v: Option<String>) {
 }
 
 /// Checks blocks and keeps only the fields each kind has. Returns them with the images used.
-fn clean_blocks(v: &Value) -> AppResult<(Value, Vec<Uuid>)> {
+pub(crate) fn clean_blocks(v: &Value) -> AppResult<(Value, Vec<Uuid>)> {
     let list = v.as_array().ok_or_else(|| AppError::bad("blocks must be a list"))?;
     if list.len() > 100 {
         return Err(AppError::bad("at most 100 blocks on a page"));
@@ -149,6 +149,23 @@ fn clean_blocks(v: &Value) -> AppResult<(Value, Vec<Uuid>)> {
                 }
                 o.insert("images".into(), json!(clean));
             }
+            "html" => {
+                put(&mut o, "html", text_field(b, "html", 100_000)?);
+                let h = b.get("height").and_then(Value::as_i64).unwrap_or(300);
+                if !(40..=4000).contains(&h) {
+                    return Err(AppError::bad("an HTML block is 40 to 4000 pixels high"));
+                }
+                o.insert("height".into(), json!(h));
+            }
+            "products" => {
+                put(&mut o, "heading", text_field(b, "heading", 200)?);
+                put(&mut o, "category", text_field(b, "category", 80)?);
+                let n = b.get("limit").and_then(Value::as_i64).unwrap_or(8);
+                if !(1..=48).contains(&n) {
+                    return Err(AppError::bad("show 1 to 48 products"));
+                }
+                o.insert("limit".into(), json!(n));
+            }
             "contact" => {
                 put(&mut o, "heading", text_field(b, "heading", 200)?);
                 put(&mut o, "address", text_field(b, "address", 500)?);
@@ -167,7 +184,7 @@ fn clean_blocks(v: &Value) -> AppResult<(Value, Vec<Uuid>)> {
 }
 
 /// Images must be pictures the editor uploaded, or ones the site already uses.
-async fn check_images(state: &AppState, auth: &AuthUser, site: Uuid, ids: &[Uuid]) -> AppResult<()> {
+pub(crate) async fn check_images(state: &AppState, auth: &AuthUser, site: Uuid, ids: &[Uuid]) -> AppResult<()> {
     if ids.is_empty() {
         return Ok(());
     }
@@ -185,7 +202,7 @@ async fn check_images(state: &AppState, auth: &AuthUser, site: Uuid, ids: &[Uuid
 }
 
 /// Files a site uses: in drafts and published pages, or only published (and the logo).
-async fn site_files(state: &AppState, site: Uuid, published_only: bool) -> AppResult<Vec<Uuid>> {
+pub(crate) async fn site_files(state: &AppState, site: Uuid, published_only: bool) -> AppResult<Vec<Uuid>> {
     let rows: Vec<(Value, Option<Value>)> = sqlx::query_as("SELECT blocks, published_blocks FROM site_pages WHERE site_id = $1").bind(site).fetch_all(&state.db).await?;
     let settings: Value = sqlx::query_scalar("SELECT settings FROM site_sites WHERE id = $1").bind(site).fetch_optional(&state.db).await?.unwrap_or(json!({}));
     let mut out: Vec<Uuid> = settings["logo_file_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).into_iter().collect();
@@ -200,15 +217,23 @@ async fn site_files(state: &AppState, site: Uuid, published_only: bool) -> AppRe
     Ok(out)
 }
 
-/// Blocks as visitors get them: Markdown rendered, images as addresses.
-fn render_blocks(slug: &str, blocks: &Value) -> Value {
+/// Blocks as visitors get them: Markdown rendered, images as addresses, HTML blocks as the
+/// address of their sandboxed frame (published pages only).
+fn render_blocks(slug: &str, page: Option<Uuid>, blocks: &Value) -> Value {
     let img = |id: &Value| id.as_str().map(|i| format!("/api/public/sites/{slug}/files/{i}"));
     json!(blocks
         .as_array()
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .map(|mut b| {
+        .enumerate()
+        .map(|(n, mut b)| {
+            if b["kind"] == "html" {
+                if let Some(p) = page {
+                    b["embed_url"] = json!(format!("/api/public/sites/{slug}/embed/{p}/{n}"));
+                }
+                b.as_object_mut().map(|o| o.remove("html"));
+            }
             if let Some(md) = b.get("markdown").and_then(Value::as_str) {
                 b["html"] = json!(crate::kb::render(md));
             }
@@ -233,12 +258,13 @@ struct SiteRow {
     name: String,
     slug: String,
     settings: Value,
+    domain: Option<String>,
     pages: i64,
     published: i64,
     updated_at: DateTime<Utc>,
 }
 
-const SITE_SELECT: &str = "SELECT s.id, s.name, s.slug, s.settings,
+const SITE_SELECT: &str = "SELECT s.id, s.name, s.slug, s.settings, s.domain,
     (SELECT COUNT(*) FROM site_pages p WHERE p.site_id = s.id) AS pages,
     (SELECT COUNT(*) FROM site_pages p WHERE p.site_id = s.id AND p.published_blocks IS NOT NULL) AS published, s.updated_at
     FROM site_sites s";
@@ -249,7 +275,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
     Ok(Json(json!({ "items": items, "base": format!("{}/s/", state.config.public_url) })))
 }
 
-fn slug_ok(s: &str) -> AppResult<String> {
+pub(crate) fn slug_ok(s: &str) -> AppResult<String> {
     let s = s.trim().to_lowercase();
     if s.len() < 2 || s.len() > 40 || !s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') || s.starts_with('-') || s.ends_with('-') {
         return Err(AppError::bad("the address is 2–40 lowercase letters, digits and dashes"));
@@ -262,9 +288,29 @@ struct SiteInput {
     name: Option<String>,
     slug: Option<String>,
     settings: Option<Value>,
+    /// The site's own domain (null: none).
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    domain: Option<Option<String>>,
+    /// A starting layout: business, sales, marketing, recruitment.
+    template: Option<String>,
 }
 
-fn clean_settings(v: &Value) -> AppResult<(Value, Option<Uuid>)> {
+/// A host name such as www.example.com (not NERP's own).
+fn domain_ok(state: &AppState, d: &str) -> AppResult<String> {
+    let d = d.trim().trim_end_matches('.').to_lowercase();
+    let d = d.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_string();
+    let label_ok = |l: &str| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-') && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if d.len() > 253 || !d.contains('.') || !d.split('.').all(label_ok) {
+        return Err(AppError::bad("a domain looks like www.example.com"));
+    }
+    let own = reqwest::Url::parse(&state.config.public_url).ok().and_then(|u| u.host_str().map(str::to_lowercase));
+    if own.as_deref() == Some(d.as_str()) {
+        return Err(AppError::bad("that is NERP's own address"));
+    }
+    Ok(d)
+}
+
+pub(crate) fn clean_settings(v: &Value) -> AppResult<(Value, Option<Uuid>)> {
     let m = v.as_object().cloned().unwrap_or_default();
     let color = text_field(&m, "color", 7)?.unwrap_or_else(|| "#1a73e8".into());
     if !(color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit())) {
@@ -272,7 +318,17 @@ fn clean_settings(v: &Value) -> AppResult<(Value, Option<Uuid>)> {
     }
     let font = text_field(&m, "font", 10)?.filter(|f| f == "serif").unwrap_or_else(|| "sans".into());
     let logo = uuid_field(&m, "logo_file_id")?;
-    Ok((json!({ "color": color.to_lowercase(), "font": font, "logo_file_id": logo, "footer": text_field(&m, "footer", 500)? }), logo))
+    // Google Analytics (on the site's own domain only) and the cookie banner.
+    let analytics = text_field(&m, "analytics_id", 30)?;
+    if analytics.as_deref().is_some_and(|a| !(a.starts_with("G-") && a.len() > 4 && a[2..].chars().all(|c| c.is_ascii_alphanumeric()))) {
+        return Err(AppError::bad("a Google Analytics ID looks like G-XXXXXXXXXX"));
+    }
+    let banner = m.get("cookie_banner").and_then(Value::as_bool).unwrap_or(false);
+    Ok((
+        json!({ "color": color.to_lowercase(), "font": font, "logo_file_id": logo, "footer": text_field(&m, "footer", 500)?,
+            "analytics_id": analytics, "cookie_banner": banner, "cookie_text": text_field(&m, "cookie_text", 500)? }),
+        logo,
+    ))
 }
 
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<SiteInput>) -> AppResult<Json<Value>> {
@@ -280,6 +336,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Sit
     let name = required("name", b.name.as_deref().unwrap_or(""), 120)?;
     let slug = slug_ok(b.slug.as_deref().unwrap_or(&crate::routes::slugify(&name, "site")))?;
     let (settings, _) = clean_settings(&b.settings.unwrap_or(json!({})))?;
+    let pages = crate::site_tools::template(b.template.as_deref().unwrap_or("business"), &name)?;
     let mut tx = state.db.begin().await?;
     let id: Uuid = sqlx::query_scalar("INSERT INTO site_sites (name, slug, settings, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
         .bind(&name)
@@ -292,14 +349,15 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Sit
             sqlx::Error::Database(d) if d.is_unique_violation() => AppError::bad("that address is taken"),
             e => e.into(),
         })?;
-    // A first page to start from.
-    let blocks = json!([{ "kind": "hero", "heading": name, "text": "What we do, in a sentence." }, { "kind": "text", "markdown": "Tell visitors about the company." }]);
-    sqlx::query("INSERT INTO site_pages (site_id, path, title, blocks) VALUES ($1, '', 'Home', $2)").bind(id).bind(blocks).execute(&mut *tx).await?;
+    // The template's pages to start from.
+    for (i, (path, title, blocks)) in pages.into_iter().enumerate() {
+        sqlx::query("INSERT INTO site_pages (site_id, path, title, blocks, sort) VALUES ($1, $2, $3, $4, $5)").bind(id).bind(path).bind(title).bind(blocks).bind(i as i32 * 10).execute(&mut *tx).await?;
+    }
     tx.commit().await?;
     get_site(State(state), auth, Path(id)).await
 }
 
-async fn get_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+pub(crate) async fn get_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let s: SiteRow = sqlx::query_as(sqlx::AssertSqlSafe(format!("{SITE_SELECT} WHERE s.id = $1"))).bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))?;
     let pages: Vec<(Uuid, String, String, bool, i32, Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
@@ -334,15 +392,25 @@ async fn update_site(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         }
         None => None,
     };
-    sqlx::query("UPDATE site_sites SET name = COALESCE($2, name), slug = COALESCE($3, slug), settings = COALESCE($4, settings), updated_at = now() WHERE id = $1")
+    let domain = match &b.domain {
+        Some(Some(d)) if !d.trim().is_empty() => Some(Some(domain_ok(&state, d)?)),
+        Some(_) => Some(None),
+        None => None,
+    };
+    sqlx::query(
+        "UPDATE site_sites SET name = COALESCE($2, name), slug = COALESCE($3, slug), settings = COALESCE($4, settings),
+             domain = CASE WHEN $5 THEN $6 ELSE domain END, updated_at = now() WHERE id = $1",
+    )
         .bind(id)
         .bind(name)
         .bind(slug)
         .bind(settings)
+        .bind(domain.is_some())
+        .bind(domain.flatten())
         .execute(&state.db)
         .await
         .map_err(|e| match e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => AppError::bad("that address is taken"),
+            sqlx::Error::Database(d) if d.is_unique_violation() => AppError::bad("that address or domain is taken"),
             e => e.into(),
         })?;
     get_site(State(state), auth, Path(id)).await
@@ -379,7 +447,7 @@ async fn stats(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 // Pages
 // ---------------------------------------------------------------------------
 
-fn path_ok(p: &str) -> AppResult<String> {
+pub(crate) fn path_ok(p: &str) -> AppResult<String> {
     let p = p.trim().trim_matches('/').to_lowercase();
     if p.is_empty() {
         return Ok(p);
@@ -452,12 +520,12 @@ async fn page_row(state: &AppState, id: Uuid) -> AppResult<PageRow> {
 }
 
 /// The draft, with Markdown rendered for the editor's preview.
-async fn get_page(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
+pub(crate) async fn get_page(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let p = page_row(&state, id).await?;
     Ok(Json(json!({
         "id": p.id, "site_id": p.site_id, "path": p.path, "title": p.title, "description": p.description, "blocks": p.blocks,
-        "rendered": render_blocks(&p.slug, &p.blocks), "in_menu": p.in_menu, "sort": p.sort, "published_at": p.published_at, "updated_at": p.updated_at,
+        "rendered": render_blocks(&p.slug, None, &p.blocks), "in_menu": p.in_menu, "sort": p.sort, "published_at": p.published_at, "updated_at": p.updated_at,
         "changed": p.published_at.is_none_or(|x| p.updated_at > x),
         "url": format!("{}/s/{}/{}", state.config.public_url, p.slug, p.path),
     })))
@@ -538,7 +606,7 @@ async fn unpublish_page(State(state): State<AppState>, auth: AuthUser, Path(id):
 // Visitors
 // ---------------------------------------------------------------------------
 
-async fn site_by_slug(state: &AppState, slug: &str) -> AppResult<(Uuid, String, Value)> {
+pub(crate) async fn site_by_slug(state: &AppState, slug: &str) -> AppResult<(Uuid, String, Value)> {
     sqlx::query_as("SELECT id, name, settings FROM site_sites WHERE slug = $1").bind(slug).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))
 }
 
@@ -556,6 +624,7 @@ async fn public_site(State(state): State<AppState>, Path(slug): Path<String>) ->
     let logo = settings["logo_file_id"].as_str().map(|f| format!("/api/public/sites/{slug}/files/{f}"));
     Ok(Json(json!({
         "name": name, "color": settings["color"], "font": settings["font"], "footer": settings["footer"], "logo": logo,
+        "analytics_id": settings["analytics_id"], "cookie_banner": settings["cookie_banner"], "cookie_text": settings["cookie_text"],
         "menu": menu.into_iter().map(|(t, p)| json!({ "title": t, "path": p })).collect::<Vec<_>>(),
     })))
 }
@@ -582,7 +651,7 @@ async fn public_page(State(state): State<AppState>, Path(slug): Path<String>, Qu
         .bind(today)
         .execute(&state.db)
         .await;
-    Ok(Json(json!({ "title": title, "description": description, "blocks": render_blocks(&slug, &blocks) })))
+    Ok(Json(json!({ "title": title, "description": description, "blocks": render_blocks(&slug, Some(pid), &blocks) })))
 }
 
 async fn public_file(State(state): State<AppState>, Path((slug, file)): Path<(String, Uuid)>) -> AppResult<Response> {

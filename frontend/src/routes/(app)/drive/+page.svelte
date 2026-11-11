@@ -2,7 +2,8 @@
 	// Drive: My drive, the company drive, what is shared with me, and the trash.
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import { api, downloadUrl, query } from '#lib/api.ts';
+	import { publicLinksAllowed } from '#lib/companyRules.ts';
+	import { api, downloadUrl, query, requestBlob } from '#lib/api.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import Modal from '#lib/components/Modal.svelte';
 	import MultiUserPicker from '#lib/components/MultiUserPicker.svelte';
@@ -10,7 +11,7 @@
 	import { toasts } from '#lib/toast.svelte.ts';
 
 	type Entry = { id: string; kind: 'folder' | 'file'; space: string; parent_id: string | null; name: string; size_bytes: number; mime_type: string | null; version: number; owner_name: string | null; updated_by_name: string | null; updated_at: string; shared: boolean };
-	type Detail = Entry & { level: 'own' | 'edit' | 'view'; versions?: { version: number; size_bytes: number; by: string | null; at: string }[]; shares?: { user_id: string | null; department_id: string | null; level: string; name: string }[]; links?: { id: string; expires_at: string | null; downloads: number; created_at: string }[]; url?: string };
+	type Detail = Entry & { level: 'own' | 'edit' | 'view'; versions?: { version: number; size_bytes: number; by: string | null; at: string }[]; shares?: { user_id: string | null; department_id: string | null; level: string; name: string }[]; links?: { id: string; expires_at: string | null; downloads: number; created_at: string; password?: boolean }[]; url?: string };
 	const space = $derived(page.url.searchParams.get('space') ?? 'personal');
 	const folder = $derived(page.url.searchParams.get('folder'));
 	// A workgroup's files (space=group&project=…).
@@ -96,6 +97,9 @@
 	let sharePeople = $state<{ id: string; name: string; avatar_file_id: string | null }[]>([]);
 	let shareLevel = $state<'view' | 'edit'>('view');
 	let linkDays = $state('');
+	let linkPassword = $state('');
+	let linksOn = $state(true);
+	publicLinksAllowed().then((v) => (linksOn = v));
 	let newLink = $state<string | null>(null);
 	async function openDetail(id: string) {
 		detail = await api.get<Detail>(`/drive/nodes/${id}`);
@@ -103,6 +107,21 @@
 		shareLevel = (detail.shares?.find((s) => s.user_id)?.level as 'view' | 'edit') ?? 'view';
 		newLink = null;
 		detailOpen = true;
+	}
+	// Office files: a PDF preview (LibreOffice), and editing when Collabora is set up.
+	let office = $state<{ preview: string[]; editing: boolean; editable: string[] }>({ preview: [], editing: false, editable: [] });
+	api.get<typeof office>('/office/status').then((o) => (office = o)).catch(() => {});
+	const extOf = (name: string) => (name.includes('.') ? name.split('.').pop()!.toLowerCase() : '');
+	let previewUrl = $state<string | null>(null);
+	let previewName = $state('');
+	async function preview(d: { id: string; name: string }) {
+		try {
+			if (previewUrl) URL.revokeObjectURL(previewUrl);
+			previewName = d.name;
+			previewUrl = URL.createObjectURL(await requestBlob('GET', `/drive/nodes/${d.id}/preview`));
+		} catch (e) {
+			toasts.error(e);
+		}
 	}
 	function open(e: Entry) {
 		if (e.kind === 'folder') go(space, e.id);
@@ -135,9 +154,10 @@
 	}
 	async function makeLink() {
 		try {
-			const r = await api.post<Detail>(`/drive/nodes/${detail!.id}/links`, { expires_days: linkDays ? Number(linkDays) : null });
+			const r = await api.post<Detail>(`/drive/nodes/${detail!.id}/links`, { expires_days: linkDays ? Number(linkDays) : null, password: linkPassword || null });
 			newLink = r.url ?? null;
 			detail = r;
+			linkPassword = '';
 		} catch (e) {
 			toasts.error(e);
 		}
@@ -228,6 +248,8 @@
 			<p class="text-slate-500">{detail.kind === 'file' ? `${formatBytes(detail.size_bytes)} · ` : ''}changed {formatDateTime(detail.updated_at)}{detail.updated_by_name ? ` by ${detail.updated_by_name}` : ''}</p>
 			{#if detail.kind === 'file'}
 				<div class="flex gap-2"><button class="btn btn-primary" onclick={() => downloadUrl(`/api/drive/nodes/${detail!.id}/download`, detail!.name).catch(toasts.error)}><Icon name="download" class="size-4" /> Download</button>
+					{#if office.preview.includes(extOf(detail.name))}<button class="btn btn-secondary" onclick={() => preview(detail!)}>Preview</button>{/if}
+					{#if office.editing && office.editable.includes(extOf(detail.name))}<a class="btn btn-secondary" href="/drive/edit/{detail.id}{detail.level === 'view' ? '?view=1' : ''}">{detail.level === 'view' ? 'Open' : 'Edit'}</a>{/if}
 					{#if detail.level !== 'view'}<label class="btn btn-secondary cursor-pointer">New version<input type="file" class="sr-only" aria-label="New version" onchange={async (e) => { const f = (e.currentTarget as HTMLInputElement).files?.[0]; if (!f) return; const fd = new FormData(); fd.append('file', f); const up = await api.post<{ id: string }>('/files', fd); await api.post('/drive/files', { file_id: up.id, name: detail!.name, parent_id: detail!.parent_id, space: detail!.space }); openDetail(detail!.id); load(); }} /></label>{/if}</div>
 				<section aria-label="Versions">
 					<h3 class="mb-1 font-medium">Versions</h3>
@@ -241,12 +263,12 @@
 					<div class="flex items-center gap-2"><select class="input w-auto" aria-label="Share level" bind:value={shareLevel}><option value="view">Can view</option><option value="edit">Can edit</option></select><button class="btn btn-secondary" onclick={saveShares}>Save sharing</button></div>
 				</section>
 			{/if}
-			{#if detail.level === 'own' && detail.kind === 'file'}
+			{#if detail.level === 'own'}
 				<section aria-label="Public links" class="space-y-2">
 					<h3 class="font-medium">Public links</h3>
-					{#each detail.links ?? [] as l (l.id)}<div class="flex items-center gap-3 text-xs"><span class="flex-1 text-slate-600">Made {formatRelative(l.created_at)} · {l.expires_at ? `until ${formatDateTime(l.expires_at)}` : 'no end'} · {l.downloads} download{l.downloads === 1 ? '' : 's'}</span><button class="text-slate-400 hover:text-red-600" onclick={() => dropLink(l.id)}>Remove</button></div>{/each}
+					{#each detail.links ?? [] as l (l.id)}<div class="flex items-center gap-3 text-xs"><span class="flex-1 text-slate-600">Made {formatRelative(l.created_at)} · {l.expires_at ? `until ${formatDateTime(l.expires_at)}` : 'no end'} · {l.downloads} download{l.downloads === 1 ? '' : 's'}{l.password ? ' · password' : ''}</span><button class="text-slate-400 hover:text-red-600" onclick={() => dropLink(l.id)}>Remove</button></div>{/each}
 					{#if newLink}<code class="block rounded-lg bg-slate-50 px-3 py-2 text-xs break-all" data-link>{newLink}</code><p class="text-xs text-slate-500">Copy it now: it isn't shown again. Anyone with it can download the file.</p>{/if}
-					<div class="flex items-center gap-2"><input class="input w-28" type="number" min="1" max="365" placeholder="Days" aria-label="Days the link works" bind:value={linkDays} /><button class="btn btn-secondary" onclick={makeLink}>Make a link</button></div>
+					{#if linksOn}<div class="flex items-center gap-2"><input class="input w-24" type="number" min="1" max="365" placeholder="Days" aria-label="Days the link works" bind:value={linkDays} /><input class="input w-32" type="text" autocomplete="off" placeholder="Password" aria-label="Link password" bind:value={linkPassword} /><button class="btn btn-secondary" onclick={makeLink}>Make a link</button></div>{:else}<p class="text-xs text-amber-800" data-links-off>Links for anyone are switched off for the company.</p>{/if}
 				</section>
 			{/if}
 		</div>
@@ -255,4 +277,8 @@
 		{#if detail?.level === 'own'}<button class="btn btn-ghost mr-auto hover:text-red-600" onclick={remove}>Delete</button><button class="btn btn-secondary" onclick={rename}>Rename</button>{/if}
 		<button class="btn btn-primary" onclick={() => (detailOpen = false)}>Close</button>
 	{/snippet}
+</Modal>
+
+<Modal open={!!previewUrl} title={previewName} onclose={() => { if (previewUrl) URL.revokeObjectURL(previewUrl); previewUrl = null; }}>
+	{#if previewUrl}<iframe src={previewUrl} title="Preview of {previewName}" class="h-[70vh] w-full rounded-lg border border-slate-200" data-preview></iframe>{/if}
 </Modal>

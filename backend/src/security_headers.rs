@@ -27,10 +27,15 @@ const EMBEDDABLE: &[&str] = &["/f/", "/c/", "/book/", "/help"];
 pub struct Policy {
     index: Option<std::path::PathBuf>,
     livekit: String,
+    office: String,
     hsts: bool,
-    /// The two policies, built from index.html as it was at the time noted (rebuilt when a new
-    /// frontend build replaces it, so a deploy needs no restart).
-    current: std::sync::RwLock<(Option<std::time::SystemTime>, HeaderValue, HeaderValue)>,
+    /// NERP's own host; websites on their own domains get a policy that lets Google
+    /// Analytics load (no NERP session reaches those hosts).
+    app_host: Option<String>,
+    /// The policies (app, embeddable, own-domain site), built from index.html as it was at
+    /// the time noted (rebuilt when a new frontend build replaces it, so a deploy needs no
+    /// restart).
+    current: std::sync::RwLock<(Option<std::time::SystemTime>, HeaderValue, HeaderValue, HeaderValue)>,
 }
 
 /// Hashes of the inline `<script>` blocks of the built index.html, for `script-src`.
@@ -53,55 +58,69 @@ fn inline_script_hashes(index_html: &str) -> Vec<String> {
 }
 
 impl Policy {
-    pub fn new(static_dir: Option<&std::path::Path>, livekit_url: Option<&str>, hsts: bool) -> Self {
+    pub fn new(static_dir: Option<&std::path::Path>, livekit_url: Option<&str>, office_url: Option<&str>, hsts: bool, public_url: &str) -> Self {
         // Calls may use a LiveKit server elsewhere (its WebSocket address).
         let livekit = livekit_url
             .and_then(|u| reqwest::Url::parse(u).ok())
             .map(|u| format!(" {}", u.origin().ascii_serialization()))
             .unwrap_or_default();
+        // The office editor (Collabora) opens in a frame, with a form posted to it.
+        let office = office_url
+            .and_then(|u| reqwest::Url::parse(u).ok())
+            .map(|u| format!(" {}", u.origin().ascii_serialization()))
+            .unwrap_or_default();
         let index = static_dir.map(|d| d.join("index.html"));
-        let (app, embeddable) = Self::build(index.as_deref(), &livekit);
+        let (app, embeddable, site) = Self::build(index.as_deref(), &livekit, &office);
         let stamp = index.as_deref().and_then(|i| std::fs::metadata(i).and_then(|m| m.modified()).ok());
-        Policy { index, livekit, hsts, current: std::sync::RwLock::new((stamp, app, embeddable)) }
+        let app_host = reqwest::Url::parse(public_url).ok().and_then(|u| u.host_str().map(str::to_lowercase));
+        Policy { index, livekit, office, hsts, app_host, current: std::sync::RwLock::new((stamp, app, embeddable, site)) }
     }
 
-    fn build(index: Option<&std::path::Path>, livekit: &str) -> (HeaderValue, HeaderValue) {
+    fn build(index: Option<&std::path::Path>, livekit: &str, office: &str) -> (HeaderValue, HeaderValue, HeaderValue) {
         let hashes = index.and_then(|i| std::fs::read_to_string(i).ok()).map(|h| inline_script_hashes(&h)).unwrap_or_default();
         let base = format!(
-            "default-src 'self'; script-src 'self' {hashes}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' {hashes}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
              font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; media-src 'self' blob:; \
              connect-src 'self'{livekit}; worker-src 'self' blob:; \
-             frame-src 'self' blob: https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com; \
-             object-src 'none'; base-uri 'self'; form-action 'self'",
+             frame-src 'self' blob: https://www.youtube-nocookie.com https://www.youtube.com https://player.vimeo.com{office}; \
+             object-src 'none'; base-uri 'self'; form-action 'self'{office}",
             hashes = hashes.join(" ")
         );
+        // Websites on their own domains may load Google Analytics.
+        let site = base
+            .replacen("script-src 'self'", "script-src 'self' https://www.googletagmanager.com", 1)
+            .replacen("connect-src 'self'", "connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com", 1);
         (
             HeaderValue::from_str(&format!("{base}; frame-ancestors 'self'")).expect("valid CSP"),
             HeaderValue::from_str(&format!("{base}; frame-ancestors *")).expect("valid CSP"),
+            HeaderValue::from_str(&format!("{site}; frame-ancestors 'self'")).expect("valid CSP"),
         )
     }
 
     /// The policies for now: rebuilt if index.html changed since they were made.
-    fn headers(&self) -> (HeaderValue, HeaderValue) {
+    fn headers(&self) -> (HeaderValue, HeaderValue, HeaderValue) {
         let stamp = self.index.as_deref().and_then(|i| std::fs::metadata(i).and_then(|m| m.modified()).ok());
         {
             let cur = self.current.read().unwrap();
             if cur.0 == stamp {
-                return (cur.1.clone(), cur.2.clone());
+                return (cur.1.clone(), cur.2.clone(), cur.3.clone());
             }
         }
-        let (app, embeddable) = Self::build(self.index.as_deref(), &self.livekit);
-        *self.current.write().unwrap() = (stamp, app.clone(), embeddable.clone());
-        (app, embeddable)
+        let (app, embeddable, site) = Self::build(self.index.as_deref(), &self.livekit, &self.office);
+        *self.current.write().unwrap() = (stamp, app.clone(), embeddable.clone(), site.clone());
+        (app, embeddable, site)
     }
 }
 
-pub async fn apply(State(policy): State<Arc<Policy>>, uri: Uri, mut res: Response) -> Response {
+pub async fn apply(State(policy): State<Arc<Policy>>, uri: Uri, req_headers: axum::http::HeaderMap, mut res: Response) -> Response {
     let embeddable = EMBEDDABLE.iter().any(|p| uri.path().starts_with(p));
+    // A page opened on another host than NERP's own: a website on its own domain.
+    let host = req_headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(|h| h.split(':').next().unwrap_or("").to_lowercase());
+    let own_domain = matches!((&policy.app_host, &host), (Some(a), Some(h)) if a != h);
     let h = res.headers_mut();
     if !h.contains_key(header::CONTENT_SECURITY_POLICY) {
-        let (app, embed) = policy.headers();
-        h.insert(header::CONTENT_SECURITY_POLICY, if embeddable { embed } else { app });
+        let (app, embed, site) = policy.headers();
+        h.insert(header::CONTENT_SECURITY_POLICY, if embeddable { embed } else if own_domain { site } else { app });
     }
     if !embeddable {
         h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));

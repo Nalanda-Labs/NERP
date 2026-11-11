@@ -64,6 +64,7 @@
 	async function open(id: string | null) {
 		tab = 'build';
 		if (!id) {
+			template = 'contact';
 			draft = {
 				id: null, key: null, name: 'Contact us', entity_type: 1, category_id: null, stage_id: null, is_active: true,
 				fields: [
@@ -89,6 +90,25 @@
 			draft = { ...f, people };
 		}
 		await loadTargets(draft!.entity_type);
+	}
+
+	// Ready-made forms to start from (new forms only).
+	const fld = (label: string, kind: string, maps_to: string, required = false, options: string[] = [], placeholder = ''): Field => ({ key: '', label, kind, required, maps_to, options, placeholder });
+	const TEMPLATES: Record<string, { label: string; name: string; fields: Field[]; settings: { title: string; description: string; button: string; success_message: string } }> = {
+		contact: { label: 'Contact us', name: 'Contact us', fields: [fld('Name', 'text', 'first_name', true), fld('Email', 'email', 'email', true, [], 'you@example.com'), fld('Phone', 'phone', 'phone'), fld('Message', 'textarea', 'comments')], settings: { title: 'Get in touch', description: 'Leave your details and we will get back to you within one working day.', button: 'Send', success_message: 'Thank you! We will be in touch soon.' } },
+		callback: { label: 'Call me back', name: 'Call back', fields: [fld('Name', 'text', 'first_name', true), fld('Phone', 'phone', 'phone', true), fld('Best time to call', 'select', '', false, ['Morning', 'Afternoon', 'Evening'])], settings: { title: 'We’ll call you', description: 'Leave your number and we call you back.', button: 'Call me back', success_message: 'Thank you! We’ll call you soon.' } },
+		quote: { label: 'Ask for a quote', name: 'Quote request', fields: [fld('Name', 'text', 'first_name', true), fld('Company', 'text', 'company_name'), fld('Email', 'email', 'email', true), fld('Phone', 'phone', 'phone'), fld('What do you need?', 'textarea', 'comments', true), fld('Budget', 'select', '', false, ['Under 1,000', '1,000–10,000', 'Over 10,000'])], settings: { title: 'Ask for a quote', description: 'Tell us what you need; we’ll send an offer.', button: 'Send request', success_message: 'Thank you! Your quote is on its way.' } },
+		event: { label: 'Event registration', name: 'Event registration', fields: [fld('First name', 'text', 'first_name', true), fld('Last name', 'text', 'last_name', true), fld('Email', 'email', 'email', true), fld('Company', 'text', 'company_name'), fld('I’ll attend', 'select', '', true, ['In person', 'Online'])], settings: { title: 'Register', description: 'Save your seat.', button: 'Register', success_message: 'You’re registered. See you there!' } },
+		newsletter: { label: 'Newsletter sign-up', name: 'Newsletter', fields: [fld('Email', 'email', 'email', true), fld('First name', 'text', 'first_name')], settings: { title: 'Stay in the loop', description: 'News and offers, now and then.', button: 'Sign up', success_message: 'Thanks for signing up!' } },
+		feedback: { label: 'Feedback', name: 'Feedback', fields: [fld('Name', 'text', 'first_name'), fld('Email', 'email', 'email'), fld('How did we do?', 'select', '', true, ['Great', 'Good', 'Could be better', 'Poor']), fld('Comments', 'textarea', 'comments')], settings: { title: 'How did we do?', description: 'Your feedback helps us improve.', button: 'Send', success_message: 'Thank you for your feedback!' } }
+	};
+	let template = $state('contact');
+	function useTemplate(k: string) {
+		const t = TEMPLATES[k];
+		template = k;
+		draft!.name = t.name;
+		draft!.fields = structuredClone(t.fields);
+		draft!.settings = { ...draft!.settings, ...t.settings };
 	}
 
 	async function changeType(et: number) {
@@ -198,6 +218,9 @@
 							<div class="space-y-4">
 								<section class="card space-y-3 p-5 text-sm">
 									<div class="grid gap-3 sm:grid-cols-2">
+										{#if !draft.id}
+											<div><label class="label" for="wf-tpl">Start from</label><select id="wf-tpl" class="input" value={template} onchange={(e) => useTemplate(e.currentTarget.value)}>{#each Object.entries(TEMPLATES) as [k, t] (k)}<option value={k}>{t.label}</option>{/each}</select></div>
+										{/if}
 										<div><label class="label" for="wf-name">Form name (internal)</label><input id="wf-name" class="input" maxlength="200" bind:value={draft.name} /></div>
 										<div>
 											<label class="label" for="wf-type">Creates</label>

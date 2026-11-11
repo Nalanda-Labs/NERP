@@ -16,7 +16,7 @@ use serde_json::{json, Map, Value};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use super::{settings, Settings, ORDER};
+use super::{extras, settings, Settings, ORDER};
 use crate::{
     auth::{tokens::random_token, ClientIp},
     crm::{
@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
         .route("/public/shop/products/{slug}", get(product))
         .route("/public/shop/images/{slug}", get(image))
         .route("/public/shop/checkout", post(checkout))
+        .route("/public/shop/quote", post(quote))
         .route("/public/shop/orders/{token}", get(order))
 }
 
@@ -324,6 +325,41 @@ struct Checkout {
     /// Hidden decoy field: people leave it empty.
     #[serde(default)]
     website: String,
+    #[serde(default)]
+    coupon: Option<String>,
+    #[serde(default)]
+    delivery_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+struct QuoteInput {
+    items: Vec<CartLine>,
+    #[serde(default)]
+    coupon: Option<String>,
+    #[serde(default)]
+    delivery_id: Option<Uuid>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// The cart's total before ordering: discounts (a coupon, or for loyal customers) and delivery.
+async fn quote(State(state): State<AppState>, Json(b): Json<QuoteInput>) -> AppResult<Json<Value>> {
+    let s = open_shop(&state).await?;
+    if b.items.len() > 50 {
+        return Err(AppError::bad("at most 50 different products in one order"));
+    }
+    let mut subtotal = Decimal::ZERO;
+    for l in &b.items {
+        if !(1.0..=999.0).contains(&l.quantity) || l.quantity.fract() != 0.0 {
+            return Err(AppError::bad("quantities must be whole numbers from 1 to 999"));
+        }
+        let p: Option<Listed> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{LISTED_SELECT} AND p.slug = $2"))).bind(&s.currency).bind(&l.slug).fetch_optional(&state.db).await?;
+        if let Some(p) = p {
+            subtotal += line(&row_of(&p, Decimal::from(l.quantity as i64))).total;
+        }
+    }
+    let q = extras::price(&state, subtotal, b.email.as_deref(), b.coupon.as_deref(), b.delivery_id).await?;
+    Ok(Json(json!(q)))
 }
 
 async fn limited(state: &AppState, key: String, max: i64, secs: i64) -> AppResult<bool> {
@@ -371,7 +407,7 @@ async fn checkout(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b)
         return Err(AppError::bad("please enter a valid email address"));
     }
     let phone = text(&b.phone, "phone", 40, false)?;
-    let address = text(&b.address, "delivery address", 1000, true)?.unwrap();
+    let address = text(&b.address, "delivery address", 1000, false)?;
     let note = text(&b.note, "note", 2000, false)?;
     if s.terms.is_some() && !b.accept_terms {
         return Err(AppError::bad("please accept the terms to place your order"));
@@ -392,6 +428,21 @@ async fn checkout(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b)
         match cart.iter_mut().find(|(s, _)| *s == l.slug) {
             Some((_, q)) => *q += quantity,
             None => cart.push((l.slug.clone(), quantity)),
+        }
+    }
+
+    // Delivery chosen, and an address unless the way of delivery needs none (checked here,
+    // before the limit, like the rest of the form).
+    if extras::has_delivery(&state).await? && b.delivery_id.is_none() {
+        return Err(AppError::bad("choose a way of delivery"));
+    }
+    if address.is_none() {
+        let not_needed: Option<bool> = match b.delivery_id {
+            Some(d) => sqlx::query_scalar("SELECT NOT needs_address FROM shop_delivery WHERE id = $1 AND active").bind(d).fetch_optional(&state.db).await?,
+            None => None,
+        };
+        if not_needed != Some(true) {
+            return Err(AppError::bad("please enter the delivery address"));
         }
     }
 
@@ -436,12 +487,47 @@ async fn checkout(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b)
         }
         rows.push(row_of(&p, *q));
     }
+    // Discounts and delivery (checked before anything is written).
+    let subtotal: Decimal = rows.iter().map(|r| line(r).total).sum();
+    let quote = match extras::price(&state, subtotal, Some(&email), b.coupon.as_deref(), b.delivery_id).await {
+        Ok(q) => q,
+        Err(e) => {
+            tx.rollback().await?;
+            return Err(e);
+        }
+    };
+    let address = address.unwrap_or_else(|| "(no delivery address needed)".to_string());
     tx.commit().await?;
+    for r in rows.iter_mut() {
+        r.discount_kind = "percent".into();
+        r.discount_value = quote.discount_percent;
+    }
+    if let (Some(name), true) = (&quote.delivery_name, quote.delivery_price > Decimal::ZERO) {
+        rows.push(ProductRow {
+            id: None,
+            product_id: None,
+            name: format!("Delivery: {name}"),
+            price: quote.delivery_price,
+            quantity: Decimal::ONE,
+            unit: "pcs".into(),
+            discount_kind: "percent".into(),
+            discount_value: Decimal::ZERO,
+            tax_rate: None,
+            tax_included: true,
+        });
+    }
+    if let Some(c) = quote.coupon_id {
+        extras::use_coupon(&state, c, &email).await?;
+    }
+    let extra = json!({ "coupon": quote.coupon, "discount_percent": quote.discount_percent, "discount_reason": quote.discount_reason, "delivery": quote.delivery_name, "delivery_price": quote.delivery_price });
 
     let customer = Customer { name: &name, email: &email, phone: phone.as_deref(), address: &address, note: note.as_deref() };
-    match place(&state, &s, &rows, &customer, warehouse, &moved).await {
+    match place(&state, &s, &rows, &customer, warehouse, &moved, &extra).await {
         Ok(v) => Ok(Json(v)),
         Err(e) => {
+            if let Some(c) = quote.coupon_id {
+                extras::unuse_coupon(&state, c, &email).await;
+            }
             // The order did not go through: put the units back.
             if !moved.is_empty() {
                 let counted: Vec<Uuid> = sqlx::query_scalar("SELECT product_id FROM inv_movements WHERE id = ANY($1)").bind(&moved).fetch_all(&state.db).await.unwrap_or_default();
@@ -466,7 +552,7 @@ struct Customer<'a> {
     note: Option<&'a str>,
 }
 
-async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer<'_>, warehouse: Uuid, moved: &[Uuid]) -> AppResult<Value> {
+async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer<'_>, warehouse: Uuid, moved: &[Uuid], extra: &Value) -> AppResult<Value> {
     let Customer { name, email, phone, address, note } = *c;
     let auth = system_auth();
     // In turn among the handlers who still work here.
@@ -535,7 +621,7 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
     for (i, r) in rows.iter().enumerate() {
         sqlx::query(
             "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort)
-             VALUES ($1, $2, $3, $4, $5, $6, 'percent', 0, $7, $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $10, $11, $7, $8, $9)",
         )
         .bind(id)
         .bind(r.product_id)
@@ -546,6 +632,8 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
         .bind(r.tax_rate)
         .bind(r.tax_included)
         .bind(i as i32)
+        .bind(&r.discount_kind)
+        .bind(r.discount_value)
         .execute(&state.db)
         .await?;
     }
@@ -557,7 +645,7 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
         .fetch_one(&state.db)
         .await?;
     let token = random_token(24);
-    sqlx::query("INSERT INTO shop_orders (item_id, token, name, email, phone, address, note, warehouse_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+    sqlx::query("INSERT INTO shop_orders (item_id, token, name, email, phone, address, note, warehouse_id, extras) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)")
         .bind(id)
         .bind(&token)
         .bind(name)
@@ -566,6 +654,13 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
         .bind(address)
         .bind(note)
         .bind(warehouse)
+        .bind(extra)
+        .execute(&state.db)
+        .await?;
+    sqlx::query("UPDATE shop_coupon_uses SET item_id = $1 WHERE item_id IS NULL AND email = $2 AND coupon_id IN (SELECT id FROM shop_coupons WHERE code = $3)")
+        .bind(id)
+        .bind(email)
+        .bind(extra["coupon"].as_str())
         .execute(&state.db)
         .await?;
     sqlx::query("UPDATE inv_movements SET item_id = $1 WHERE id = ANY($2)").bind(id).bind(moved).execute(&state.db).await?;

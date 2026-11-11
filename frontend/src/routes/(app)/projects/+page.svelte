@@ -15,10 +15,12 @@
 	let q = $state('');
 	let scope = $state<'mine' | 'all' | 'archived'>('mine');
 	let kind = $state<'' | 'group' | 'project' | 'scrum'>('');
+	let sort = $state<'name' | 'activity'>('name');
+	let only = $state<'' | 'overdue' | 'unread'>('');
 
 	async function load() {
 		projects = await api.get<ProjectSummary[]>(
-			'/projects' + query({ q, mine: scope === 'mine' || undefined, archived: scope === 'archived' || undefined, kind: kind || undefined })
+			'/projects' + query({ q, mine: scope === 'mine' || undefined, archived: scope === 'archived' || undefined, kind: kind || undefined, sort, overdue: only === 'overdue' || undefined, unread: only === 'unread' || undefined })
 		);
 	}
 	onMount(load);
@@ -84,6 +86,8 @@
 				<button class="rounded-md px-3 py-1.5 font-medium {scope === k ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}" onclick={() => ((scope = k as typeof scope), load())}>{label}</button>
 			{/each}
 		</nav>
+		<select class="input w-40" aria-label="Order" bind:value={sort} onchange={load}><option value="name">By name</option><option value="activity">Recent activity</option></select>
+		<select class="input w-44" aria-label="Show" bind:value={only} onchange={load}><option value="">All of them</option><option value="overdue">With overdue tasks</option><option value="unread">With unread messages</option></select>
 		<select class="input w-44" aria-label="Kind" bind:value={kind} onchange={load}>
 			<option value="">Groups and projects</option>
 			<option value="group">Workgroups</option>
@@ -115,6 +119,7 @@
 						<span>{p.member_count} {p.member_count === 1 ? 'member' : 'members'}</span>
 						<span>{p.open_task_count} open tasks</span>
 						{#if p.overdue_task_count}<span class="font-medium text-red-600">{p.overdue_task_count} overdue</span>{/if}
+						{#if p.unread}<span class="font-medium text-brand-700" data-unread>{p.unread} unread</span>{/if}
 					</div>
 				</a>
 			{/each}
