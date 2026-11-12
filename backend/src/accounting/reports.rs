@@ -268,7 +268,8 @@ async fn aging(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Pe
     // Documents posted by then, and what they still owed then.
     type D = (Uuid, Option<Uuid>, Option<String>, String, NaiveDate, Option<NaiveDate>, String, Decimal, Decimal, Decimal);
     let docs: Vec<D> = sqlx::query_as(if receivable {
-        "SELECT a.item_id, a.party_id, p.title, 'Invoice ' || i.number, a.date, a.due_date, a.currency, a.fx_rate, a.total,
+        "SELECT a.item_id, a.party_id, p.title, 'Invoice ' || i.number, a.date, a.due_date, a.currency, a.fx_rate,
+                a.total - COALESCE((SELECT SUM(c.amount) FROM acc_credit_notes c WHERE c.invoice_id = a.item_id AND c.status = 'posted' AND c.date <= $1), 0),
                 COALESCE((SELECT SUM(al.amount) FROM acc_allocations al JOIN acc_payments x ON x.id = al.payment_id
                           WHERE al.doc_kind = 'invoice' AND al.doc_id = a.item_id AND x.status = 'posted' AND x.date <= $1), 0)
          FROM acc_invoices a JOIN crm_items i ON i.id = a.item_id LEFT JOIN crm_items p ON p.id = a.party_id
@@ -439,7 +440,7 @@ async fn summary(State(state): State<AppState>, auth: AuthUser) -> AppResult<Jso
     let db = &state.db;
     let owed = |kind: &'static str| async move {
         let q = if kind == "invoice" {
-            "SELECT COALESCE(SUM((a.total - COALESCE(x.paid, 0)) * a.fx_rate), 0), COALESCE(SUM((a.total - COALESCE(x.paid, 0)) * a.fx_rate) FILTER (WHERE a.due_date < current_date), 0), COUNT(*) FILTER (WHERE a.due_date < current_date)
+            "SELECT COALESCE(SUM((a.total - a.credited - COALESCE(x.paid, 0)) * a.fx_rate), 0), COALESCE(SUM((a.total - a.credited - COALESCE(x.paid, 0)) * a.fx_rate) FILTER (WHERE a.due_date < current_date), 0), COUNT(*) FILTER (WHERE a.due_date < current_date)
              FROM acc_invoices a LEFT JOIN (SELECT al.doc_id, SUM(al.amount) AS paid FROM acc_allocations al JOIN acc_payments p ON p.id = al.payment_id WHERE al.doc_kind = 'invoice' AND p.status = 'posted' GROUP BY al.doc_id) x ON x.doc_id = a.item_id
              WHERE a.status = 'open'"
         } else {

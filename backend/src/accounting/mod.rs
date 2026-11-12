@@ -12,6 +12,7 @@
 
 pub mod bank;
 pub mod bills;
+pub mod credit_notes;
 pub mod forecast;
 pub mod invoices;
 pub mod ledger;
@@ -55,6 +56,7 @@ pub fn router() -> Router<AppState> {
         .route("/accounting/opening", post(opening_balances))
         .route("/accounting/parties", get(parties))
         .merge(invoices::router())
+        .merge(credit_notes::router())
         .merge(bills::router())
         .merge(payments::router())
         .merge(bank::router())

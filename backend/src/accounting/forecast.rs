@@ -109,7 +109,7 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
     // Open invoices in the books: what is still owed.
     let open: Vec<(Uuid, NaiveDate, Option<NaiveDate>, Option<Uuid>, Option<String>, Decimal, Option<String>)> = sqlx::query_as(
         "SELECT a.item_id, a.date, a.due_date, a.party_id, p.title,
-                (a.total - COALESCE((SELECT SUM(al.amount) FROM acc_allocations al JOIN acc_payments pm ON pm.id = al.payment_id
+                (a.total - a.credited - COALESCE((SELECT SUM(al.amount) FROM acc_allocations al JOIN acc_payments pm ON pm.id = al.payment_id
                                      WHERE al.doc_kind = 'invoice' AND al.doc_id = a.item_id AND pm.status = 'posted'), 0)) * a.fx_rate,
                 i.title
          FROM acc_invoices a JOIN crm_items i ON i.id = a.item_id LEFT JOIN crm_items p ON p.id = a.party_id

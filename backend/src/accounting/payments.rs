@@ -59,7 +59,8 @@ pub struct PaymentIn {
 /// A document being paid, locked for the transaction: (currency, rate, party, balance).
 async fn lock_doc(tx: &mut ledger::Tx<'_>, kind: &str, id: Uuid) -> AppResult<(String, Decimal, Option<Uuid>, Decimal)> {
     let row: Option<(String, Decimal, Option<Uuid>, Decimal, String)> = match kind {
-        "invoice" => sqlx::query_as("SELECT currency, fx_rate, party_id, total, status FROM acc_invoices WHERE item_id = $1 FOR UPDATE").bind(id).fetch_optional(&mut **tx).await?,
+        // What an invoice is owed is its total less its credit notes.
+        "invoice" => sqlx::query_as("SELECT currency, fx_rate, party_id, total - credited, status FROM acc_invoices WHERE item_id = $1 FOR UPDATE").bind(id).fetch_optional(&mut **tx).await?,
         "bill" => sqlx::query_as("SELECT currency, fx_rate, party_id, total, status FROM acc_bills WHERE id = $1 FOR UPDATE").bind(id).fetch_optional(&mut **tx).await?,
         _ => return Err(AppError::bad("payments are allocated to invoices or bills")),
     };
@@ -201,6 +202,11 @@ pub async fn record(state: &AppState, auth: &AuthUser, p: PaymentIn) -> AppResul
     for item in &now_paid {
         super::invoices::mark_paid_in_crm(state, *item).await;
     }
+    if inbound {
+        for a in &p.allocations {
+            crate::commissions::sync_invoice(state, a.doc_id).await;
+        }
+    }
     Ok((id, now_paid))
 }
 
@@ -321,14 +327,20 @@ async fn void_payment(State(state): State<AppState>, auth: AuthUser, Path(id): P
     }
     sqlx::query("UPDATE acc_payments SET status = 'void' WHERE id = $1").bind(id).execute(&mut *tx).await?;
     let docs: Vec<(String, Uuid)> = sqlx::query_as("SELECT doc_kind, doc_id FROM acc_allocations WHERE payment_id = $1").bind(id).fetch_all(&mut *tx).await?;
-    for (k, d) in docs {
+    for (k, d) in &docs {
         if k == "invoice" {
-            super::invoices::refresh(&mut tx, d).await?;
+            super::invoices::refresh(&mut tx, *d).await?;
         } else {
-            super::bills::refresh(&mut tx, d).await?;
+            super::bills::refresh(&mut tx, *d).await?;
         }
     }
     tx.commit().await?;
+    // A payment taken back takes back the commission on it.
+    for (k, d) in &docs {
+        if k == "invoice" {
+            crate::commissions::sync_invoice(&state, *d).await;
+        }
+    }
     audit::record(&state.db, Some(auth.id), "accounting.payment_void", "payment", Some(id.to_string()), json!({}), None).await;
     Ok(Json(payment_json(&state, id).await?))
 }
@@ -409,6 +421,11 @@ async fn allocate_later(State(state): State<AppState>, auth: AuthUser, Path(id):
     tx.commit().await?;
     for item in now_paid {
         super::invoices::mark_paid_in_crm(&state, item).await;
+    }
+    if inbound {
+        for a in &b.allocations {
+            crate::commissions::sync_invoice(&state, a.doc_id).await;
+        }
     }
     Ok(Json(payment_json(&state, id).await?))
 }

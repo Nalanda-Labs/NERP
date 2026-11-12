@@ -5,6 +5,7 @@ mod export;
 mod health;
 mod privacy;
 mod retention;
+mod commissions;
 mod auth;
 mod bi;
 mod blob;
