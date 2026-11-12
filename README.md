@@ -375,6 +375,25 @@ each client, deal, product or salesperson really earned in a period.
   invoice's responsible person) or product (its costs spread over its rows by revenue).
 - Hourly costs and rates are set by those who manage employees or CRM administrators.
 
+#### Insights: deal health, next steps, silent clients
+
+CRM → **Insights**, built only from the company's own records (no outside service).
+
+- **Deal health:** each open deal scores from 100 down against how the same pipeline's won
+  deals went, with the reasons: no contact for a while, slower than won deals usually move
+  through the stage, fewer people involved than won deals usually have, our email unanswered
+  for over 5 days, the close date passed (or none set), nothing planned next, and a client who
+  pays late. 70 and up is healthy, 40–69 at risk, below that poor. The list puts the least
+  healthy first, by pipeline, grade or "mine"; the deal page shows its own health card.
+- **What worked at this stage:** on the deal's card, the steps (call, meeting, to-do, email,
+  document) that won deals took in the current stage and lost ones mostly didn't — with how
+  often deals won with and without it, and the usual day it happened; ticked once taken.
+- **Silent clients:** clients with at least three orders (won deals or completed shop orders)
+  who are well past their usual gap (over 1.5× the median gap and at least two weeks over it).
+  CRM administrators can turn on a daily check-in task for the client's responsible person,
+  made once each time a client goes quiet.
+- Everything is limited to records the viewer may see.
+
 ### Automation (robots and triggers)
 
 CRM settings → Automation shows each pipeline as columns of stages.
