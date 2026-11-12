@@ -202,6 +202,7 @@
 					badge: () => (crm.counters?.activities_overdue ? { n: crm.counters.activities_overdue, alert: true } : null)
 				},
 				{ href: '/crm/analytics', label: 'Analytics', icon: 'columns' },
+				{ href: '/crm/insights', label: 'Insights', icon: 'funnel' },
 				{ href: '/crm/products', label: 'Products', icon: 'briefcase' },
 				{ href: '/crm/shop', label: 'Online shop', icon: 'store', perm: PERM.SHOP },
 				{ href: '/crm/documents', label: 'Documents', icon: 'file' },
