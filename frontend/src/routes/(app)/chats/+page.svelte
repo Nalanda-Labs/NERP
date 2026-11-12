@@ -47,6 +47,8 @@
 	let list: HTMLElement | undefined = $state();
 	const selected = $derived(page.url.searchParams.get('session'));
 	let canned = $state<Canned[]>([]);
+	// Booking forms, to send a visitor a link to book.
+	let bookingForms = $state<{ slug: string; name: string; is_active?: boolean }[]>([]);
 	let channels = $state<Channel[]>([]);
 	let people = $state<{ id: string; name: string }[]>([]);
 	let canManage = $state(false);
@@ -88,6 +90,7 @@
 	onMount(() => {
 		load();
 		api.get<{ items: Canned[] }>('/chat/canned').then((r) => (canned = r.items)).catch(() => {});
+		api.get<{ items: typeof bookingForms }>('/booking/forms').then((r) => (bookingForms = r.items.filter((f) => f.is_active !== false))).catch(() => {});
 		api.get<{ items: Channel[]; people: { id: string; name: string }[]; can_manage: boolean }>('/chat/channels').then((r) => ((channels = r.items), (people = r.people), (canManage = r.can_manage))).catch(() => {});
 		const off = [
 			realtime.on('chat.message', (d: { session_id: string }) => {
@@ -267,7 +270,19 @@
 				{/if}
 				<form class="flex items-end gap-2 border-t border-slate-100 p-3" onsubmit={send}>
 					<textarea class="input max-h-40 min-h-10 flex-1 resize-none" rows="2" maxlength="4000" placeholder="Reply… (type / for saved replies; Enter sends, Shift+Enter for a new line)" aria-label="Reply" bind:value={draft} onkeydown={keydown}></textarea>
-					<button class="btn btn-primary" disabled={busy || !draft.trim()}>Send</button>
+					<div class="flex flex-col gap-2">
+						{#if bookingForms.length}
+							<select class="input w-36 py-1 text-xs" aria-label="Send a booking link" data-booking-link onchange={(e) => {
+								const sel = e.target as HTMLSelectElement;
+								if (sel.value) draft = `${draft ? draft.trimEnd() + ' ' : ''}${location.origin}/book/${sel.value}`;
+								sel.value = '';
+							}}>
+								<option value="">Booking link…</option>
+								{#each bookingForms as f (f.slug)}<option value={f.slug}>{f.name}</option>{/each}
+							</select>
+						{/if}
+						<button class="btn btn-primary" disabled={busy || !draft.trim()}>Send</button>
+					</div>
 				</form>
 			{/if}
 		{:else}

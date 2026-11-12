@@ -299,6 +299,7 @@ async fn book(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(slug):
             client_email: Some(email),
             client_phone: phone,
             contact_id: None,
+            deal_id: None,
             note: b.note,
             overbook: false,
             waitlist: b.waitlist,
@@ -360,9 +361,10 @@ async fn manage_act(State(state): State<AppState>, Path(token): Path<String>, Js
         _ => return Err(AppError::bad("confirm or cancel")),
     };
     sqlx::query("UPDATE bookings SET status = $2, updated_at = now() WHERE id = $1").bind(id).bind(new).execute(&state.db).await?;
-    if let Some(c) = b.contact_id {
-        let _ = crate::crm::timeline(&state.db, c, "booking", None, None, json!({ "event": format!("client_{new}"), "booking_id": id, "number": b.number, "starts_at": b.starts_at })).await;
+    for item in [b.contact_id, b.deal_id].into_iter().flatten() {
+        let _ = crate::crm::timeline(&state.db, item, "booking", None, None, json!({ "event": format!("client_{new}"), "booking_id": id, "number": b.number, "starts_at": b.starts_at })).await;
     }
+    super::bookings::crm_event(&state, id, new).await;
     let people: Vec<Uuid> = sqlx::query_scalar("SELECT r.user_id FROM booking_resources r WHERE r.id = ANY($1) AND r.user_id IS NOT NULL").bind(&b.resource_ids).fetch_all(&state.db).await?;
     crate::notify::notify(&state, &people, crate::notify::NewNotification {
         kind: "booking.client",

@@ -9,6 +9,7 @@
 	import CardSections from '#lib/components/crm/CardSections.svelte';
 	import ProductRows from '#lib/components/crm/ProductRows.svelte';
 	import DocumentsCard from '#lib/components/crm/DocumentsCard.svelte';
+	import BookingsCard from '#lib/components/crm/BookingsCard.svelte';
 	import RequisitesCard from '#lib/components/crm/RequisitesCard.svelte';
 	import RecurringCard from '#lib/components/crm/RecurringCard.svelte';
 	import InvoiceBooksCard from '#lib/components/accounting/InvoiceBooksCard.svelte';
@@ -604,6 +605,17 @@
 				<RequisitesCard itemId={item.id} person={type.code === 'contact'} canWrite={item.can_write} defaultCountry={item.address?.country ?? ''} defaultName={item.title} />
 			{/if}
 			<DocumentsCard itemId={item.id} typeCode={type.code} canWrite={item.can_write} hasBuyer={type.has_client} />
+			{#if ['contact', 'company', 'deal'].includes(type.code)}
+				{@const mf = (kind: string) => item!.multifields.find((m) => m.kind === kind)?.value ?? null}
+				{#key item.id}<BookingsCard
+					itemId={item.id}
+					typeCode={type.code}
+					clientName={type.code === 'deal' ? (item.contacts[0]?.title ?? item.company_title ?? item.title) : item.title}
+					clientEmail={type.code === 'contact' ? mf('email') : null}
+					clientPhone={type.code === 'contact' ? mf('phone') : null}
+					contactId={type.code === 'contact' ? item.id : (type.code === 'deal' ? (item.contacts[0]?.id ?? null) : null)}
+				/>{/key}
+			{/if}
 			{#key item.id}<RecordProcesses itemId={item.id} canWrite={item.can_write} />{/key}
 			{#key item.id}<Journey itemId={item.id} />{/key}
 

@@ -10,7 +10,8 @@
 			| 'contact'
 			| 'form'
 			| 'html'
-			| 'products';
+			| 'products'
+			| 'booking';
 		heading?: string;
 		text?: string;
 		button_label?: string;
@@ -28,6 +29,7 @@
 		email?: string;
 		hours?: string;
 		form_key?: string;
+		booking_slug?: string;
 		height?: number;
 		embed_url?: string;
 		category?: string;
@@ -228,6 +230,18 @@
 					title={b.heading ?? 'Form'}
 					class="w-full border-0"
 					style="height:{heights[b.form_key] ?? 520}px"
+				></iframe>{/if}
+		</section>
+	{:else if b.kind === 'booking'}
+		<section class="mx-auto max-w-3xl px-6 py-10" data-block="booking">
+			{#if b.heading}<h2 class="mb-6 text-center text-3xl font-bold text-slate-900">
+					{b.heading}
+				</h2>{/if}
+			{#if b.booking_slug}<iframe
+					src="/book/{encodeURIComponent(b.booking_slug)}?embed=1"
+					title={b.heading ?? 'Book online'}
+					class="w-full border-0"
+					style="height:{heights[`book:${b.booking_slug}`] ?? 760}px"
 				></iframe>{/if}
 		</section>
 	{/if}

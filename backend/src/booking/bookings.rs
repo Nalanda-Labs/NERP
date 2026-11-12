@@ -33,6 +33,7 @@ pub fn router() -> Router<AppState> {
         .route("/booking/bookings/{id}/status", post(set_status))
         .route("/booking/slots", get(slots))
         .route("/booking/waitlist", get(waitlist))
+        .route("/crm/items/{id}/bookings", get(for_record))
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +156,9 @@ pub(crate) struct NewBooking {
     pub client_phone: Option<String>,
     /// An existing CRM contact; otherwise one is found by email or made.
     pub contact_id: Option<Uuid>,
+    /// An existing deal to link (booking from a deal's card); otherwise one may be made.
+    #[serde(default)]
+    pub deal_id: Option<Uuid>,
     pub note: Option<String>,
     /// Staff: go over capacity where the resource allows it.
     #[serde(default)]
@@ -212,6 +216,15 @@ async fn make_locked(state: &AppState, actor: Option<&AuthUser>, b: NewBooking, 
     }
     if ends - b.starts_at > Duration::days(366) {
         return Err(AppError::bad("a booking lasts at most a year"));
+    }
+    // A deal to link: staff only, a deal they can see.
+    if let Some(d) = b.deal_id {
+        let Some(who) = actor else { return Err(AppError::bad("only staff link bookings to deals")) };
+        let row = crate::crm::items::load_row(state, d, false).await.map_err(|_| AppError::bad("that deal doesn't exist"))?;
+        if row.entity_type != DEAL {
+            return Err(AppError::bad("bookings link to deals"));
+        }
+        crate::crm::access::require_read(state, who, DEAL, d, row.assigned_to).await?;
     }
     let mut resources: Vec<Resource> = Vec::new();
     for id in &res {
@@ -277,11 +290,16 @@ async fn make_locked(state: &AppState, actor: Option<&AuthUser>, b: NewBooking, 
         sqlx::query("INSERT INTO booking_resources_used (booking_id, resource_id) VALUES ($1, $2)").bind(id).bind(r).execute(&state.db).await?;
     }
     let booking = load(state, id).await?;
-    // A deal for it, when a pipeline is chosen.
-    if !b.waitlist {
-        if let Err(e) = make_deal(state, &booking, &resources, service).await {
+    // The deal it was made from, or a new one when a pipeline is chosen.
+    if let Some(d) = b.deal_id {
+        sqlx::query("UPDATE bookings SET deal_id = $2 WHERE id = $1").bind(id).bind(d).execute(&state.db).await?;
+        let _ = crate::crm::timeline(&state.db, d, "booking", actor.map(|a| a.id), None, json!({ "event": if b.waitlist { "waitlist" } else { "booked" }, "booking_id": id, "number": booking.number, "starts_at": b.starts_at, "service": service.map(|s| s.name.clone()) })).await;
+    } else if !b.waitlist
+        && let Err(e) = make_deal(state, &booking, &resources, service).await {
             tracing::warn!(error = ?e, "booking: the deal could not be made");
         }
+    if !b.waitlist {
+        crm_event(state, id, "booked").await;
     }
     if let Some(c) = contact {
         let _ = crate::crm::timeline(&state.db, c, "booking", actor.map(|a| a.id), None, json!({ "event": if b.waitlist { "waitlist" } else { "booked" }, "booking_id": id, "number": booking.number, "starts_at": b.starts_at, "service": service.map(|s| s.name.clone()) })).await;
@@ -528,14 +546,43 @@ async fn set_status(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         }
     }
     sqlx::query("UPDATE bookings SET status = $2, updated_at = now() WHERE id = $1").bind(id).bind(&b.status).execute(&state.db).await?;
-    if let Some(c) = cur.contact_id {
-        let _ = crate::crm::timeline(&state.db, c, "booking", Some(auth.id), None, json!({ "event": b.status, "booking_id": id, "number": cur.number, "starts_at": cur.starts_at })).await;
+    for item in [cur.contact_id, cur.deal_id].into_iter().flatten() {
+        let _ = crate::crm::timeline(&state.db, item, "booking", Some(auth.id), None, json!({ "event": b.status, "booking_id": id, "number": cur.number, "starts_at": cur.starts_at })).await;
+    }
+    if cur.status != b.status {
+        crm_event(&state, id, &b.status).await;
     }
     if b.status == "cancelled" && cur.status != "waitlist" {
         freed(&state, &cur).await;
     }
     tell(&state, id).await;
     Ok(Json(load(&state, id).await?))
+}
+
+/// A CRM record's bookings: a contact's, a deal's, or a company's (its contacts' and deals').
+pub(crate) async fn for_record(State(state): State<AppState>, auth: AuthUser, Path(item): Path<Uuid>) -> AppResult<Json<Value>> {
+    let row = crate::crm::items::load_row(&state, item, false).await?;
+    crate::crm::access::require_read(&state, &auth, row.entity_type, item, row.assigned_to).await?;
+    let items: Vec<Booking> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "{BOOKING_SELECT} WHERE b.contact_id = $1 OR b.deal_id = $1
+            OR b.contact_id IN (SELECT id FROM crm_items WHERE company_id = $1 AND deleted_at IS NULL)
+            OR b.deal_id IN (SELECT id FROM crm_items WHERE company_id = $1 AND deleted_at IS NULL)
+         ORDER BY b.starts_at DESC LIMIT 200"
+    )))
+    .bind(item)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!({ "items": items })))
+}
+
+/// Tells CRM automation: triggers waiting for this booking event (booked, confirmed, came,
+/// no_show, cancelled) on the booking's deal and contact.
+pub(crate) async fn crm_event(state: &AppState, id: Uuid, status: &str) {
+    let links: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as("SELECT deal_id, contact_id FROM bookings WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    let Some((deal, contact)) = links else { return };
+    for item in [deal, contact].into_iter().flatten() {
+        crate::crm::automation::fire(state, item, "booking", |p| p.get("status").and_then(Value::as_str).is_none_or(|s| s == status)).await;
+    }
 }
 
 /// A booking was cancelled: whoever waits for that time is told it is free.
@@ -575,26 +622,92 @@ pub(crate) async fn freed(state: &AppState, b: &Booking) {
 
 /// Emails clients a reminder the set number of hours before (once). A new link goes with it.
 pub async fn run_reminders(state: &AppState) -> Result<()> {
-    let hours: i32 = sqlx::query_scalar("SELECT remind_hours FROM booking_settings WHERE id").fetch_one(&state.db).await?;
-    if hours == 0 {
-        return Ok(());
-    }
-    let due: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE bookings SET reminded_at = now() WHERE status IN ('booked', 'confirmed') AND reminded_at IS NULL AND client_email IS NOT NULL
-           AND starts_at > now() AND starts_at <= now() + make_interval(hours => $1) RETURNING id",
-    )
-    .bind(hours)
-    .fetch_all(&state.db)
-    .await?;
+    let (first, extra, follow_h, follow_t, no_show): (i32, Vec<i32>, i32, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT remind_hours, extra_reminders, follow_up_hours, follow_up_text, no_show_text FROM booking_settings WHERE id").fetch_one(&state.db).await?;
+    let mut hours: Vec<i32> = extra.into_iter().chain(std::iter::once(first)).filter(|h| *h > 0).collect();
+    hours.sort_unstable();
+    hours.dedup();
     let name = company(state).await;
-    for id in due {
-        let Ok(b) = load(state, id).await else { continue };
-        let token = random_token(24);
-        sqlx::query("UPDATE bookings SET token_hash = $2 WHERE id = $1").bind(id).bind(hash(&token)).execute(&state.db).await?;
-        let (what, when) = what_and_when(state, &b).await;
-        let link = format!("{}/book/manage/{token}", state.config.public_url);
-        let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, &format!("Reminder: {when}"), "See you soon", &[format!("Hi {},", b.client_name), format!("A reminder of your booking: {what}, {when}."), "Can't make it? Let us know:".into()], Some(("Confirm or cancel", &link)));
-        crate::jobs::send_email(state, mail).await?;
+
+    // Reminders: of those due, only the nearest is sent (a booking made two hours ahead gets
+    // the two-hour reminder, not also the day-before one); the others count as sent.
+    if let Some(max) = hours.last().copied() {
+        let due: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT id, starts_at FROM bookings WHERE status IN ('booked', 'confirmed') AND client_email IS NOT NULL
+               AND starts_at > now() AND starts_at <= now() + make_interval(hours => $1)",
+        )
+        .bind(max)
+        .fetch_all(&state.db)
+        .await?;
+        for (id, starts) in due {
+            let left = (starts - Utc::now()).num_minutes();
+            let applicable: Vec<i32> = hours.iter().copied().filter(|h| (*h as i64) * 60 >= left).collect();
+            let sent: Vec<String> = sqlx::query_scalar("SELECT kind FROM booking_notices WHERE booking_id = $1").bind(id).fetch_all(&state.db).await?;
+            let Some(nearest) = applicable.iter().min().copied() else { continue };
+            if sent.contains(&format!("remind:{nearest}")) {
+                continue;
+            }
+            // Claim it (one server sends it), with the further-out ones it replaces.
+            let claimed = sqlx::query("INSERT INTO booking_notices (booking_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                .bind(id)
+                .bind(format!("remind:{nearest}"))
+                .execute(&state.db)
+                .await?
+                .rows_affected();
+            for h in applicable.iter().filter(|h| **h != nearest) {
+                sqlx::query("INSERT INTO booking_notices (booking_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(format!("remind:{h}")).execute(&state.db).await?;
+            }
+            if claimed == 0 {
+                continue;
+            }
+            sqlx::query("UPDATE bookings SET reminded_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+            let Ok(b) = load(state, id).await else { continue };
+            let token = random_token(24);
+            sqlx::query("UPDATE bookings SET token_hash = $2 WHERE id = $1").bind(id).bind(hash(&token)).execute(&state.db).await?;
+            let (what, when) = what_and_when(state, &b).await;
+            let link = format!("{}/book/manage/{token}", state.config.public_url);
+            let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, &format!("Reminder: {when}"), "See you soon", &[format!("Hi {},", b.client_name), format!("A reminder of your booking: {what}, {when}."), "Can't make it? Let us know:".into()], Some(("Confirm or cancel", &link)));
+            crate::jobs::send_email(state, mail).await?;
+        }
+    }
+
+    // After the visit: the follow-up, once.
+    if follow_h > 0 && let Some(text) = follow_t.as_deref() {
+        let due: Vec<Uuid> = sqlx::query_scalar(
+            "INSERT INTO booking_notices (booking_id, kind)
+             SELECT id, 'follow_up' FROM bookings WHERE status = 'came' AND client_email IS NOT NULL
+               AND ends_at + make_interval(hours => $1) <= now() AND ends_at > now() - interval '30 days'
+             ON CONFLICT DO NOTHING RETURNING booking_id",
+        )
+        .bind(follow_h)
+        .fetch_all(&state.db)
+        .await?;
+        for id in due {
+            let Ok(b) = load(state, id).await else { continue };
+            let mut lines = vec![format!("Hi {},", b.client_name)];
+            lines.extend(text.lines().map(String::from).filter(|l| !l.trim().is_empty()));
+            let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, &format!("Thank you for your visit, {}", b.client_name), "Thank you", &lines, None);
+            crate::jobs::send_email(state, mail).await?;
+        }
+    }
+
+    // Clients marked as not having come: the message, once.
+    if let Some(text) = no_show.as_deref() {
+        let due: Vec<Uuid> = sqlx::query_scalar(
+            "INSERT INTO booking_notices (booking_id, kind)
+             SELECT id, 'no_show' FROM bookings WHERE status = 'no_show' AND client_email IS NOT NULL AND starts_at > now() - interval '7 days'
+             ON CONFLICT DO NOTHING RETURNING booking_id",
+        )
+        .fetch_all(&state.db)
+        .await?;
+        for id in due {
+            let Ok(b) = load(state, id).await else { continue };
+            let (what, when) = what_and_when(state, &b).await;
+            let mut lines = vec![format!("Hi {},", b.client_name), format!("We missed you at your booking: {what}, {when}.")];
+            lines.extend(text.lines().map(String::from).filter(|l| !l.trim().is_empty()));
+            let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, "We missed you", "We missed you", &lines, None);
+            crate::jobs::send_email(state, mail).await?;
+        }
     }
     Ok(())
 }

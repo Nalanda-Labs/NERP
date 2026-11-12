@@ -705,7 +705,7 @@ pub struct Trigger {
 const TRIGGER_COLUMNS: &str = "id, entity_type, category_id, stage_id, name, event, params, conditions, allow_backwards, token, sort, is_active, created_at, updated_at";
 /// Events a robot can wait for.
 const WAIT_EVENTS: &[&str] = &["email_received", "activity_done"];
-const EVENTS: &[&str] = &["activity_done", "comment_added", "document_created", "email_received", "webform_submitted", "webhook", "signature_completed", "signature_declined", "tasks_done"];
+const EVENTS: &[&str] = &["activity_done", "comment_added", "document_created", "email_received", "webform_submitted", "webhook", "signature_completed", "signature_declined", "tasks_done", "booking"];
 
 /// An event happened on a record: the first matching trigger of its pipeline moves it.
 /// `matches` checks the trigger's event parameters. Never fails the caller.
@@ -1142,6 +1142,16 @@ fn check_trigger_params(event: &str, p: Value) -> AppResult<Value> {
             if let Some(t) = p.get("sign_template_id").and_then(Value::as_str).filter(|t| !t.is_empty()) {
                 Uuid::parse_str(t).map_err(|_| AppError::bad("sign_template_id must be a signing template"))?;
                 out.insert("sign_template_id".into(), json!(t));
+            }
+        }
+        // A booking of the record's client: made, confirmed, came, didn't come, cancelled
+        // (any of them when no status is given).
+        "booking" => {
+            if let Some(st) = p.get("status").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                if !["booked", "confirmed", "came", "no_show", "cancelled"].contains(&st) {
+                    return Err(AppError::bad("status must be booked, confirmed, came, no_show or cancelled"));
+                }
+                out.insert("status".into(), json!(st));
             }
         }
         // Every task linked to the record is done (a stage's tasks finished: move on).

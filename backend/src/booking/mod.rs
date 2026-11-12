@@ -65,9 +65,16 @@ fn manage(auth: &AuthUser) -> AppResult<()> {
 // ---------------------------------------------------------------------------
 
 async fn settings_json(state: &AppState) -> AppResult<Value> {
-    let (confirm, remind, contact, cat, cur): (bool, i32, bool, Option<Uuid>, String) =
-        sqlx::query_as("SELECT confirm_email, remind_hours, make_contact, deal_category_id, currency FROM booking_settings WHERE id").fetch_one(&state.db).await?;
-    Ok(json!({ "confirm_email": confirm, "remind_hours": remind, "make_contact": contact, "deal_category_id": cat, "currency": cur }))
+    type Row = (bool, i32, bool, Option<Uuid>, String, Vec<i32>, i32, Option<String>, Option<String>);
+    let (confirm, remind, contact, cat, cur, extra, follow_h, follow_t, no_show): Row = sqlx::query_as(
+        "SELECT confirm_email, remind_hours, make_contact, deal_category_id, currency, extra_reminders, follow_up_hours, follow_up_text, no_show_text FROM booking_settings WHERE id",
+    )
+    .fetch_one(&state.db)
+    .await?;
+    Ok(json!({
+        "confirm_email": confirm, "remind_hours": remind, "make_contact": contact, "deal_category_id": cat, "currency": cur,
+        "extra_reminders": extra, "follow_up_hours": follow_h, "follow_up_text": follow_t, "no_show_text": no_show,
+    }))
 }
 
 async fn get_settings(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
@@ -82,6 +89,15 @@ struct SettingsInput {
     #[serde(default, deserialize_with = "crate::routes::double_option")]
     deal_category_id: Option<Option<Uuid>>,
     currency: Option<String>,
+    /// More reminders, hours before the visit (besides `remind_hours`).
+    extra_reminders: Option<Vec<i32>>,
+    /// A message this many hours after a visit (0 = none), and its text.
+    follow_up_hours: Option<i32>,
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    follow_up_text: Option<Option<String>>,
+    /// A message to clients marked as not having come (empty = none).
+    #[serde(default, deserialize_with = "crate::routes::double_option")]
+    no_show_text: Option<Option<String>>,
 }
 
 async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Json<SettingsInput>) -> AppResult<Json<Value>> {
@@ -89,6 +105,32 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     if b.remind_hours.is_some_and(|h| !(0..=168).contains(&h)) {
         return Err(AppError::bad("remind 0 to 168 hours before"));
     }
+    if let Some(x) = &b.extra_reminders
+        && (x.len() > 5 || x.iter().any(|h| !(1..=720).contains(h))) {
+            return Err(AppError::bad("up to five more reminders, 1 to 720 hours before"));
+        }
+    if b.follow_up_hours.is_some_and(|h| !(0..=720).contains(&h)) {
+        return Err(AppError::bad("follow up 0 to 720 hours after the visit"));
+    }
+    let clip = |t: Option<Option<String>>| t.map(|t| t.map(|s| s.trim().chars().take(2000).collect::<String>()).filter(|s| !s.is_empty()));
+    let (follow_text, no_show) = (clip(b.follow_up_text), clip(b.no_show_text));
+    if let Some(x) = &b.extra_reminders {
+        let mut x = x.clone();
+        x.sort_unstable_by(|a, b| b.cmp(a));
+        x.dedup();
+        sqlx::query("UPDATE booking_settings SET extra_reminders = $1 WHERE id").bind(&x).execute(&state.db).await?;
+    }
+    sqlx::query(
+        "UPDATE booking_settings SET follow_up_hours = COALESCE($1, follow_up_hours),
+            follow_up_text = CASE WHEN $2 THEN $3 ELSE follow_up_text END, no_show_text = CASE WHEN $4 THEN $5 ELSE no_show_text END WHERE id",
+    )
+    .bind(b.follow_up_hours)
+    .bind(follow_text.is_some())
+    .bind(follow_text.flatten())
+    .bind(no_show.is_some())
+    .bind(no_show.flatten())
+    .execute(&state.db)
+    .await?;
     if let Some(Some(c)) = b.deal_category_id {
         let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = 2)").bind(c).fetch_one(&state.db).await?;
         if !ok {
