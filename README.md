@@ -394,6 +394,35 @@ CRM → **Insights**, built only from the company's own records (no outside serv
   made once each time a client goes quiet.
 - Everything is limited to records the viewer may see.
 
+#### Everything about a client
+
+A contact's or company's page shows **Everything**: the client's history across every module,
+newest first, filterable by kind and loaded page by page — comments, deals and other records
+with their stage moves, calls, meetings and to-dos, emails, live chats, help desk tickets,
+invoices and payments (from the books), documents and signatures, bookings, site visits,
+shop orders, web form submissions, marketing emails (opened, clicked) and linked tasks. A
+company's history includes its contacts' and every record whose client it or they are. Only
+records the viewer may read count; tickets show for those who work in the help desk, and
+invoices and payments for those who see the books.
+
+#### Promise checker
+
+On a deal, **Can we deliver by…?** checks a date (the close date by default) before it is
+promised:
+
+- **Goods:** each catalog product on the deal against its stock (warehouses, or the
+  product's own stock count), less what other open deals with a close date by then need of
+  it, plus receipts drafted with a date (a draft receipt document is an expected delivery).
+  Enough now: fine; enough only once a receipt arrives by the date: risky, naming it.
+- **Work:** service rows in hours (`h`, `hour`…) or days (8 hours) against the free time of
+  the people doing it (the responsible person, or whoever is picked): working days from the
+  company work week or their rota, less holidays and approved time off, less their timed
+  calendar events and what is left of the estimates of their open tasks due by then. Within
+  the free time with a fifth to spare: fine; just within it: risky.
+- Someone away on the day itself makes it risky; pending time off is mentioned.
+- The verdict (can be done, risky, not by then) comes with the reasons and the earliest
+  date that works, which can be made the close date in one click.
+
 ### Automation (robots and triggers)
 
 CRM settings → Automation shows each pipeline as columns of stages.

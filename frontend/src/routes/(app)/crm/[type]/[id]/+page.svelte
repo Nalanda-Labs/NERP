@@ -11,6 +11,8 @@
 	import DocumentsCard from '#lib/components/crm/DocumentsCard.svelte';
 	import BookingsCard from '#lib/components/crm/BookingsCard.svelte';
 	import DealHealth from '#lib/components/crm/DealHealth.svelte';
+	import PromiseCheck from '#lib/components/crm/PromiseCheck.svelte';
+	import ClientEverything from '#lib/components/crm/ClientEverything.svelte';
 	import RequisitesCard from '#lib/components/crm/RequisitesCard.svelte';
 	import RecurringCard from '#lib/components/crm/RecurringCard.svelte';
 	import InvoiceBooksCard from '#lib/components/accounting/InvoiceBooksCard.svelte';
@@ -605,7 +607,8 @@
 			{#if type.code === 'company' || type.code === 'contact'}
 				<RequisitesCard itemId={item.id} person={type.code === 'contact'} canWrite={item.can_write} defaultCountry={item.address?.country ?? ''} defaultName={item.title} />
 			{/if}
-			{#if type.code === 'deal'}{#key item.id}<DealHealth itemId={item.id} />{/key}{/if}
+			{#if type.code === 'contact' || type.code === 'company'}{#key item.id}<ClientEverything itemId={item.id} />{/key}{/if}
+			{#if type.code === 'deal'}{#key item.id}<DealHealth itemId={item.id} /><PromiseCheck itemId={item.id} closeDate={item.close_date ?? null} assigned={item.assigned_to ? { id: item.assigned_to, name: item.assigned_name ?? '', avatar_file_id: item.assigned_avatar_file_id ?? null } : null} onDate={load} />{/key}{/if}
 			<DocumentsCard itemId={item.id} typeCode={type.code} canWrite={item.can_write} hasBuyer={type.has_client} />
 			{#if ['contact', 'company', 'deal'].includes(type.code)}
 				{@const mf = (kind: string) => item!.multifields.find((m) => m.kind === kind)?.value ?? null}
