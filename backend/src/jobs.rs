@@ -57,6 +57,9 @@ const RECURRING: &[(&str, u64)] = &[
     (crate::booking::REMIND_JOB, 300),
     (crate::training::REMIND_JOB, 3600),
     (crate::support::SLA_JOB, 60),
+    (crate::audit_chain::SEAL_JOB, 60),
+    (crate::audit_chain::VERIFY_JOB, 24 * 3600),
+    (crate::export::PURGE_JOB, 24 * 3600),
 ];
 
 /// Adds a job to the queue. Pass a transaction to enqueue atomically with other writes.
@@ -219,6 +222,9 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
         crate::blob::PURGE_JOB => crate::blob::purge_deleted(state).await,
         crate::auth::tokens::CLEANUP_JOB => crate::auth::tokens::cleanup(state).await,
         crate::crm::insights::SILENT_JOB => crate::crm::insights::run_silent(state).await,
+        crate::audit_chain::SEAL_JOB => crate::audit_chain::run_seal(state).await,
+        crate::audit_chain::VERIFY_JOB => crate::audit_chain::run_verify(state).await,
+        crate::export::PURGE_JOB => crate::export::run_purge(state).await,
         crate::blob::CONVERT_JOB => crate::blob::convert(state).await,
         crate::directory::SYNC_JOB => crate::directory::ldap::run_sync(state).await,
         crate::im::MAINTENANCE_JOB => crate::im::run_maintenance(state).await,

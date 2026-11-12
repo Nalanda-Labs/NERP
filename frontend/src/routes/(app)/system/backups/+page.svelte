@@ -6,6 +6,7 @@
 	import { api, downloadUrl } from '#lib/api.ts';
 	import { formatBytes, formatDateTime } from '#lib/format.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
+	import CompanyExport from '#lib/components/CompanyExport.svelte';
 
 	type Run = { started_at: string; finished_at: string; ok: boolean; output: string } | null;
 	type Backup = {
@@ -273,6 +274,7 @@
 	{:else}
 		<p class="text-sm text-slate-400">Loading…</p>
 	{/if}
+	<CompanyExport />
 </div>
 
 {#if restoring}

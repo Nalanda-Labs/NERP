@@ -1764,6 +1764,26 @@ documents and warehouses need the "Manage inventory" permission.
     Transfers aren't posted. A movement that can't be posted (a locked period) still moves
     the stock, and is logged.
 
+## Audit trail and company export
+
+- **Tamper-evident audit trail.** Every audit record is chained to the one before it by a
+  SHA-256 hash (sealed by the `audit.seal` job within a minute of being written). The
+  database refuses changes and removals (triggers on `audit_log`); anything changed behind
+  the application's back breaks the chain from that record on. Every hour the chain's head is
+  checkpointed with an HMAC keyed by `DATA_ENCRYPTION_KEY`, which isn't in the database, so a
+  chain rewritten from the database alone doesn't match its checkpoints. Audit log →
+  *Integrity* verifies the whole chain (also daily, notifying those who see the audit log if
+  it fails), signs a checkpoint on demand, shows the head to note elsewhere, and checks a head
+  noted earlier. When an employee is deleted their records keep who did it (`actor`).
+- **Full company export** (System → Backups, system managers): one click writes a ZIP with
+  every table as CSV from one consistent snapshot, the stored files decrypted under their own
+  names, a README and `manifest.json` (columns and types, the SHA-256 of every part, the schema
+  version, the audit head). Passwords, password and token hashes, two-factor and API secrets,
+  mailbox/calendar/sign-in credentials, encryption keys, sessions and the job queue are left
+  out (plus any column whose name looks like a secret). Exports go to `EXPORT_DIR` (default
+  `UPLOAD_DIR/.exports`) and are removed after `EXPORT_KEEP_DAYS` (7); starting, downloading
+  and removing one are audited.
+
 ## Public API (connecting other systems)
 
 Admin → **API & webhooks** (shown to people with "Use the API" or "Manage webhooks").

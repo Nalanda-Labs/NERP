@@ -3,6 +3,7 @@
 	import { api, query } from '#lib/api.ts';
 	import { formatDateTime } from '#lib/format.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
+	import AuditIntegrity from '#lib/components/AuditIntegrity.svelte';
 	import type { AuditEntry, Page } from '#lib/types.ts';
 
 	const PAGE_SIZE = 50;
@@ -56,7 +57,11 @@
 		'user.sessions_revoked': 'Signed an employee out everywhere',
 		'project.create': 'Created a project',
 		'project.update': 'Edited a project',
-		'project.delete': 'Deleted a project'
+		'project.delete': 'Deleted a project',
+		'audit.verify': 'Verified the audit trail',
+		'system.export': 'Started a company export',
+		'system.export_download': 'Downloaded a company export',
+		'system.export_delete': 'Removed a company export'
 	};
 
 	const tone = (a: string) =>
@@ -95,6 +100,8 @@
 			{#each filters as f (f.value)}<option value={f.value}>{f.label}</option>{/each}
 		</select>
 	</div>
+
+	<AuditIntegrity />
 
 	<div class="card overflow-hidden">
 		<table class="min-w-full text-sm">
