@@ -445,6 +445,24 @@ promised:
 - The verdict (can be done, risky, not by then) comes with the reasons and the earliest
   date that works, which can be made the close date in one click.
 
+### Client portal
+
+A contact's page has a **Client portal** card: turn it on, optionally let them see all of
+their company's invoices and quotes, and email them a sign-in link (also shown, to send
+another way). The link works once, within 7 days, and opens a 30-day session in an HttpOnly
+cookie kept apart from employees' sign-in; clients with the portal on can ask for a new link at
+`/portal` (the answer is the same for any address; requests are rate limited). Turning the
+portal off signs them out at once. Signed in, the client sees:
+
+- invoices (with what is left to pay, the due date and the PDF) and quotes they are on — or
+  their company's, if allowed;
+- payments received from them;
+- documents sent for signature, with the signed copies;
+- their help desk requests, each opening its private page;
+- their bookings.
+
+Files download only when they belong to what the client sees. Sign-ins are audited.
+
 ### Automation (robots and triggers)
 
 CRM settings → Automation shows each pipeline as columns of stages.
