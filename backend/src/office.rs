@@ -40,6 +40,8 @@ pub fn router() -> Router<AppState> {
         .route("/drive/nodes/{id}/preview", get(drive_preview))
         .route("/office/status", get(status))
         .route("/drive/nodes/{id}/office", post(open))
+        // An attachment (task, message, post): the same, by its file id.
+        .route("/files/{id}/office", post(open))
         .route("/public/drive/{token}/office", post(open_link))
         .route("/wopi/files/{id}", get(check_file_info).post(lock_ops))
         .route("/wopi/files/{id}/contents", get(get_file).post(put_file))
@@ -251,7 +253,7 @@ async fn open(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     if auth.session_id.is_nil() {
         return Err(AppError::bad("open files for editing from a signed-in browser"));
     }
-    let f = crate::drive::office_file(&state, &auth, id).await?;
+    let (f, _) = target(&state, &auth, id).await?;
     let ext = ext_of(&f.name);
     let editors = discovery(&state).await?;
     let wanted = if body.is_some_and(|b| b.view) || !f.can_edit { ["view", "edit"] } else { ["edit", "view"] };
@@ -337,6 +339,17 @@ impl TokenQuery {
     }
 }
 
+/// What a WOPI id is: a drive item, else an attachment (a stored file on a task, message or
+/// post). Returns the file as the editor sees it and whether it is an attachment.
+async fn target(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(crate::drive::OfficeFile, bool)> {
+    let is_node: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM drive_nodes WHERE id = $1)").bind(id).fetch_one(&state.db).await?;
+    if is_node {
+        Ok((crate::drive::office_file(state, auth, id).await?, false))
+    } else {
+        Ok((crate::attachments::office_file(state, auth, id).await?, true))
+    }
+}
+
 /// The person a token stands for, with their permissions now (so revoked access counts).
 async fn person(state: &AppState, t: &Token) -> AppResult<(AuthUser, String)> {
     let row: Option<(String, bool)> = sqlx::query_as("SELECT trim(first_name || ' ' || last_name), is_active FROM users WHERE id = $1").bind(t.user).fetch_optional(&state.db).await?;
@@ -352,7 +365,7 @@ fn stamp(t: DateTime<Utc>) -> String {
 async fn check_file_info(State(state): State<AppState>, Path(id): Path<Uuid>, Query(q): Query<TokenQuery>) -> AppResult<Json<Value>> {
     let t = verify(&state, q.token()?, id).await?;
     let (auth, name) = person(&state, &t).await?;
-    let mut f = crate::drive::office_file(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
+    let (mut f, _) = target(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
     // From a link: as the visitor, editing only when the link allows it.
     let (user_id, name) = match &t.link {
         Some((link, can_edit, visitor)) => {
@@ -382,7 +395,7 @@ async fn check_file_info(State(state): State<AppState>, Path(id): Path<Uuid>, Qu
 async fn get_file(State(state): State<AppState>, Path(id): Path<Uuid>, Query(q): Query<TokenQuery>) -> AppResult<Response> {
     let t = verify(&state, q.token()?, id).await?;
     let (auth, _) = person(&state, &t).await?;
-    let f = crate::drive::office_file(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
+    let (f, _) = target(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
     let (_, _, _, bytes) = crate::routes::files::read_bytes(&state, f.file_id).await?;
     let mut r = bytes.into_response();
     r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
@@ -395,7 +408,7 @@ async fn get_file(State(state): State<AppState>, Path(id): Path<Uuid>, Query(q):
 async fn put_file(State(state): State<AppState>, Path(id): Path<Uuid>, Query(q): Query<TokenQuery>, headers: HeaderMap, body: Bytes) -> AppResult<Response> {
     let t = verify(&state, q.token()?, id).await?;
     let (auth, _) = person(&state, &t).await?;
-    let f = crate::drive::office_file(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
+    let (f, attachment) = target(&state, &auth, t.node).await.map_err(|_| AppError::Unauthorized)?;
     if !f.can_edit || t.link.as_ref().is_some_and(|l| !l.1) {
         return Err(AppError::Forbidden);
     }
@@ -405,7 +418,7 @@ async fn put_file(State(state): State<AppState>, Path(id): Path<Uuid>, Query(q):
             return Ok((StatusCode::CONFLICT, Json(json!({ "COOLStatusCode": 1010 }))).into_response());
         }
     }
-    let (v, at) = crate::drive::save_version(&state, &auth, t.node, &body).await?;
+    let (v, at) = if attachment { crate::attachments::save(&state, &auth, t.node, &body).await? } else { crate::drive::save_version(&state, &auth, t.node, &body).await? };
     let mut r = Json(json!({ "LastModifiedTime": stamp(at) })).into_response();
     r.headers_mut().insert("X-WOPI-ItemVersion", HeaderValue::from_str(&v.to_string()).unwrap());
     Ok(r)

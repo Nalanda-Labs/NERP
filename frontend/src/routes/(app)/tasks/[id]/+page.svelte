@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { office } from '#lib/office.svelte.ts';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
@@ -570,6 +571,7 @@
 							<li class="group flex items-center gap-3 px-5 py-2.5 text-sm">
 								<Icon name="file" class="size-4 text-slate-400" />
 								<button class="flex-1 truncate text-left font-medium text-slate-700 hover:text-brand-600" onclick={() => downloadFile(f.id, f.original_name).catch((e) => toasts.error(e))}>{f.original_name}</button>
+								{#if office.opens(f.original_name)}<a class="text-xs font-medium text-brand-600 hover:underline" href="/files/edit/{f.id}" data-edit-attachment={f.original_name}>Edit</a>{/if}
 								<span class="text-xs text-slate-400">{formatBytes(f.size_bytes)}</span>
 								{#if task.access.edit || f.added_by === session.user?.id}
 									<button class="invisible text-slate-300 group-hover:visible hover:text-red-500" aria-label="Remove file" onclick={() => detach(f.id)}><Icon name="x" class="size-4" /></button>

@@ -1250,6 +1250,12 @@ Under Drive in the sidebar (My uploads still lists every file you have uploaded 
   they and every version are deleted for good, or sooner with "Delete for good".
 - Editing office documents in the browser needs a document server (e.g. Collabora Online,
   self-hosted); it is not built in.
+- **Attachments too:** Word, Excel and PowerPoint files attached to a task, a chat message or
+  a feed post have an *Edit* link that opens them in the same editor, co-edited by the task's
+  creator, responsible person and co-workers, the chat's members or the post's readers
+  (watchers and other readers only read). A save updates the attachment in place, so every
+  task, message and post showing it shows the new content, and the earlier content is kept as
+  a version.
 
 ## Accounting
 
