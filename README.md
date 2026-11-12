@@ -1149,6 +1149,18 @@ configured, not built in for one country, and there are no country-specific retu
 - Not included: payroll, fixed-asset depreciation schedules, inventory valuation postings,
   budgets, and country-specific tax returns.
 
+- **Cash forecast** (Accounting → Cash forecast): the money expected in and out week by week
+  (4 to 52 weeks) and the bank balance it leads to, starting from the bank and cash accounts.
+  - **In:** open invoices in the books (what is still owed), on the due date plus how late that
+    client usually pays (learned from its paid invoices; else everyone's); CRM invoices not in
+    the books yet the same way; open deals — what isn't invoiced yet × the deal's probability
+    (else how often its pipeline won over the last year) — on the close date plus how long
+    that client takes to pay an invoice (else 30 days). Overdue money lands in the first week.
+  - **Out:** open bills (what is still owed) on their due date.
+  - The balance three ways: likely (deals weighted), at best (deals in full), invoices only;
+    the lowest point and the first week it would go below zero. Each week opens to show what
+    makes it up; deals without a close date are listed apart.
+
 ## Workgroups and projects
 
 Under Workgroups in the sidebar. A **workgroup** is an ongoing team space; a **project** is the

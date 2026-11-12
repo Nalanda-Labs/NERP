@@ -12,6 +12,7 @@
 
 pub mod bank;
 pub mod bills;
+pub mod forecast;
 pub mod invoices;
 pub mod ledger;
 pub mod payments;
@@ -58,6 +59,7 @@ pub fn router() -> Router<AppState> {
         .merge(payments::router())
         .merge(bank::router())
         .merge(reports::router())
+        .merge(forecast::router())
 }
 
 // ---------------------------------------------------------------------------
