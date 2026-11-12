@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use super::{adjust, require, Reason};
+use super::{adjust, adjust_costed, require, Reason};
 use crate::{
     auth::AuthUser,
     error::{AppError, AppResult},
@@ -358,6 +358,8 @@ struct Line {
     product_id: Uuid,
     quantity: Decimal,
     applied: Option<Decimal>,
+    /// Receipts: the price per unit in the base currency.
+    base_price: Option<Decimal>,
 }
 
 async fn head_and_lines(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: Uuid) -> AppResult<(Head, Vec<Line>)> {
@@ -366,7 +368,11 @@ async fn head_and_lines(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: Uuid
         .fetch_optional(&mut **tx)
         .await?
         .ok_or(AppError::NotFound("document"))?;
-    let lines: Vec<Line> = sqlx::query_as("SELECT id, product_id, quantity, applied FROM inv_document_lines WHERE document_id = $1 ORDER BY sort")
+    let lines: Vec<Line> = sqlx::query_as(
+        "SELECT l.id, l.product_id, l.quantity, l.applied,
+                l.price * COALESCE((SELECT c.rate FROM crm_currencies c WHERE c.code = d.currency), 1) AS base_price
+         FROM inv_document_lines l JOIN inv_documents d ON d.id = l.document_id WHERE l.document_id = $1 ORDER BY l.sort",
+    )
         .bind(id)
         .fetch_all(&mut **tx)
         .await?;
@@ -390,7 +396,7 @@ async fn post_document(State(state): State<AppState>, auth: AuthUser, Path(id): 
         "receipt" => {
             let to = need(h.to_warehouse, "arrive in")?;
             for l in &lines {
-                adjust(&mut tx, l.product_id, to, l.quantity, false, why()).await?;
+                adjust_costed(&mut tx, l.product_id, to, l.quantity, false, why(), l.base_price).await?;
             }
         }
         "writeoff" => {
@@ -406,8 +412,9 @@ async fn post_document(State(state): State<AppState>, auth: AuthUser, Path(id): 
                 return Err(AppError::bad("a transfer goes between two different warehouses"));
             }
             for l in &lines {
-                adjust(&mut tx, l.product_id, from, -l.quantity, false, why()).await?;
-                adjust(&mut tx, l.product_id, to, l.quantity, false, why()).await?;
+                // The goods keep the cost they left with.
+                let (_, out) = adjust_costed(&mut tx, l.product_id, from, -l.quantity, false, why(), None).await?;
+                adjust_costed(&mut tx, l.product_id, to, l.quantity, false, why(), Some(-out / l.quantity)).await?;
             }
         }
         _ => {
@@ -454,11 +461,18 @@ async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
                 adjust(&mut tx, l.product_id, h.to_warehouse.unwrap(), -l.quantity, false, why()).await?;
             }
             "writeoff" => {
-                adjust(&mut tx, l.product_id, h.from_warehouse.unwrap(), l.quantity, false, why()).await?;
+                // Back at the cost it was written off at.
+                let unit: Option<Decimal> = sqlx::query_scalar("SELECT unit_cost FROM inv_movements WHERE document_id = $1 AND product_id = $2 AND delta < 0 ORDER BY created_at DESC LIMIT 1")
+                    .bind(id)
+                    .bind(l.product_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .flatten();
+                adjust_costed(&mut tx, l.product_id, h.from_warehouse.unwrap(), l.quantity, false, why(), unit).await?;
             }
             "transfer" => {
-                adjust(&mut tx, l.product_id, h.to_warehouse.unwrap(), -l.quantity, false, why()).await?;
-                adjust(&mut tx, l.product_id, h.from_warehouse.unwrap(), l.quantity, false, why()).await?;
+                let (_, out) = adjust_costed(&mut tx, l.product_id, h.to_warehouse.unwrap(), -l.quantity, false, why(), None).await?;
+                adjust_costed(&mut tx, l.product_id, h.from_warehouse.unwrap(), l.quantity, false, why(), Some(-out / l.quantity)).await?;
             }
             _ => {
                 if let Some(a) = l.applied.filter(|a| *a != Decimal::ZERO) {

@@ -38,7 +38,7 @@
 		unit: string;
 		total: string | null;
 		warehouses: { id: string; name: string; quantity: string }[];
-		movements: { id: string; warehouse: string; delta: string; balance: string; reason: string; document_id: string | null; document_number: string | null; item_id: string | null; item_number: number | null; item_code: string | null; user_name: string | null; created_at: string }[];
+		movements: { id: string; warehouse: string; delta: string; balance: string; reason: string; document_id: string | null; document_number: string | null; item_id: string | null; item_number: number | null; item_code: string | null; user_name: string | null; unit_cost: string | null; cost: string | null; created_at: string }[];
 	};
 	let history = $state<History | null>(null);
 	let historyOpen = $state(false);
@@ -114,7 +114,7 @@
 		</div>
 		<div class="max-h-96 overflow-y-auto">
 			<table class="w-full text-sm" aria-label="Movements">
-				<thead class="text-left text-xs text-slate-500"><tr><th class="py-2">When</th><th>What</th><th>Warehouse</th><th class="text-right">Change</th><th class="text-right">Then</th></tr></thead>
+				<thead class="text-left text-xs text-slate-500"><tr><th class="py-2">When</th><th>What</th><th>Warehouse</th><th class="text-right">Change</th><th class="text-right">Then</th><th class="text-right">Cost</th></tr></thead>
 				<tbody class="divide-y divide-slate-50">
 					{#each history.movements as m (m.id)}
 						<tr data-movement={m.reason}>
@@ -128,9 +128,10 @@
 							<td class="pr-3 text-slate-600">{m.warehouse}</td>
 							<td class="text-right tabular-nums {Number(m.delta) < 0 ? 'text-red-700' : 'text-emerald-700'}">{Number(m.delta) > 0 ? '+' : ''}{qty(m.delta)}</td>
 							<td class="text-right text-slate-600 tabular-nums">{qty(m.balance)}</td>
+							<td class="text-right text-slate-600 tabular-nums" data-cost title={m.unit_cost ? `${Number(m.unit_cost).toLocaleString()} each` : ''}>{m.cost != null ? Number(m.cost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : ''}</td>
 						</tr>
 					{:else}
-						<tr><td colspan="5" class="py-6 text-center text-slate-500">No movements yet.</td></tr>
+						<tr><td colspan="6" class="py-6 text-center text-slate-500">No movements yet.</td></tr>
 					{/each}
 				</tbody>
 			</table>

@@ -434,6 +434,15 @@ async fn save_product(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: Pr
 /// A unit's cost of a catalogue product in `currency`: its cost price, or else the average
 /// purchase price of its posted receipts. None when neither is known.
 pub(crate) async fn unit_cost(state: &AppState, product: Uuid, currency: &str) -> AppResult<Option<Decimal>> {
+    // Products whose stock is counted cost what the stock costs (FIFO or average).
+    if let Some(c) = crate::inventory::costing::current_unit_cost(state, product).await? {
+        let base = base_currency(state).await?;
+        if base == currency {
+            return Ok(Some(round4(c)));
+        }
+        let rt = rate_of(state, currency).await?;
+        return Ok(rt.filter(|r| !r.is_zero()).map(|r| round4(c / r)));
+    }
     let own: Option<(Option<Decimal>, String)> = sqlx::query_as("SELECT cost, currency FROM crm_products WHERE id = $1").bind(product).fetch_optional(&state.db).await?;
     let (amount, from) = match own {
         Some((Some(c), cur)) => (c, cur),

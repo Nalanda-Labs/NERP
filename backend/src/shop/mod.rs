@@ -354,7 +354,9 @@ async fn stage_changed(state: &AppState, item: Uuid) -> AppResult<()> {
         for (product, q) in rows {
             let (delta, kind) = if cancelled { (q, "order_cancelled") } else { (-q, "order_reopened") };
             // Reopening an order whose goods were sold meanwhile may leave the shelf short.
-            crate::inventory::adjust(&mut tx, product, warehouse, delta, true, crate::inventory::Reason { kind, document: None, item: Some(item), user: None }).await?;
+            // Goods coming back come back at the cost they went out with.
+            let unit = if delta > Decimal::ZERO { crate::inventory::costing::order_out_cost(&mut tx, product, item).await? } else { None };
+            crate::inventory::adjust_costed(&mut tx, product, warehouse, delta, true, crate::inventory::Reason { kind, document: None, item: Some(item), user: None }, unit).await?;
         }
     }
     tx.commit().await?;
