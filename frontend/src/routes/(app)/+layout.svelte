@@ -251,6 +251,7 @@
 				{ href: '/accounting/banking', label: 'Banking', icon: 'building', perm: PERM.ACCOUNTING_VIEW, orPerm: PERM.ACCOUNTING_POST },
 				{ href: '/accounting/journal', label: 'Journal', icon: 'list', perm: PERM.ACCOUNTING_VIEW, orPerm: PERM.ACCOUNTING_POST },
 				{ href: '/accounting/reports', label: 'Reports', icon: 'gantt', perm: PERM.ACCOUNTING_VIEW, orPerm: PERM.ACCOUNTING_POST },
+				{ href: '/accounting/forecast', label: 'Cash forecast', icon: 'columns', perm: PERM.ACCOUNTING_VIEW, orPerm: PERM.ACCOUNTING_POST },
 				{ href: '/accounting/accounts', label: 'Chart of accounts', icon: 'structure', perm: PERM.ACCOUNTING_VIEW, orPerm: PERM.ACCOUNTING_POST },
 				{ href: '/accounting/settings', label: 'Accounting settings', icon: 'settings', perm: PERM.ACCOUNTING_ADMIN }
 			]
