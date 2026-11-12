@@ -8,10 +8,41 @@
 	import { session } from '#lib/session.svelte.ts';
 	import { PERM } from '#lib/types.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
+	import { page } from '$app/state';
 
 	type Deal = { id: string; title: string; stage: string | null; assigned_name: string | null; amount: string; score: number; grade: 'healthy' | 'at_risk' | 'poor'; reasons: { kind: string; penalty: number; text: string }[] };
 	type Silent = { id: string; name: string; link: string; responsible_name: string | null; orders: number; usual_gap_days: number; last_order_at: string; days_since: number; expected_by: string; task_id: string | null };
-	let tab = $state<'health' | 'silent'>('health');
+	let tab = $state<'health' | 'silent' | 'attention'>(page.url.searchParams.get('tab') === 'attention' ? 'attention' : page.url.searchParams.get('tab') === 'silent' ? 'silent' : 'health');
+	type Need = { id: string; type: string; type_name: string; title: string; stage: string | null; link: string; reasons: { kind: string; text: string }[] };
+	let needs = $state<Need[]>([]);
+	let att = $state({ attention_digest: true, attention_email: false, reply_hours: 24 });
+	async function loadAttention() {
+		try {
+			needs = (await api.get<{ items: Need[] }>('/crm/attention')).items;
+			const s = await api.get<typeof att & { silent_tasks: boolean }>('/crm/insights/settings');
+			att = { attention_digest: s.attention_digest, attention_email: s.attention_email, reply_hours: s.reply_hours };
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
+	async function saveAttention() {
+		try {
+			const s = await api.put<typeof att>('/crm/insights/settings', { ...att, reply_hours: Number(att.reply_hours) });
+			att = { attention_digest: s.attention_digest, attention_email: s.attention_email, reply_hours: s.reply_hours };
+			toasts.success('Saved');
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
+	async function sendNow() {
+		try {
+			await api.post('/crm/attention/send-now', {});
+			toasts.success('Summaries sent');
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
+	const KIND_COLOR: Record<string, string> = { unanswered: 'bg-red-50 text-red-800', overdue: 'bg-red-50 text-red-800', stage_time: 'bg-amber-50 text-amber-800', close_date: 'bg-amber-50 text-amber-800', nothing_planned: 'bg-slate-100 text-slate-700' };
 	let deals = $state<Deal[]>([]);
 	let counts = $state({ healthy: 0, at_risk: 0, poor: 0 });
 	let grade = $state('');
@@ -47,7 +78,9 @@
 	}
 	onMount(async () => {
 		await crm.load();
-		await loadDeals();
+		if (tab === 'attention') await loadAttention();
+		else if (tab === 'silent') await loadSilent();
+		else await loadDeals();
 	});
 	async function toggleTasks() {
 		try {
@@ -66,13 +99,33 @@
 	<div class="flex flex-wrap items-center gap-3">
 		<h1 class="text-2xl font-semibold text-slate-900">Insights</h1>
 		<div class="flex gap-1" role="tablist">
-			{#each [['health', 'Deal health'], ['silent', 'Silent clients']] as [k, l] (k)}
-				<button role="tab" aria-selected={tab === k} class="rounded-full px-3 py-1.5 text-sm font-medium {tab === k ? 'bg-slate-900 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-100'}" onclick={() => ((tab = k as typeof tab), k === 'silent' ? loadSilent() : loadDeals())} data-tab={k}>{l}</button>
+			{#each [['attention', 'Needs attention'], ['health', 'Deal health'], ['silent', 'Silent clients']] as [k, l] (k)}
+				<button role="tab" aria-selected={tab === k} class="rounded-full px-3 py-1.5 text-sm font-medium {tab === k ? 'bg-slate-900 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200 hover:bg-slate-100'}" onclick={() => ((tab = k as typeof tab), k === 'silent' ? loadSilent() : k === 'attention' ? loadAttention() : loadDeals())} data-tab={k}>{l}</button>
 			{/each}
 		</div>
 	</div>
 
-	{#if tab === 'health'}
+	{#if tab === 'attention'}
+		<p class="text-sm text-slate-500">Your open deals and leads that need you: an overdue activity, nothing planned, a client's email waiting for an answer, a close date passed or a stage's time limit exceeded. Every morning a summary of these arrives as a notification.</p>
+		<section class="card divide-y divide-slate-50" aria-label="Needs attention">
+			{#each needs as n (n.id)}
+				<div class="flex flex-wrap items-start gap-3 px-5 py-3 text-sm" data-need={n.title}>
+					<div class="min-w-0 flex-1">
+						<p><a class="font-medium text-brand-700 hover:underline" href={n.link}>{n.title}</a> <span class="text-xs text-slate-500">{n.type_name}{n.stage ? ` · ${n.stage}` : ''}</span></p>
+						<div class="mt-1 flex flex-wrap gap-1">{#each n.reasons as r (r.kind)}<span class="rounded-full px-2 py-0.5 text-xs {KIND_COLOR[r.kind] ?? 'bg-slate-100'}" data-reason={r.kind}>{r.text}</span>{/each}</div>
+					</div>
+				</div>
+			{:else}<p class="px-5 py-4 text-sm text-slate-500">Nothing needs you right now.</p>{/each}
+		</section>
+		{#if isAdmin}
+			<section class="card flex flex-wrap items-center gap-4 p-4 text-sm" aria-label="Morning summary">
+				<label class="flex items-center gap-2"><input type="checkbox" bind:checked={att.attention_digest} onchange={saveAttention} data-attention-digest /> Morning summary</label>
+				<label class="flex items-center gap-2"><input type="checkbox" bind:checked={att.attention_email} onchange={saveAttention} /> Also by email</label>
+				<label class="flex items-center gap-2">A client's email waits <input class="input w-20" type="number" min="1" max="720" bind:value={att.reply_hours} onchange={saveAttention} aria-label="Hours" /> hours before it counts</label>
+				<button class="btn btn-secondary ml-auto" onclick={sendNow}>Send today's summaries now</button>
+			</section>
+		{/if}
+	{:else if tab === 'health'}
 		<p class="text-sm text-slate-500">Each open deal from 100 down, against how the pipeline's won deals went: contact, pace through the stage, people involved, unanswered emails, dates and next steps, and how the client pays.</p>
 		<div class="flex flex-wrap items-center gap-2">
 			{#each [['', `All (${counts.healthy + counts.at_risk + counts.poor})`], ['poor', `Poor (${counts.poor})`], ['at_risk', `At risk (${counts.at_risk})`], ['healthy', `Healthy (${counts.healthy})`]] as [g, l] (g)}

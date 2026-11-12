@@ -435,21 +435,37 @@ pub async fn run_silent(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn get_settings(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
-    let on: bool = sqlx::query_scalar("SELECT silent_tasks FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
-    Ok(Json(json!({ "silent_tasks": on })))
+    let (on, digest, email, hours): (bool, bool, bool, i32) =
+        sqlx::query_as("SELECT silent_tasks, attention_digest, attention_email, reply_hours FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
+    Ok(Json(json!({ "silent_tasks": on, "attention_digest": digest, "attention_email": email, "reply_hours": hours })))
 }
 
 #[derive(Deserialize)]
 struct SettingsInput {
-    silent_tasks: bool,
+    silent_tasks: Option<bool>,
+    attention_digest: Option<bool>,
+    attention_email: Option<bool>,
+    reply_hours: Option<i32>,
 }
 
 async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Json<SettingsInput>) -> AppResult<Json<Value>> {
     if !auth.can(perm::CRM_ADMIN) {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("UPDATE crm_insight_settings SET silent_tasks = $1 WHERE id = 1").bind(b.silent_tasks).execute(&state.db).await?;
-    if b.silent_tasks {
+    if b.reply_hours.is_some_and(|h| !(1..=720).contains(&h)) {
+        return Err(AppError::bad("an answer is due within 1 to 720 hours"));
+    }
+    sqlx::query(
+        "UPDATE crm_insight_settings SET silent_tasks = COALESCE($1, silent_tasks), attention_digest = COALESCE($2, attention_digest),
+                attention_email = COALESCE($3, attention_email), reply_hours = COALESCE($4, reply_hours) WHERE id = 1",
+    )
+    .bind(b.silent_tasks)
+    .bind(b.attention_digest)
+    .bind(b.attention_email)
+    .bind(b.reply_hours)
+    .execute(&state.db)
+    .await?;
+    if b.silent_tasks == Some(true) {
         crate::jobs::enqueue(&state.db, SILENT_JOB, json!({}), None).await?;
         state.job_wakeup.notify_one();
     }

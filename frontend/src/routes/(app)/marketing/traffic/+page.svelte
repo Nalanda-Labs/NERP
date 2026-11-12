@@ -14,7 +14,7 @@
 	import { toasts } from '#lib/toast.svelte.ts';
 
 	type Row = { key: string; visits: number; visitors: number; new_visitors: number; records: number; deals: number; won: number; revenue: string; spend: string; conversion: number | null; cost_per_record: string | null; roi: string | null };
-	type Report = { by: 'channel' | 'source'; base_currency: string; rows: Row[]; total: Row };
+	type Report = { by: 'channel' | 'source' | 'campaign' | 'landing'; base_currency: string; rows: Row[]; total: Row };
 	type Site = { id: string; name: string; domains: string[]; key: string; is_active: boolean; snippet: string; visits_30d: number };
 	type Link = { id: string; code: string; name: string; target_url: string; source: string; kind: string; clicks: number; visits: number; visitors: number; records: number; short_url: string; is_active: boolean };
 	type Spend = { source: string; month: string; amount: string; currency: string; amount_base: string; note: string | null };
@@ -35,7 +35,7 @@
 	const now = new Date();
 	let from = $state(iso(new Date(now.getFullYear(), now.getMonth(), 1)));
 	let to = $state(iso(now));
-	let by = $state<'channel' | 'source'>('channel');
+	let by = $state<'channel' | 'source' | 'campaign' | 'landing'>('channel');
 	let siteFilter = $state('');
 	let report = $state<Report | null>(null);
 	async function loadReport() {
@@ -162,7 +162,7 @@
 				<select id="t-site" class="input w-48" bind:value={siteFilter} onchange={loadReport}><option value="">All websites</option>{#each sites as s (s.id)}<option value={s.id}>{s.name}</option>{/each}</select>
 			</div>
 			<div class="ml-auto flex rounded-full bg-slate-100 p-0.5 text-xs" role="tablist" aria-label="Group by">
-				{#each [['channel', 'Channels'], ['source', 'Sources']] as const as [k, l] (k)}
+				{#each [['channel', 'Channels'], ['source', 'Sources'], ['campaign', 'Campaigns'], ['landing', 'Landing pages']] as const as [k, l] (k)}
 					<button role="tab" aria-selected={by === k} class="rounded-full px-3 py-1 {by === k ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-600'}" onclick={() => ((by = k), loadReport())}>{l}</button>
 				{/each}
 			</div>
@@ -173,7 +173,7 @@
 				<table class="min-w-full text-sm tabular-nums">
 					<thead class="text-left text-xs text-slate-500">
 						<tr>
-							<th class="px-4 py-2 font-medium">{by === 'channel' ? 'Channel' : 'Source'}</th>
+							<th class="px-4 py-2 font-medium">{by === 'channel' ? 'Channel' : by === 'source' ? 'Source' : by === 'campaign' ? 'Campaign' : 'Landing page'}</th>
 							<th class="px-3 py-2 text-right font-medium">Visits</th><th class="px-3 py-2 text-right font-medium">Visitors</th><th class="px-3 py-2 text-right font-medium">New</th>
 							<th class="px-3 py-2 text-right font-medium" title="CRM records made by visitors who first came this way">Records</th><th class="px-3 py-2 text-right font-medium">Conversion</th>
 							<th class="px-3 py-2 text-right font-medium">Deals</th><th class="px-3 py-2 text-right font-medium">Won</th><th class="px-3 py-2 text-right font-medium">Revenue</th>

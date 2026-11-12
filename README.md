@@ -414,6 +414,15 @@ them (`GET /crm/{type}/match`):
 
 Other record types keep the same-type check by phone, email and exact name.
 
+#### Needs attention (proactive CRM)
+
+Insights → **Needs attention** lists your open deals and leads that need you, most pressing
+first: a client's email waiting for an answer (longer than the set hours, 24 by default), an
+overdue activity, a stage's time limit exceeded, a close date passed, nothing planned. Heads
+see their team's, CRM administrators anyone's. Every morning at 8:00 (company time) each
+person gets one notification summing theirs up — and an email too if CRM administrators turn
+it on; they can also send today's summaries at once.
+
 #### Everything about a client
 
 A contact's or company's page shows **Everything**: the client's history across every module,
@@ -1105,9 +1114,10 @@ Shown in the sidebar to people with the "Run marketing" permission.
     card on the record (and, for a deal, its contacts' and company's) with every visit,
     where it came from and the pages seen, then the record's own milestones (made, stages,
     won or lost).
-  - **Analysis:** for a period and website, visits, visitors and new visitors by channel or
-    by source, and what visitors who first came that way became: CRM records, deals opened,
-    deals won and revenue, against the spend entered — conversion, cost per record and ROI.
+  - **Analysis:** for a period and website, visits, visitors and new visitors by channel, by
+    source, by campaign (`utm_campaign`) or by landing page (its path), and what visitors who
+    first came that way became: CRM records, deals opened, deals won and revenue — against the
+    spend entered (by channel or source): conversion, cost per record and ROI.
   - **Ad links:** short links (`/go/<code>`) and QR codes for posters, print, radio or events.
     They send people on to a page with UTM tags and count clicks (once an hour per address);
     visits through them count as offline ads for the link's source.
