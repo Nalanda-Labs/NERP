@@ -44,6 +44,11 @@ try {
   ok('pages of other host names are dropped', rep.total.visits === 3 && rep.total.visitors === 2, rep.total);
   rep = (await admin.get(`/tracking/report?from=${day}&to=${day}&site_id=${siteId}&by=source`)).data;
   ok('by source', rep.rows.some((x: any) => x.key === 'google.com') && rep.rows.some((x: any) => x.key === 'google ads') && rep.rows.some((x: any) => x.key === 'newsletter'), rep.rows);
+  rep = (await admin.get(`/tracking/report?from=${day}&to=${day}&site_id=${siteId}&by=campaign`)).data;
+  ok('by campaign', rep.by === 'campaign' && rep.rows.some((x: any) => x.key === `nov-${stamp}` && x.visits === 1) && rep.rows.some((x: any) => x.key === '(none)' && x.visits === 2), rep.rows);
+  rep = (await admin.get(`/tracking/report?from=${day}&to=${day}&site_id=${siteId}&by=landing`)).data;
+  ok('by landing page (without the query)', rep.rows.some((x: any) => x.key === '/' && x.visits === 3), rep.rows);
+  ok('only known groupings', (await admin.get(`/tracking/report?by=nope`)).status === 400);
 
   // ---- a web form sent by the first visitor ----
   const form = (await admin.post('/crm/webforms', { name: `Track form ${stamp}`, entity_type: 1, responsible: [samUser.id], fields: [{ label: 'Name', kind: 'text', required: true, maps_to: 'first_name' }, { label: 'Email', kind: 'email', required: true, maps_to: 'email' }] })).data;

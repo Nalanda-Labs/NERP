@@ -683,16 +683,20 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     if to < from || (to - from).num_days() > 3 * 366 {
         return Err(AppError::bad("choose a period of up to three years"));
     }
-    let by_source = match q.by.as_deref().unwrap_or("channel") {
-        "channel" => false,
-        "source" => true,
-        _ => return Err(AppError::bad("by must be channel or source")),
+    // What the rows are: the channel, the source, the campaign (utm_campaign) or the landing page
+    // (its path, whatever the host name and query).
+    let by = q.by.as_deref().unwrap_or("channel");
+    let col = match by {
+        "channel" => "v.channel",
+        "source" => "v.source",
+        "campaign" => "COALESCE(NULLIF(v.utm->>'campaign', ''), '(none)')",
+        "landing" => "COALESCE(NULLIF(regexp_replace(split_part(split_part(v.landing, '?', 1), '#', 1), '^[a-z]+://[^/]+', ''), ''), '/')",
+        _ => return Err(AppError::bad("by must be channel, source, campaign or landing")),
     };
-    let col = if by_source { "source" } else { "channel" };
     let (start, end) = (from.and_hms_opt(0, 0, 0).unwrap().and_utc(), (to + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap().and_utc());
 
     let traffic: Vec<(String, i64, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT v.{col}, COUNT(*), COUNT(DISTINCT v.visitor_id), COUNT(DISTINCT v.visitor_id) FILTER (WHERE tv.first_seen >= $1)
+        "SELECT {col}, COUNT(*), COUNT(DISTINCT v.visitor_id), COUNT(DISTINCT v.visitor_id) FILTER (WHERE tv.first_seen >= $1)
          FROM track_visits v JOIN track_visitors tv ON tv.id = v.visitor_id
          WHERE v.started_at >= $1 AND v.started_at < $2 AND ($3::uuid IS NULL OR v.site_id = $3) GROUP BY 1"
     )))
@@ -706,7 +710,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     // record itself, or deals of the contact or company it is).
     let outcomes: Vec<(String, i64, i64, i64, Decimal)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "WITH first AS (
-             SELECT DISTINCT ON (v.visitor_id) v.visitor_id, v.{col} AS k FROM track_visits v
+             SELECT DISTINCT ON (v.visitor_id) v.visitor_id, {col} AS k FROM track_visits v
              WHERE ($3::uuid IS NULL OR v.site_id = $3) ORDER BY v.visitor_id, v.started_at),
          linked AS (
              SELECT f.k, tv.item_id FROM first f JOIN track_visitors tv ON tv.id = f.visitor_id WHERE tv.item_id IS NOT NULL),
@@ -750,7 +754,8 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
         r.won = won;
         r.revenue = revenue;
     }
-    for (k, amount) in spend {
+    // Spend is entered per source: it has no place among campaigns or pages.
+    for (k, amount) in spend.into_iter().filter(|_| by == "channel" || by == "source") {
         let r = rows.entry(k.clone()).or_insert_with(|| Row { key: k, ..Default::default() });
         r.spend = amount;
     }
@@ -798,7 +803,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     .await?;
     Ok(Json(json!({
         "period": { "from": from, "to": to },
-        "by": col,
+        "by": by,
         "base_currency": crate::crm::money::base_currency(&state).await?,
         "rows": list.iter().map(row_json).collect::<Vec<_>>(),
         "total": row_json(&total),

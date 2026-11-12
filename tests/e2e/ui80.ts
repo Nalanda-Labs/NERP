@@ -51,6 +51,14 @@ try {
     await pa.locator('[data-silent-tasks]').waitFor();
   });
 
+  await step('needs attention: the shaky deal, with why', async () => {
+    await pa.goto(`${B}/crm/insights?tab=attention`);
+    const row = pa.locator(`[data-need="Shaky ${s}"]`);
+    await row.waitFor();
+    await row.locator('[data-reason="close_date"]').waitFor();
+    await row.locator('[data-reason="nothing_planned"]').waitFor();
+  });
+
   await step('no browser errors', async () => { if (errors.length) throw new Error(errors.join(' | ')); });
 } finally {
   await browser.close();
