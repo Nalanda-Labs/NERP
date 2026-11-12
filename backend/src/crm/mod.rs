@@ -19,6 +19,7 @@ mod profit;
 pub mod insights;
 pub mod promise;
 pub mod client_timeline;
+pub mod matching;
 pub(crate) use fields::custom_fields as fields_custom;
 pub(crate) mod items;
 pub(crate) mod money;
@@ -61,6 +62,7 @@ pub fn router() -> Router<AppState> {
         .merge(insights::router())
         .merge(promise::router())
         .merge(client_timeline::router())
+        .merge(matching::router())
         .merge(docs::api::router())
         .merge(requisites::router())
         .merge(automation::router())

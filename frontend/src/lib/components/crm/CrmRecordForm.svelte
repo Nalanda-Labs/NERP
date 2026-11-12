@@ -91,25 +91,40 @@
 
 	const category = $derived(type.categories.find((c) => c.id === f.category_id) ?? type.categories[0]);
 
-	// ----- duplicate warning -----
-	type Dup = { id: string; number: number; title: string; reason: string };
-	let dups = $state<{ items: Dup[]; hidden_count: number } | null>(null);
+	// ----- duplicate warning, while typing -----
+	type Dup = { id: string; number?: number; title: string; reason?: string; reasons?: string[]; type?: string; type_name?: string; same_type?: boolean; link?: string };
+	type Match = { items: Dup[]; hidden_count: number; senders?: { count: number; last_at: string | null; last_subject: string | null }; chats?: { count: number; last_at: string | null } };
+	let dups = $state<Match | null>(null);
+	let adopt = $state(true);
 	let dupTimer: ReturnType<typeof setTimeout>;
+	const crossType = $derived(['lead', 'contact', 'company'].includes(type.code));
 	$effect(() => {
 		if (type.code === 'deal') return;
 		const phones = multifields.filter((m) => m.kind === 'phone' && m.value.trim()).map((m) => m.value).join(',');
 		const emails = multifields.filter((m) => m.kind === 'email' && m.value.trim()).map((m) => m.value).join(',');
-		const name =
-			type.code === 'company' ? f.company_name : type.code === 'contact' ? [f.first_name, f.middle_name, f.last_name].filter(Boolean).join(' ') : '';
+		const person = [f.first_name, f.middle_name, f.last_name].filter(Boolean).join(' ');
+		const name = type.code === 'company' ? f.company_name : type.code === 'contact' || type.code === 'lead' ? person : '';
+		const business = type.code === 'company' || type.code === 'lead' ? f.company_name : '';
 		clearTimeout(dupTimer);
-		if (!phones && !emails && name.trim().length < 3) {
+		if (!phones && !emails && name.trim().length < 3 && business.trim().length < 3) {
 			dups = null;
 			return;
 		}
 		dupTimer = setTimeout(async () => {
-			dups = await api.get<{ items: Dup[]; hidden_count: number }>(`/crm/${type.code}/duplicates` + query({ phones, emails, name, exclude: item?.id })).catch(() => null);
+			if (crossType) {
+				const r = await api
+					.get<{ records: Dup[]; hidden_count: number; senders: Match['senders']; chats: Match['chats'] }>(
+						`/crm/${type.code}/match` + query({ phones, emails, name: type.code === 'company' ? '' : name, company: business, exclude: item?.id })
+					)
+					.catch(() => null);
+				dups = r ? { items: r.records, hidden_count: r.hidden_count, senders: r.senders, chats: r.chats } : null;
+			} else {
+				dups = await api.get<Match>(`/crm/${type.code}/duplicates` + query({ phones, emails, name, exclude: item?.id })).catch(() => null);
+			}
 		}, 400);
 	});
+	const REASON: Record<string, string> = { phone: 'same phone', email: 'same email', name: 'same name', similar_name: 'similar name', company: 'same company', similar_company: 'similar company name' };
+	const history = $derived(isNew && dups ? (dups.senders?.count ?? 0) + (dups.chats?.count ?? 0) : 0);
 
 	function body(): Record<string, unknown> {
 		const b: Record<string, unknown> = {};
@@ -133,6 +148,7 @@
 		const ufClean: Record<string, unknown> = {};
 		for (const d of type.custom_fields) ufClean[d.code] = uf[d.code] === '' || uf[d.code] === undefined ? null : uf[d.code];
 		if (type.custom_fields.length) b.uf = ufClean;
+		if (isNew && crossType && adopt && history > 0) b.adopt_history = true;
 		return b;
 	}
 
@@ -194,14 +210,26 @@
 
 <form class="space-y-6" onsubmit={save}>
 	{#if dups && (dups.items.length || dups.hidden_count)}
-		<div class="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900">
-			<p class="font-medium">Possible duplicate{dups.items.length + dups.hidden_count > 1 ? 's' : ''}</p>
+		<div class="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900" data-dups>
+			<p class="font-medium">Already in the CRM?</p>
 			<ul class="mt-1 space-y-0.5">
 				{#each dups.items as d (d.id)}
-					<li><a class="underline" href={itemLink(type.code, d.id)} target="_blank">#{d.number} {d.title}</a> <span class="text-amber-700">· same {d.reason}</span></li>
+					<li data-dup={d.title}>
+						<a class="underline" href={d.link ?? itemLink(type.code, d.id)} target="_blank">{d.number ? `#${d.number} ` : ''}{d.title}</a>
+						{#if d.type_name && !d.same_type}<span class="rounded bg-amber-100 px-1 text-xs">{d.type_name}</span>{/if}
+						<span class="text-amber-700">· {(d.reasons ?? [d.reason ?? '']).map((x) => REASON[x] ?? `same ${x}`).join(', ')}</span>
+					</li>
 				{/each}
 				{#if dups.hidden_count}<li class="text-amber-700">…and {dups.hidden_count} you don't have access to</li>{/if}
 			</ul>
+		</div>
+	{/if}
+	{#if history > 0 && dups}
+		<div class="rounded-xl bg-sky-50 px-4 py-3 text-sm text-sky-900" data-history>
+			<p>
+				{#if dups.senders?.count}They emailed {dups.senders.count === 1 ? 'once' : `${dups.senders.count} times`}{dups.senders.last_subject ? ` (last: “${dups.senders.last_subject}”)` : ''}{/if}{#if dups.senders?.count && dups.chats?.count}, and {/if}{#if dups.chats?.count}{dups.senders?.count ? '' : 'They '}chatted on the site {dups.chats.count === 1 ? 'once' : `${dups.chats.count} times`}{/if}, but aren't in the CRM yet.
+			</p>
+			<label class="mt-1 flex items-center gap-2"><input type="checkbox" bind:checked={adopt} data-adopt /> Attach those to the new {type.name.toLowerCase()}</label>
 		</div>
 	{/if}
 

@@ -43,7 +43,7 @@ await step('create contact; duplicate warning; company picker', async () => {
   // second contact with same phone shows duplicate warning
   await page.goto(B + '/crm/contact/new');
   await page.click('text=+ Add phone'); await page.fill('input[type=tel]', '098765 43210');
-  await page.waitForSelector('text=Possible duplicate');
+  await page.waitForSelector('text=Already in the CRM?');
   await page.waitForSelector(`a:has-text("Peter Gibbons${s}")`);
 });
 let dealUrl;
