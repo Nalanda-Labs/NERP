@@ -86,8 +86,11 @@ try {
   ok('someone who worked yesterday without a report is reminded', reminded);
 
   // ---- My day ----
-  await ann.post('/tasks', { title: `Due today ${stamp}`, responsible_id: ann.id, deadline: new Date(Date.now() + 3600e3).toISOString() });
-  await ann.post('/calendar/events', { title: `Standup ${stamp}`, start: new Date(Date.now() + 1800e3).toISOString(), end: new Date(Date.now() + 2700e3).toISOString(), timezone: 'UTC' });
+  // Later today (UTC), however close to midnight the suite runs.
+  const now = Date.now(), endOfDay = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 1) - 1000;
+  const later = (part: number) => new Date(now + (endOfDay - now) * part).toISOString();
+  await ann.post('/tasks', { title: `Due today ${stamp}`, responsible_id: ann.id, deadline: later(0.9) });
+  await ann.post('/calendar/events', { title: `Standup ${stamp}`, start: later(0.3), end: later(0.6), timezone: 'UTC' });
   r = await ann.get('/hr/my-day');
   ok('My day: the work day, tasks due, today\'s events', r.data.workday.state === 'working' && r.data.tasks.some((t: any) => t.title === `Due today ${stamp}`) && r.data.events.some((e: any) => e.title === `Standup ${stamp}`), r.data);
   r = await ann.post('/hr/my-day/plan', { title: 'Call the bank' });

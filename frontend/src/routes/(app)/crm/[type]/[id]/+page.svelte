@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import { api } from '#lib/api.ts';
+	import { api, downloadFile } from '#lib/api.ts';
 	import Avatar from '#lib/components/Avatar.svelte';
 	import CrmRecordForm from '#lib/components/crm/CrmRecordForm.svelte';
 	import CardSections from '#lib/components/crm/CardSections.svelte';
@@ -21,13 +21,13 @@
 	import Modal from '#lib/components/Modal.svelte';
 	import UserPicker from '#lib/components/UserPicker.svelte';
 	import { cardLayout, crm, durationText, formatAddress, invoiceOverdue, itemLink, optionLabel, ufText, money, overLimit, type Activity, type CardLayoutInfo, type CrmDetail, type CrmType, typeName } from '#lib/crm.svelte.ts';
-	import { formatDateTime, formatRelative } from '#lib/format.ts';
+	import { formatBytes, formatDateTime, formatRelative } from '#lib/format.ts';
 	import { realtime } from '#lib/realtime.svelte.ts';
 	import { session } from '#lib/session.svelte.ts';
 	import { PERM } from '#lib/types.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
 
-	type Entry = { id: string; kind: string; author_id: string | null; author_name: string | null; author_avatar_file_id: string | null; body: string | null; data: Record<string, any>; is_pinned: boolean; created_at: string };
+	type Entry = { id: string; kind: string; author_id: string | null; author_name: string | null; author_avatar_file_id: string | null; body: string | null; data: Record<string, any>; is_pinned: boolean; files: { id: string; name: string; size: number; mime: string }[]; created_at: string };
 
 	const code = $derived(page.params.type!);
 	const id = $derived(page.params.id!);
@@ -228,11 +228,33 @@
 	let resp = $state<string | null>(null);
 	let respLabel = $state<string | null>(null);
 	let posting = $state(false);
+	// Files for the comment: uploaded as they are chosen, attached when it is posted.
+	let attached = $state<{ id: string; name: string }[]>([]);
+	let uploading = $state(false);
+	async function attach(e: Event) {
+		const input = e.target as HTMLInputElement;
+		uploading = true;
+		try {
+			for (const f of input.files ?? []) {
+				const fd = new FormData();
+				fd.append('file', f);
+				attached.push({ id: (await api.post<{ id: string }>('/files', fd)).id, name: f.name });
+			}
+		} catch (err) {
+			toasts.error(err);
+		} finally {
+			uploading = false;
+			input.value = '';
+		}
+	}
 	async function post() {
-		if (!text.trim()) return;
+		if (!text.trim() && !(mode === 'comment' && attached.length)) return;
 		posting = true;
 		try {
-			if (mode === 'comment') await api.post(`/crm/items/${id}/timeline`, { body: text });
+			if (mode === 'comment') {
+				await api.post(`/crm/items/${id}/timeline`, { body: text, file_ids: attached.map((f) => f.id) });
+				attached = [];
+			}
 			else
 				await api.post('/crm/activities', {
 					item_id: id,
@@ -614,7 +636,22 @@
 					</div>
 					{#if mode === 'call' && !when}<p class="mt-1 text-xs text-slate-500">Without a time, the call is logged as already done.</p>{/if}
 				{/if}
-				<div class="mt-2 flex justify-end"><button class="btn btn-primary" disabled={posting || !text.trim()} onclick={post}>{mode === 'comment' ? 'Post' : 'Save'}</button></div>
+				{#if mode === 'comment' && attached.length}
+					<ul class="mt-2 flex flex-wrap gap-2 text-xs" data-attached>
+						{#each attached as f, i (f.id)}
+							<li class="flex items-center gap-1 rounded bg-slate-100 px-2 py-1">{f.name}<button class="text-slate-500 hover:text-red-600" aria-label="Remove {f.name}" onclick={() => attached.splice(i, 1)}>×</button></li>
+						{/each}
+					</ul>
+				{/if}
+				<div class="mt-2 flex items-center justify-end gap-2">
+					{#if mode === 'comment'}
+						<label class="btn btn-ghost mr-auto cursor-pointer" title="Attach files">
+							<Icon name="upload" class="size-4" /> {uploading ? 'Uploading…' : 'Attach'}
+							<input type="file" class="sr-only" multiple onchange={attach} disabled={uploading} data-comment-files />
+						</label>
+					{/if}
+					<button class="btn btn-primary" disabled={posting || uploading || (!text.trim() && !(mode === 'comment' && attached.length))} onclick={post}>{mode === 'comment' ? 'Post' : 'Save'}</button>
+				</div>
 				{/if}
 			</section>
 
@@ -689,7 +726,14 @@
 									{#if e.kind !== 'comment'}<span class="text-slate-600"> {describe(e)}</span>{/if}
 									<span class="ml-1 text-xs text-slate-400" title={formatDateTime(e.created_at)}>{formatRelative(e.created_at)}</span>
 								</p>
-								{#if e.kind === 'comment'}<p class="mt-1 whitespace-pre-line text-slate-700">{e.body}</p>{/if}
+								{#if e.kind === 'comment' && e.body}<p class="mt-1 whitespace-pre-line text-slate-700">{e.body}</p>{/if}
+								{#if e.files?.length}
+									<ul class="mt-1 flex flex-wrap gap-2" data-entry-files>
+										{#each e.files as f (f.id)}
+											<li><button class="flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs text-brand-700 hover:bg-slate-50" onclick={() => downloadFile(f.id, f.name).catch(toasts.error)}><Icon name="file" class="size-3.5" />{f.name} <span class="text-slate-400">{formatBytes(f.size)}</span></button></li>
+										{/each}
+									</ul>
+								{/if}
 								{#if e.kind === 'edit'}
 									<ul class="mt-1 space-y-0.5 text-xs text-slate-600" data-history>
 										{#each e.data.changes as c (c.field)}

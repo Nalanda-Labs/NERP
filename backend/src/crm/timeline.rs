@@ -1,4 +1,5 @@
-//! Record timeline: system events (created, stage moves, conversions, …) and comments.
+//! Record timeline: system events (created, stage moves, conversions, …) and comments, which
+//! may carry files (people who can see the record can download them).
 
 use axum::{
     extract::{Path, Query, State},
@@ -11,7 +12,7 @@ use serde_json::{json, Value};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use super::{broadcast, items::load_row, timeline};
+use super::{broadcast, items::load_row};
 use crate::{
     auth::AuthUser,
     error::{AppError, AppResult},
@@ -35,6 +36,8 @@ struct Entry {
     body: Option<String>,
     data: Value,
     is_pinned: bool,
+    /// Attached files: [{ id, name, size, mime }].
+    files: Value,
     edited_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
 }
@@ -74,7 +77,10 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     let hidden = super::fields::hidden_codes(&state, &auth, t).await?;
     const SELECT: &str = "SELECT t.id, t.kind, t.author_id,
         CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS author_name,
-        u.avatar_file_id AS author_avatar_file_id, t.body, t.data, t.is_pinned, t.edited_at, t.created_at
+        u.avatar_file_id AS author_avatar_file_id, t.body, t.data, t.is_pinned,
+        (SELECT COALESCE(jsonb_agg(jsonb_build_object('id', f.id, 'name', f.original_name, 'size', f.size_bytes, 'mime', f.mime_type)
+                ORDER BY array_position(t.file_ids, f.id)), '[]'::jsonb) FROM files f WHERE f.id = ANY(t.file_ids)) AS files,
+        t.edited_at, t.created_at
         FROM crm_timeline t LEFT JOIN users u ON u.id = t.author_id WHERE t.item_id = $1";
     let pinned: Vec<Entry> = if q.before.is_none() {
         sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT} AND t.is_pinned ORDER BY t.created_at DESC")))
@@ -100,13 +106,31 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
 
 #[derive(Deserialize)]
 struct NewComment {
+    #[serde(default)]
     body: String,
+    /// Files the person uploaded (POST /files) to attach.
+    #[serde(default)]
+    file_ids: Vec<Uuid>,
 }
 
-async fn add_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<NewComment>) -> AppResult<Json<Value>> {
+async fn add_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(mut b): Json<NewComment>) -> AppResult<Json<Value>> {
     let (t, _) = readable(&state, &auth, id).await?;
-    let body = required("comment", &b.body, 20_000)?;
-    timeline(&state.db, id, "comment", Some(auth.id), Some(body.clone()), json!({})).await?;
+    b.file_ids.dedup();
+    if b.file_ids.len() > 20 {
+        return Err(AppError::bad("attach at most 20 files"));
+    }
+    let mine: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE id = ANY($1) AND owner_id = $2").bind(&b.file_ids).bind(auth.id).fetch_one(&state.db).await?;
+    if mine != b.file_ids.len() as i64 {
+        return Err(AppError::bad("upload the files first"));
+    }
+    let body = if b.file_ids.is_empty() { required("comment", &b.body, 20_000)? } else { b.body.trim().chars().take(20_000).collect::<String>() };
+    sqlx::query("INSERT INTO crm_timeline (item_id, kind, author_id, body, data, file_ids) VALUES ($1, 'comment', $2, $3, '{}', $4)")
+        .bind(id)
+        .bind(auth.id)
+        .bind(&body)
+        .bind(&b.file_ids)
+        .execute(&state.db)
+        .await?;
     super::collab::tell_followers(&state, id, auth.id, true, "New comment on {record}".into(), Some(body.chars().take(200).collect())).await;
     sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
     broadcast(&state, t, id, false).await;
@@ -155,7 +179,19 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(e): Path<Uui
     if kind != "comment" || (author != Some(auth.id) && !super::access::is_crm_admin(&auth)) {
         return Err(AppError::bad("only comments can be deleted, by their author"));
     }
-    sqlx::query("DELETE FROM crm_timeline WHERE id = $1").bind(e).execute(&state.db).await?;
+    let files: Vec<Uuid> = sqlx::query_scalar("DELETE FROM crm_timeline WHERE id = $1 RETURNING file_ids").bind(e).fetch_one(&state.db).await?;
+    for f in files {
+        crate::routes::files::delete_stored(&state, f).await;
+    }
     broadcast(&state, t, item, false).await;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Files attached to timeline comments: readable by whoever can see the record.
+pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
+    let item: Option<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_timeline WHERE file_ids <> '{}' AND file_ids @> ARRAY[$1]::uuid[] LIMIT 1").bind(file).fetch_optional(&state.db).await?;
+    match item {
+        Some(i) => Ok(readable(state, auth, i).await.is_ok()),
+        None => Ok(false),
+    }
 }

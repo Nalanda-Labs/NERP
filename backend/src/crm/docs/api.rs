@@ -909,6 +909,10 @@ async fn delete_document(State(state): State<AppState>, auth: AuthUser, Path(id)
 /// Files module hook: generated documents are readable by anyone who can read their
 /// record; template files by CRM admins.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
+    // Files attached to comments on the record's timeline.
+    if crate::crm::timeline_can_view_file(state, auth, file).await? {
+        return Ok(true);
+    }
     // Generated documents, and the copies sent for signature (as sent, and signed).
     let item: Option<Uuid> = sqlx::query_scalar(
         "SELECT item_id FROM crm_documents WHERE pdf_file_id = $1 OR source_file_id = $1

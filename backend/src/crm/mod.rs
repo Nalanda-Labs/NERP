@@ -81,6 +81,7 @@ pub async fn run_import(state: &AppState, payload: &Value) -> anyhow::Result<()>
 }
 
 pub use tools::IMPORT_JOB;
+pub use timeline::can_view_file as timeline_can_view_file;
 
 pub const LEAD: i16 = 1;
 pub const DEAL: i16 = 2;

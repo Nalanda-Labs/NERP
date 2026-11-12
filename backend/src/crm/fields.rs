@@ -472,6 +472,37 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
     Ok(Json(def))
 }
 
+/// A plain custom field (no settings, seen by everyone), as a migration from another CRM makes
+/// them; returns its code.
+pub async fn add_plain(state: &AppState, entity_type: i16, label: &str, kind: &str) -> AppResult<String> {
+    let label: String = label.trim().chars().take(100).collect();
+    let label = if label.is_empty() { "Imported".to_string() } else { label };
+    let base = format!("uf_{}", slug(&label));
+    let mut code = base.clone();
+    for n in 2..1000 {
+        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_field_defs WHERE entity_type = $1 AND code = $2)")
+            .bind(entity_type)
+            .bind(&code)
+            .fetch_one(&state.db)
+            .await?;
+        if !taken {
+            break;
+        }
+        code = format!("{base}_{n}");
+    }
+    sqlx::query(
+        "INSERT INTO crm_field_defs (entity_type, code, label, kind, settings, sort)
+         VALUES ($1, $2, $3, $4, '{}', COALESCE((SELECT MAX(sort) FROM crm_field_defs WHERE entity_type = $1), 0) + 10)",
+    )
+    .bind(entity_type)
+    .bind(&code)
+    .bind(&label)
+    .bind(kind)
+    .execute(&state.db)
+    .await?;
+    Ok(code)
+}
+
 #[derive(Deserialize)]
 struct UpdateField {
     label: Option<String>,

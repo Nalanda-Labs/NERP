@@ -1,7 +1,8 @@
 <script lang="ts">
 	// Moving over from another CRM: upload the export (CSV files or ZIP archives), check what
-	// was recognised — each file's kind and columns, pipelines and stages, the people records
-	// belong to — run it in the background, and see (or undo) what it did.
+	// was recognised — each file's kind and columns (custom fields too: existing ones, or new
+	// ones made from columns), pipelines and stages, the people records belong to, products
+	// and attachments — run it in the background, and see (or undo) what it did.
 	import { onDestroy, onMount } from 'svelte';
 	import { api } from '#lib/api.ts';
 	import { crm } from '#lib/crm.svelte.ts';
@@ -31,6 +32,9 @@
 		}[];
 		owners: { value: string; count: number; via: string | null; user_id: string | null }[];
 		currencies: { code: string; count: number; enabled: boolean }[];
+		custom_fields: Record<string, { code: string; label: string; kind: string }[]>;
+		attachments: { file: string; rows: number; found: number }[];
+		archive_files: number;
 	};
 	type Counts = Record<string, { created: number; updated: number; skipped: number; failed: number }>;
 	type Migration = {
@@ -59,11 +63,11 @@
 	const SOURCES: Record<string, { name: string; how: string }> = {
 		hubspot: {
 			name: 'HubSpot',
-			how: 'In HubSpot, open each of Contacts, Companies and Deals, choose Export (CSV, all properties). Upload the files (or a ZIP of them) together.'
+			how: 'In HubSpot, open each of Contacts, Companies, Deals, Products and Line items, choose Export (CSV, all properties). Upload the files (or a ZIP of them) together.'
 		},
 		salesforce: {
 			name: 'Salesforce',
-			how: 'Setup → Data Export → Export Now (include all data). Upload the ZIP it emails you: Account, Contact, Lead, Opportunity, Task, Note and User are used.'
+			how: 'Setup → Data Export → Export Now (include all data, and attachments). Upload the ZIP it emails you: Account, Contact, Lead, Opportunity, OpportunityLineItem, Product2, Task, Note, Attachment and User are used.'
 		},
 		pipedrive: {
 			name: 'Pipedrive',
@@ -86,6 +90,9 @@
 		activity: 'Activities and tasks',
 		note: 'Notes',
 		user: 'Users (to match owners)',
+		product: 'Products (the catalogue)',
+		line: 'Products on deals',
+		attachment: 'Attachments',
 		skip: 'Leave out'
 	};
 	const FIELD: Record<string, string> = {
@@ -128,8 +135,23 @@
 		'address.city': 'Address: city',
 		'address.region': 'Address: region',
 		'address.postal_code': 'Address: postal code',
-		'address.country': 'Address: country (ISO code)'
+		'address.country': 'Address: country (ISO code)',
+		sku: 'Code (SKU)',
+		price: 'Price',
+		unit: 'Unit',
+		tax_rate: 'Tax rate (%)',
+		cost: 'Cost',
+		deal_ref: 'Deal (its id)',
+		product_ref: 'Product (its id)',
+		product_name: 'Product name',
+		quantity: 'Quantity',
+		discount_percent: 'Discount (%)',
+		discount_amount: 'Discount (amount)',
+		path: 'File in the archive',
+		'uf:new': 'New custom field (named after the column)'
 	};
+	// The record type a file's custom fields belong to.
+	const HAS_CUSTOM = ['company', 'contact', 'lead', 'deal'];
 
 	let source = $state('hubspot');
 	let fileIds = $state<string[]>([]);
@@ -362,6 +384,12 @@
 											}} aria-label="{c} goes to">
 												<option value="">—</option>
 												{#each a.fields[f.kind] ?? [] as fld (fld)}<option value={fld}>{FIELD[fld] ?? fld}</option>{/each}
+												{#if HAS_CUSTOM.includes(f.kind)}
+													<optgroup label="Custom fields">
+														{#each a.custom_fields[f.kind] ?? [] as d (d.code)}<option value="uf:{d.code}">{d.label}</option>{/each}
+														<option value="uf:new">{FIELD['uf:new']}</option>
+													</optgroup>
+												{/if}
 											</select>
 										</td>
 									</tr>
@@ -419,6 +447,18 @@
 						</select>
 					</div>
 				{/each}
+			</section>
+		{/if}
+
+		{#if a.attachments.length}
+			<section class="card space-y-1 p-4 text-sm" aria-label="Attachments">
+				<h2 class="font-semibold text-slate-900">Attachments</h2>
+				{#each a.attachments as at (at.file)}
+					<p data-attachments={at.file}>
+						{at.file}: {at.found} of {at.rows} files found in the archive{at.found < at.rows ? ' (the others are left out)' : ''}.
+					</p>
+				{/each}
+				<p class="text-xs text-slate-500">They go on the record's timeline, as files anyone who can see the record can open.</p>
 			</section>
 		{/if}
 
