@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { office } from '#lib/office.svelte.ts';
 	// One message: text and files, voice and video notes, stickers, polls, reactions, the
 	// comment count of a channel post, and the actions on it.
 	import { api, downloadFile } from '#lib/api.ts';
@@ -117,7 +118,7 @@
 						{#if m.body}<p class="break-words whitespace-pre-line">{m.body}</p>{/if}
 						{#each m.files as f (f.id)}
 							<span class="mt-1 flex items-center gap-1">
-								<button class="flex items-center gap-2 rounded-lg px-2 py-1 text-left text-xs {mine && !channelPost ? 'bg-white/15' : 'bg-white'}" onclick={() => downloadFile(f.id, f.name).catch(toasts.error)}><Icon name="paperclip" class="size-3.5" />{f.name} <span class="opacity-70">{formatBytes(f.size)}</span></button>
+								<button class="flex items-center gap-2 rounded-lg px-2 py-1 text-left text-xs {mine && !channelPost ? 'bg-white/15' : 'bg-white'}" onclick={() => downloadFile(f.id, f.name).catch(toasts.error)}><Icon name="paperclip" class="size-3.5" />{f.name} <span class="opacity-70">{formatBytes(f.size)}</span></button>{#if office.opens(f.name)}<a class="ml-1 text-xs font-medium underline opacity-80 hover:opacity-100" href="/files/edit/{f.id}" data-edit-attachment={f.name}>Edit</a>{/if}
 								{#if f.mime.startsWith('video/') || f.mime.startsWith('audio/')}<button class="rounded-lg px-2 py-1 text-xs {mine && !channelPost ? 'bg-white/15' : 'bg-white'}" aria-label="Play {f.name}" onclick={() => onplay?.(f)}>▶ Play</button>{/if}
 							</span>
 						{/each}

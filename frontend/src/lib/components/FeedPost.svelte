@@ -35,6 +35,7 @@
 </script>
 
 <script lang="ts">
+	import { office } from '#lib/office.svelte.ts';
 	// One post in the news feed: text, files, poll, likes, comments, "I've read it".
 	import { api, downloadFile } from '#lib/api.ts';
 	import Avatar from '#lib/components/Avatar.svelte';
@@ -222,7 +223,7 @@
 					onclick={() => downloadFile(f.id, f.name).catch(toasts.error)}
 					><Icon name="paperclip" class="size-4" />{f.name}
 					<span class="text-xs text-slate-400">{formatBytes(f.size)}</span></button
-				>{/each}
+				>{#if office.opens(f.name)}<a class="ml-1 text-xs font-medium text-brand-600 hover:underline" href="/files/edit/{f.id}" data-edit-attachment={f.name}>Edit</a>{/if}{/each}
 		</div>
 	{/if}
 

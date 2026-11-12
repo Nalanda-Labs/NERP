@@ -10,6 +10,7 @@ mod portal;
 mod field;
 mod sandbox;
 mod teams;
+mod attachments;
 mod auth;
 mod bi;
 mod blob;
