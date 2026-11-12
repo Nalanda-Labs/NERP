@@ -1332,6 +1332,14 @@ earned or taken back, so statements always add up to what was really paid.
   it as CSV (month, employee, email, earned, taken back, net, currency), and *Recalculate*
   after changing plans.
 
+## Teams
+
+**Teams** (from the company structure, or the menu) are cross-functional: people from any
+department working together under a lead, beside the line structure of departments. A person
+can be in several teams, each with their role in it ("Design", "QA"…). Those who manage the
+structure create, change and remove teams; a team's lead manages its members. Each team has a
+chat whose members and name follow the team, and profiles list a person's teams.
+
 ## Workgroups and projects
 
 Under Workgroups in the sidebar. A **workgroup** is an ongoing team space; a **project** is the

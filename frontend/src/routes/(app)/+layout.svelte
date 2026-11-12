@@ -181,6 +181,7 @@
 				{ href: '/projects', label: 'Workgroups', icon: 'briefcase' },
 				{ href: '/employees', label: 'Employees', icon: 'users', perm: PERM.USERS_VIEW },
 				{ href: '/structure', label: 'Company structure', icon: 'structure' },
+				{ href: '/teams', label: 'Teams', icon: 'users' },
 				{ href: '/drive', label: 'Drive', icon: 'folder' },
 				{ href: '/boards', label: 'Boards', icon: 'board' },
 				{ href: '/bi', label: 'BI dashboards', icon: 'chart' },

@@ -9,6 +9,7 @@ mod commissions;
 mod portal;
 mod field;
 mod sandbox;
+mod teams;
 mod auth;
 mod bi;
 mod blob;

@@ -193,6 +193,7 @@
 	<div class="flex flex-wrap items-center justify-between gap-3">
 		<div>
 			<h1 class="text-2xl font-semibold text-slate-900">Company structure</h1>
+			<a class="text-sm text-brand-700 hover:underline" href="/teams" data-teams-link>Cross-functional teams →</a>
 			<p class="text-sm text-slate-500">{departments.length} departments</p>
 		</div>
 		{#if canManage}

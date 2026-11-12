@@ -7,6 +7,7 @@
 	import Modal from '#lib/components/Modal.svelte';
 	import ProfileActivity from '#lib/components/ProfileActivity.svelte';
 	import SkillsCard from '#lib/components/SkillsCard.svelte';
+	import TeamsCard from '#lib/components/TeamsCard.svelte';
 	import SessionsCard from '#lib/components/SessionsCard.svelte';
 	import { formatDate, formatDateTime } from '#lib/format.ts';
 	import { session } from '#lib/session.svelte.ts';
@@ -238,6 +239,7 @@
 				</dl>
 			</section>
 
+			{#key user.id}<TeamsCard userId={user.id} />{/key}
 			{#key user.id}<SkillsCard userId={user.id} canEdit={isMe || canManage} />{/key}
 
 			{#if canManage && !isMe && !user.invite_pending}

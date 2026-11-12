@@ -33,12 +33,13 @@ pub enum Link {
     Event(Uuid),
     Board(Uuid),
     CrmItem(Uuid),
+    Team(Uuid),
 }
 
 impl Link {
     fn id(self) -> Uuid {
         match self {
-            Link::Project(id) | Link::Task(id) | Link::Event(id) | Link::Board(id) | Link::CrmItem(id) => id,
+            Link::Project(id) | Link::Task(id) | Link::Event(id) | Link::Board(id) | Link::CrmItem(id) | Link::Team(id) => id,
         }
     }
     fn column(self) -> &'static str {
@@ -48,6 +49,7 @@ impl Link {
             Link::Event(_) => "event_id",
             Link::Board(_) => "board_id",
             Link::CrmItem(_) => "crm_item_id",
+            Link::Team(_) => "team_id",
         }
     }
     /// Everyone on it (`$2` is its id), active or not.
@@ -62,6 +64,7 @@ impl Link {
             // The responsible person, whoever made it, and its observers.
             Link::CrmItem(_) => "SELECT assigned_to AS user_id FROM crm_items WHERE id = $2 AND assigned_to IS NOT NULL
                 UNION SELECT created_by FROM crm_items WHERE id = $2 AND created_by IS NOT NULL UNION SELECT user_id FROM crm_item_observers WHERE item_id = $2",
+            Link::Team(_) => "SELECT user_id FROM team_members WHERE team_id = $2 UNION SELECT lead_id FROM teams WHERE id = $2 AND lead_id IS NOT NULL",
         }
     }
     fn title(self) -> &'static str {
@@ -71,6 +74,7 @@ impl Link {
             Link::Event(_) => "SELECT title FROM cal_events WHERE id = $1",
             Link::Board(_) => "SELECT title FROM boards WHERE id = $1",
             Link::CrmItem(_) => "SELECT t.name || ' #' || i.number || ': ' || i.title FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1",
+            Link::Team(_) => "SELECT name FROM teams WHERE id = $1",
         }
     }
     fn welcome(self, name: &str) -> String {
@@ -80,6 +84,7 @@ impl Link {
             Link::Event(_) => format!("The chat of the event “{name}”"),
             Link::Board(_) => format!("The chat of the board “{name}”"),
             Link::CrmItem(_) => format!("The chat of {name}"),
+            Link::Team(_) => format!("The team chat of “{name}”"),
         }
     }
     fn left(self) -> &'static str {
@@ -89,6 +94,7 @@ impl Link {
             Link::Event(_) => "left the event",
             Link::Board(_) => "left the board",
             Link::CrmItem(_) => "left the record",
+            Link::Team(_) => "left the team",
         }
     }
     /// Whether `user` is on it.
