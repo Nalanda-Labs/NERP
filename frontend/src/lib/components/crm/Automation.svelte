@@ -205,6 +205,26 @@
 	type Draft = RobotDraft | TriggerDraft | ScheduleDraft;
 	let draft = $state<Draft | null>(null);
 	let open = $state(false);
+	// How often the rule being edited would have run.
+	type Preview = { days: number; would_run?: number; records?: number; considered?: number; filtered_out?: number; per_week?: number[]; note?: string | null; unknown?: boolean; sample?: { id: string; title: string; link: string }[] };
+	let preview = $state<Preview | null>(null);
+	let previewDays = $state(30);
+	$effect(() => {
+		draft;
+		preview = null;
+	});
+	async function runPreview() {
+		const d = draft;
+		if (!d || d.kind === 'schedule') return;
+		try {
+			preview = await api.post<Preview>('/crm/automation/preview', {
+				kind: d.kind, category_id: categoryId, stage_id: d.stage_id, event: d.kind === 'trigger' ? d.event : null,
+				params: $state.snapshot(d.params), conditions: $state.snapshot(d.conditions), days: Number(previewDays)
+			});
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
 	let saving = $state(false);
 
 	function defaults(action: string): Record<string, any> {
@@ -1018,6 +1038,26 @@
 
 			{@render conditionList(draft.conditions, 'Conditions', draft.kind === 'schedule' ? 'records must match all' : 'all must hold')}
 			<label class="flex items-center gap-2"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={draft.is_active} /> Active</label>
+			{#if draft.kind !== 'schedule'}
+				<div class="rounded-lg bg-slate-50 p-3 text-sm" data-preview>
+					<div class="flex flex-wrap items-center gap-2">
+						<button type="button" class="text-brand-700 hover:underline" onclick={runPreview} data-preview-run>How often would this have run?</button>
+						<label class="text-xs text-slate-500">in the last <select class="input inline w-24 py-0.5" bind:value={previewDays}><option value={7}>7 days</option><option value={30}>30 days</option><option value={90}>90 days</option><option value={365}>year</option></select></label>
+					</div>
+					{#if preview}
+						{#if preview.unknown}<p class="mt-1 text-slate-600">{preview.note}</p>
+						{:else}
+							<p class="mt-1 font-medium text-slate-900" data-preview-result>Would have run {preview.would_run} {preview.would_run === 1 ? 'time' : 'times'}, on {preview.records} {preview.records === 1 ? 'record' : 'records'}, in the last {preview.days} days{preview.filtered_out ? ` (${preview.filtered_out} left out by the conditions)` : ''}.</p>
+							{#if preview.per_week?.some((w) => w > 0)}
+								{@const max = Math.max(...preview.per_week)}
+								<div class="mt-1 flex h-8 items-end gap-0.5" aria-label="Per week">{#each preview.per_week as w, i (i)}<span class="w-3 rounded-t bg-brand-400" style="height: {max ? Math.max(2, (w / max) * 32) : 2}px" title={String(w)}></span>{/each}</div>
+							{/if}
+							{#if preview.note}<p class="mt-1 text-xs text-slate-500">{preview.note}</p>{/if}
+							{#if preview.sample?.length}<p class="mt-1 text-xs text-slate-500">For example: {#each preview.sample.slice(0, 5) as s, i (s.id)}{i ? ', ' : ''}<a class="text-brand-700 hover:underline" href={s.link} target="_blank">{s.title}</a>{/each}</p>{/if}
+						{/if}
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 	{#snippet footer()}
