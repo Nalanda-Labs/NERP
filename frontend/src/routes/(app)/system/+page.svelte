@@ -16,6 +16,7 @@
 		smtp: { host: string; port: number; security: string; from: string };
 		public_url: string;
 		doc_engines: { typst: string | null; latex: string | null; office: string | null };
+		redis?: { aof: boolean; snapshots: boolean | null; snapshot_schedule: string | null; last_save: string | null; last_save_ok: boolean | null; persistent: boolean };
 		mail_oauth: { google: boolean; microsoft: boolean; redirect_uri: string };
 	};
 
@@ -127,6 +128,15 @@
 					<dd class="space-y-0.5 text-slate-800">
 						<p>Google: {#if info.mail_oauth?.google}configured{:else}<span class="text-amber-700">not configured</span>{/if} · Microsoft: {#if info.mail_oauth?.microsoft}configured{:else}<span class="text-amber-700">not configured</span>{/if}</p>
 						<p class="text-xs text-slate-500">Redirect URI: <code>{info.mail_oauth?.redirect_uri}</code></p>
+					</dd>
+					<dt class="text-slate-500">Redis</dt>
+					<dd class="space-y-0.5 text-slate-800" data-redis={info.redis?.persistent ? 'persistent' : 'volatile'}>
+						{#if info.redis?.persistent}
+							<p>Keeps its data across restarts ({[info.redis.aof ? 'append-only file' : '', info.redis.snapshots ? 'snapshots' : ''].filter(Boolean).join(' and ')}){#if info.redis.last_save_ok === false}<span class="text-red-700"> · the last snapshot failed</span>{/if}</p>
+						{:else}
+							<p class="text-amber-700">Keeps nothing across a restart{info.redis?.snapshots === null ? ' (or it doesn’t say)' : ''}</p>
+							<p class="text-xs text-slate-500">Sign-ins are in the database either way; a Redis restart resets rate limits and lockouts. Turn on <code>appendonly yes</code> (see SETUP.md).</p>
+						{/if}
 					</dd>
 					<dt class="text-slate-500">Document engines</dt>
 					<dd class="space-y-0.5 text-slate-800">

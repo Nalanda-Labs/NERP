@@ -209,7 +209,9 @@ async fn identify(parts: &mut Parts, state: &AppState) -> Result<AuthUser, AppEr
 
         let mut redis = state.redis.clone();
         let revoked: bool = redis.exists(tokens::revoked_sid_key(claims.sid)).await?;
-        if revoked {
+        // Signed out (also after Redis lost its copy of the sign-out: the session is gone
+        // from the database).
+        if revoked || !tokens::session_alive(state, claims.sid).await? {
             return Err(AppError::Unauthorized);
         }
 
@@ -255,7 +257,7 @@ async fn download_link_user(state: &AppState, parts: &Parts, token: &str) -> Res
     let sid: Uuid = v["sid"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or(AppError::Unauthorized)?;
     let at = v["at"].as_i64().unwrap_or(0);
     // Signed out, or deactivated / password changed since: the link dies too.
-    let revoked: bool = redis.exists(tokens::revoked_sid_key(sid)).await?;
+    let revoked: bool = redis.exists(tokens::revoked_sid_key(sid)).await? || !tokens::session_alive(state, sid).await?;
     let entry = load_authz(state, user).await?.ok_or(AppError::Unauthorized)?;
     if revoked || !entry.active || at < entry.valid_after {
         return Err(AppError::Unauthorized);

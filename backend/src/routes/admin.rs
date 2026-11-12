@@ -44,6 +44,7 @@ async fn system(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json
             "from": state.config.smtp.from,
         },
         "public_url": state.config.public_url,
+        "redis": redis_persistence(&state).await,
         "doc_engines": crate::crm::docs::engines(),
         "mail_oauth": {
             "google": state.config.oauth.google.is_some(),
@@ -51,6 +52,27 @@ async fn system(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json
             "redirect_uri": format!("{}/api/crm/mailboxes/oauth/callback", state.config.public_url),
         },
     })))
+}
+
+/// Whether Redis keeps its data across a restart (append-only file or snapshots). Sessions
+/// and sign-in links are in PostgreSQL either way; without persistence a Redis restart only
+/// resets rate limits and lockouts and empties caches.
+pub async fn redis_persistence(state: &AppState) -> Value {
+    let mut redis = state.redis.clone();
+    let info: String = redis::cmd("INFO").arg("persistence").query_async(&mut redis).await.unwrap_or_default();
+    let field = |k: &str| info.lines().find_map(|l| l.strip_prefix(&format!("{k}:"))).map(|v| v.trim().to_string());
+    let aof = field("aof_enabled").as_deref() == Some("1");
+    // CONFIG may be switched off (managed Redis); then the snapshot schedule is unknown.
+    let save: Option<String> = redis::cmd("CONFIG").arg("GET").arg("save").query_async::<Vec<String>>(&mut redis).await.ok().and_then(|v| v.get(1).cloned());
+    let snapshots = save.as_deref().map(|s| !s.trim().is_empty());
+    json!({
+        "aof": aof,
+        "snapshots": snapshots,
+        "snapshot_schedule": save,
+        "last_save": field("rdb_last_save_time").and_then(|t| t.parse::<i64>().ok()).and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
+        "last_save_ok": field("rdb_last_bgsave_status").map(|s| s == "ok"),
+        "persistent": aof || snapshots == Some(true),
+    })
 }
 
 #[derive(Deserialize)]

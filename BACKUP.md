@@ -12,7 +12,8 @@ lost server.
 | Removed files, kept aside for point-in-time restores | `UPLOAD_DIR/.deleted/<day>/` (`FILE_KEEP_DELETED_DAYS`, 14) | in the nightly snapshot |
 | Secrets: `JWT_SECRET`, `DATA_ENCRYPTION_KEY`, `FILE_ENCRYPTION_KEY`, SMTP and OAuth secrets | `backend/.env` | by hand, kept apart (see below) |
 | Call recordings, if LiveKit recording is on | `LIVEKIT_RECORDINGS_DIR` | add it to the file snapshot |
-| Sessions, rate limits, caches | Redis / Valkey | not needed: people sign in again |
+| Sessions, refresh tokens, emailed links | PostgreSQL (Redis holds a copy) | with the database |
+| Rate limits, lockouts, caches, live-update routing | Redis / Valkey (append-only file, see SETUP.md) | not needed: they rebuild themselves |
 
 **The secrets matter as much as the data.** Mailbox passwords and OAuth tokens are stored
 encrypted with `DATA_ENCRYPTION_KEY` (or a key derived from `JWT_SECRET`). A database restored

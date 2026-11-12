@@ -1,17 +1,19 @@
 //! Sessions and tokens.
 //!
-//! A *session* is one signed-in device. It lives in Redis and records when and where it
-//! was used. Each session has:
+//! A *session* is one signed-in device. It lives in PostgreSQL (`auth_sessions`, so losing
+//! Redis signs nobody out) with a copy in Redis that requests check; it records when and
+//! where it was used. Each session has:
 //! - a refresh token: opaque, stored hashed, rotated on every use, sent as an httpOnly cookie;
 //! - short-lived JWT access tokens that carry the session id (`sid`).
 //!
 //! Revoking a session deletes it and marks its id revoked for the lifetime of an access
 //! token, so the device loses access immediately rather than at the next refresh.
 //!
-//! Redis keys:
-//!   auth:rt:{sha256(token)}   -> session id
+//! Refresh tokens are exchanged in one database statement; exchanged ones are remembered in
+//! `auth_used_refresh` (reuse = theft). Emailed link tokens live in `auth_link_tokens`.
+//!
+//! Redis keys (a cache; refilled from the database when missing):
 //!   auth:sess:{sid}           -> SessionData (JSON)
-//!   auth:user_sess:{user}     -> set of session ids
 //!   auth:revoked_sid:{sid}    -> 1 (short TTL)
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -63,24 +65,13 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-/// A refresh token that was already exchanged: remembered so that seeing it again (a copy
-/// was stolen and one side used it first) ends the session for everyone holding it.
-fn rt_used_key(hash: &str) -> String {
-    format!("auth:rt_used:{hash}")
-}
 
 /// Two tabs of the same browser may refresh at the same moment; a token reused this soon
 /// after it was exchanged is refused but not treated as theft.
 const REUSE_GRACE_SECS: i64 = 30;
 
-fn rt_key(hash: &str) -> String {
-    format!("auth:rt:{hash}")
-}
 fn sess_key(sid: Uuid) -> String {
     format!("auth:sess:{sid}")
-}
-fn user_sess_key(user: Uuid) -> String {
-    format!("auth:user_sess:{user}")
 }
 pub fn revoked_sid_key(sid: Uuid) -> String {
     format!("auth:revoked_sid:{sid}")
@@ -104,16 +95,36 @@ pub fn decode_access_token(state: &AppState, token: &str) -> AppResult<Claims> {
 }
 
 async fn store_session(state: &AppState, sid: Uuid, data: &SessionData) -> AppResult<()> {
-    let ttl = state.config.refresh_token_ttl_secs as u64;
-    let mut redis = state.redis.clone();
-    redis::pipe()
-        .set_ex(rt_key(&data.refresh_hash), sid.to_string(), ttl)
-        .set_ex(sess_key(sid), serde_json::to_string(data).unwrap(), ttl)
-        .sadd(user_sess_key(data.user_id), sid.to_string())
-        .expire(user_sess_key(data.user_id), ttl as i64)
-        .query_async::<()>(&mut redis)
-        .await?;
+    let ttl = state.config.refresh_token_ttl_secs;
+    sqlx::query(
+        "INSERT INTO auth_sessions (id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8))
+         ON CONFLICT (id) DO UPDATE SET refresh_hash = EXCLUDED.refresh_hash, last_used_at = EXCLUDED.last_used_at,
+             ip = EXCLUDED.ip, user_agent = EXCLUDED.user_agent, expires_at = EXCLUDED.expires_at",
+    )
+    .bind(sid)
+    .bind(data.user_id)
+    .bind(&data.refresh_hash)
+    .bind(data.created_at)
+    .bind(data.last_used_at)
+    .bind(&data.ip)
+    .bind(&data.user_agent)
+    .bind(ttl as f64)
+    .execute(&state.db)
+    .await?;
+    cache_session(state, sid, data).await;
     Ok(())
+}
+
+/// How long Redis's copy of a session lives: a copy that outlived its session (a sign-out
+/// while Redis couldn't be reached) is gone within this, and a missing one is refilled from
+/// the database.
+const CACHE_SECS: u64 = 300;
+
+/// Keeps a copy in Redis for the requests that check it.
+async fn cache_session(state: &AppState, sid: Uuid, data: &SessionData) {
+    let mut redis = state.redis.clone();
+    let _: Result<(), _> = redis.set_ex(sess_key(sid), serde_json::to_string(data).unwrap(), CACHE_SECS).await;
 }
 
 /// Starts a new session. Returns (session id, refresh token).
@@ -133,10 +144,38 @@ pub async fn create_session(state: &AppState, user_id: Uuid, meta: &ClientMeta) 
     Ok((sid, token))
 }
 
+type SessionRow = (Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, Option<String>);
+
+fn from_row(r: SessionRow) -> SessionData {
+    SessionData { user_id: r.0, refresh_hash: r.1, created_at: r.2, last_used_at: r.3, ip: r.4, user_agent: r.5 }
+}
+
 pub async fn get_session(state: &AppState, sid: Uuid) -> AppResult<Option<SessionData>> {
     let mut redis = state.redis.clone();
-    let raw: Option<String> = redis.get(sess_key(sid)).await?;
-    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
+    let raw: Option<String> = redis.get(sess_key(sid)).await.unwrap_or(None);
+    if let Some(d) = raw.and_then(|r| serde_json::from_str(&r).ok()) {
+        return Ok(Some(d));
+    }
+    let row: Option<SessionRow> = sqlx::query_as(
+        "SELECT user_id, refresh_hash, created_at, last_used_at, ip, user_agent FROM auth_sessions WHERE id = $1 AND expires_at > now()",
+    )
+    .bind(sid)
+    .fetch_optional(&state.db)
+    .await?;
+    let data = row.map(from_row);
+    if let Some(d) = &data {
+        cache_session(state, sid, d).await;
+    }
+    Ok(data)
+}
+
+/// Whether a session is still signed in (for every request: Redis, else the database).
+pub async fn session_alive(state: &AppState, sid: Uuid) -> AppResult<bool> {
+    let mut redis = state.redis.clone();
+    if redis.exists::<_, bool>(sess_key(sid)).await.unwrap_or(false) {
+        return Ok(true);
+    }
+    Ok(get_session(state, sid).await?.is_some())
 }
 
 /// Exchanges a refresh token for a new one (single use). Returns (user, session, new token).
@@ -145,71 +184,87 @@ pub async fn rotate_refresh_token(
     token: &str,
     meta: &ClientMeta,
 ) -> AppResult<Option<(Uuid, Uuid, String)>> {
-    let mut redis = state.redis.clone();
     let hash = hash_token(token);
-    let sid: Option<String> = redis.get_del(rt_key(&hash)).await?;
-    let Some(sid) = sid.and_then(|s| Uuid::parse_str(&s).ok()) else {
-        // An exchanged token presented again: past the grace period, assume it was stolen.
-        let used: Option<String> = redis.get(rt_used_key(&hash)).await?;
-        if let Some((sid, at)) = used.as_deref().and_then(|u| u.split_once('|')) {
-            let at: i64 = at.parse().unwrap_or(0);
-            if let Ok(sid) = Uuid::parse_str(sid)
-                && Utc::now().timestamp() - at > REUSE_GRACE_SECS {
-                    let user = get_session(state, sid).await?.map(|d| d.user_id);
-                    revoke_session(state, sid).await?;
-                    crate::audit::record(&state.db, user, "auth.refresh_reuse", "session", Some(sid.to_string()), serde_json::json!({}), meta.ip.as_deref()).await;
-                    if let Some(u) = user {
-                        crate::notify::notify(state, &[u], crate::notify::NewNotification {
-                            kind: "security.session_ended",
-                            title: "A sign-in on one of your devices was ended for safety".into(),
-                            body: Some("An old sign-in token was used again, which can mean it was copied. Sign in again on that device; change your password if this wasn't you.".into()),
-                            link: Some("/profile#security".into()),
-                            actor: None,
-                        })
-                        .await;
-                    }
-                }
-        }
-        return Ok(None);
-    };
-    let ttl = state.config.refresh_token_ttl_secs as u64;
-    let _: () = redis.set_ex(rt_used_key(&hash), format!("{sid}|{}", Utc::now().timestamp()), ttl).await?;
-    let Some(mut data) = get_session(state, sid).await? else {
-        return Ok(None);
-    };
     let new_token = random_token(32);
-    data.refresh_hash = hash_token(&new_token);
-    data.last_used_at = Utc::now();
-    if meta.ip.is_some() {
-        data.ip = meta.ip.clone();
-    }
-    if meta.user_agent.is_some() {
-        data.user_agent = meta.user_agent.clone();
-    }
-    store_session(state, sid, &data).await?;
+    let ttl = state.config.refresh_token_ttl_secs;
+    // One statement: of two requests with the same token, only one gets the session.
+    let row: Option<(Uuid, SessionRow)> = sqlx::query_as::<_, (Uuid, Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, Option<String>)>(
+        "UPDATE auth_sessions SET refresh_hash = $2, last_used_at = now(), ip = COALESCE($3, ip), user_agent = COALESCE($4, user_agent),
+             expires_at = now() + make_interval(secs => $5)
+         WHERE refresh_hash = $1 AND expires_at > now()
+         RETURNING id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent",
+    )
+    .bind(&hash)
+    .bind(hash_token(&new_token))
+    .bind(&meta.ip)
+    .bind(meta.user_agent.as_ref().map(|u| u.chars().take(400).collect::<String>()))
+    .bind(ttl as f64)
+    .fetch_optional(&state.db)
+    .await?
+    .map(|r| (r.0, (r.1, r.2, r.3, r.4, r.5, r.6)));
+    let Some((sid, row)) = row else {
+        // An exchanged token presented again: past the grace period, assume it was stolen.
+        let used: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as("SELECT session_id, used_at FROM auth_used_refresh WHERE hash = $1 AND expires_at > now()")
+            .bind(&hash)
+            .fetch_optional(&state.db)
+            .await?;
+        if let Some((sid, at)) = used
+            && (Utc::now() - at).num_seconds() > REUSE_GRACE_SECS {
+                let user = get_session(state, sid).await?.map(|d| d.user_id);
+                revoke_session(state, sid).await?;
+                crate::audit::record(&state.db, user, "auth.refresh_reuse", "session", Some(sid.to_string()), serde_json::json!({}), meta.ip.as_deref()).await;
+                if let Some(u) = user {
+                    crate::notify::notify(state, &[u], crate::notify::NewNotification {
+                        kind: "security.session_ended",
+                        title: "A sign-in on one of your devices was ended for safety".into(),
+                        body: Some("An old sign-in token was used again, which can mean it was copied. Sign in again on that device; change your password if this wasn't you.".into()),
+                        link: Some("/profile#security".into()),
+                        actor: None,
+                    })
+                    .await;
+                }
+            }
+        return Ok(None);
+    };
+    sqlx::query("INSERT INTO auth_used_refresh (hash, session_id, used_at, expires_at) VALUES ($1, $2, now(), now() + make_interval(secs => $3)) ON CONFLICT (hash) DO NOTHING")
+        .bind(&hash)
+        .bind(sid)
+        .bind(ttl as f64)
+        .execute(&state.db)
+        .await?;
+    let data = from_row(row);
+    cache_session(state, sid, &data).await;
     Ok(Some((data.user_id, sid, new_token)))
 }
 
 /// Ends one session: its refresh token stops working and its access tokens are rejected.
 pub async fn revoke_session(state: &AppState, sid: Uuid) -> AppResult<()> {
-    let data = get_session(state, sid).await?;
+    let user: Option<Uuid> = sqlx::query_scalar("DELETE FROM auth_sessions WHERE id = $1 RETURNING user_id").bind(sid).fetch_optional(&state.db).await?;
+    // Redis's copy goes too (tried a few times; if Redis can't be reached, the copy runs out
+    // within CACHE_SECS and the session is gone from the database already).
     let mut redis = state.redis.clone();
-    let mut pipe = redis::pipe();
-    pipe.del(sess_key(sid)).set_ex(
-        revoked_sid_key(sid),
-        1,
-        (state.config.access_token_ttl_secs + 60) as u64,
-    );
-    if let Some(d) = &data {
-        pipe.del(rt_key(&d.refresh_hash)).srem(user_sess_key(d.user_id), sid.to_string());
+    let mut done = false;
+    for attempt in 0..3 {
+        let r = redis::pipe()
+            .del(sess_key(sid))
+            .set_ex(revoked_sid_key(sid), 1, (state.config.access_token_ttl_secs + 60) as u64)
+            .query_async::<()>(&mut redis)
+            .await;
+        if r.is_ok() {
+            done = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1))).await;
     }
-    pipe.query_async::<()>(&mut redis).await?;
-    if let Some(d) = data {
+    if !done {
+        tracing::warn!(session = %sid, "signed out, but Redis could not be told; its copy runs out within five minutes");
+    }
+    if let Some(u) = user {
         // Close that device's live connections and tell it to sign out.
         realtime::publish_envelope(
             state,
             Envelope {
-                users: Some(vec![d.user_id]),
+                users: Some(vec![u]),
                 session: Some(sid),
                 kind: "session.revoked".into(),
                 data: serde_json::json!({ "session_id": sid }),
@@ -222,9 +277,8 @@ pub async fn revoke_session(state: &AppState, sid: Uuid) -> AppResult<()> {
 
 /// Signs a user out everywhere, optionally keeping one session.
 pub async fn revoke_all_sessions(state: &AppState, user_id: Uuid, keep: Option<Uuid>) -> AppResult<()> {
-    let mut redis = state.redis.clone();
-    let sids: Vec<String> = redis.smembers(user_sess_key(user_id)).await?;
-    for sid in sids.iter().filter_map(|s| Uuid::parse_str(s).ok()) {
+    let sids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM auth_sessions WHERE user_id = $1").bind(user_id).fetch_all(&state.db).await?;
+    for sid in sids {
         if Some(sid) != keep {
             revoke_session(state, sid).await?;
         }
@@ -232,22 +286,85 @@ pub async fn revoke_all_sessions(state: &AppState, user_id: Uuid, keep: Option<U
     Ok(())
 }
 
-/// Lists live sessions, pruning ids whose data has expired.
+/// Lists live sessions, newest use first.
 pub async fn list_sessions(state: &AppState, user_id: Uuid) -> AppResult<Vec<(Uuid, SessionData)>> {
+    let rows: Vec<(Uuid, Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent FROM auth_sessions
+         WHERE user_id = $1 AND expires_at > now() ORDER BY last_used_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.0, from_row((r.1, r.2, r.3, r.4, r.5, r.6)))).collect())
+}
+
+/// At start: sessions that so far lived only in Redis are written to the database (once,
+/// after the upgrade that moved them), so nobody is signed out by it.
+pub async fn adopt_redis_sessions(state: &AppState) -> anyhow::Result<()> {
     let mut redis = state.redis.clone();
-    let sids: Vec<String> = redis.smembers(user_sess_key(user_id)).await?;
-    let mut out = Vec::new();
-    for raw in sids {
-        let Ok(sid) = Uuid::parse_str(&raw) else { continue };
-        match get_session(state, sid).await? {
-            Some(d) => out.push((sid, d)),
-            None => {
-                let _: () = redis.srem(user_sess_key(user_id), &raw).await?;
+    let keys: Vec<String> = {
+        let mut iter: redis::AsyncIter<String> = redis.scan_match("auth:sess:*").await?;
+        let mut out = Vec::new();
+        while let Some(k) = futures_util::StreamExt::next(&mut iter).await {
+            out.push(k?);
+        }
+        out
+    };
+    let mut adopted = 0;
+    for k in keys {
+        let Some(sid) = k.strip_prefix("auth:sess:").and_then(|s| Uuid::parse_str(s).ok()) else { continue };
+        let raw: Option<String> = redis.get(&k).await?;
+        let ttl: i64 = redis.ttl(&k).await.unwrap_or(-1);
+        let Some(d) = raw.and_then(|r| serde_json::from_str::<SessionData>(&r).ok()) else { continue };
+        if ttl <= 0 {
+            continue;
+        }
+        let done = sqlx::query(
+            "INSERT INTO auth_sessions (id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent, expires_at)
+             SELECT $1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8) WHERE EXISTS (SELECT 1 FROM users WHERE id = $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(sid)
+        .bind(d.user_id)
+        .bind(&d.refresh_hash)
+        .bind(d.created_at)
+        .bind(d.last_used_at)
+        .bind(&d.ip)
+        .bind(&d.user_agent)
+        .bind(ttl as f64)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+        adopted += done;
+    }
+    if adopted > 0 {
+        tracing::info!(adopted, "sessions from Redis written to the database");
+    }
+    // Keys only the Redis-only sessions used (the database holds that now).
+    for pattern in ["auth:rt:*", "auth:rt_used:*", "auth:user_sess:*"] {
+        let keys: Vec<String> = {
+            let mut iter: redis::AsyncIter<String> = redis.scan_match(pattern).await?;
+            let mut out = Vec::new();
+            while let Some(k) = futures_util::StreamExt::next(&mut iter).await {
+                out.push(k?);
             }
+            out
+        };
+        for chunk in keys.chunks(500) {
+            let _: () = redis::cmd("UNLINK").arg(chunk).query_async(&mut redis).await?;
         }
     }
-    out.sort_by_key(|(_, d)| std::cmp::Reverse(d.last_used_at));
-    Ok(out)
+    Ok(())
+}
+
+pub const CLEANUP_JOB: &str = "auth.cleanup";
+
+/// Daily: expired sessions and tokens go.
+pub async fn cleanup(state: &AppState) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM auth_sessions WHERE expires_at < now()").execute(&state.db).await?;
+    sqlx::query("DELETE FROM auth_used_refresh WHERE expires_at < now()").execute(&state.db).await?;
+    sqlx::query("DELETE FROM auth_link_tokens WHERE expires_at < now()").execute(&state.db).await?;
+    Ok(())
 }
 
 pub const REFRESH_COOKIE: &str = "nerp_rt";
@@ -278,8 +395,9 @@ pub fn read_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String
         .map(|(_, v)| v.to_string())
 }
 
-/// One-time tokens for emailed links (password reset, invitations), stored hashed.
-/// `scope` keeps different purposes apart; `owner_key` lets a newer token replace an older one.
+/// One-time tokens for emailed links (password reset, invitations), stored hashed in the
+/// database. `scope` keeps different purposes apart; a newer token for the same person and
+/// purpose replaces the older one.
 pub async fn issue_link_token(
     state: &AppState,
     scope: &str,
@@ -288,38 +406,37 @@ pub async fn issue_link_token(
     ttl_secs: u64,
 ) -> AppResult<String> {
     let token = random_token(32);
-    let hash = hash_token(&token);
-    let mut redis = state.redis.clone();
-    let owner_key = format!("auth:{scope}_owner:{owner}");
-    let previous: Option<String> = redis.get(&owner_key).await?;
-    let mut pipe = redis::pipe();
-    if let Some(prev) = previous {
-        pipe.del(format!("auth:{scope}:{prev}"));
-    }
-    pipe.set_ex(format!("auth:{scope}:{hash}"), value.to_string(), ttl_secs)
-        .set_ex(&owner_key, &hash, ttl_secs);
-    pipe.query_async::<()>(&mut redis).await?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("DELETE FROM auth_link_tokens WHERE scope = $1 AND owner_id = $2").bind(scope).bind(owner).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO auth_link_tokens (hash, scope, owner_id, value, expires_at) VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))")
+        .bind(hash_token(&token))
+        .bind(scope)
+        .bind(owner)
+        .bind(value)
+        .bind(ttl_secs as f64)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(token)
 }
 
 pub async fn peek_link_token(state: &AppState, scope: &str, token: &str) -> AppResult<Option<serde_json::Value>> {
-    let mut redis = state.redis.clone();
-    let raw: Option<String> = redis.get(format!("auth:{scope}:{}", hash_token(token))).await?;
-    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
+    Ok(sqlx::query_scalar("SELECT value FROM auth_link_tokens WHERE hash = $1 AND scope = $2 AND expires_at > now()")
+        .bind(hash_token(token))
+        .bind(scope)
+        .fetch_optional(&state.db)
+        .await?)
 }
 
 pub async fn consume_link_token(state: &AppState, scope: &str, token: &str) -> AppResult<Option<serde_json::Value>> {
-    let mut redis = state.redis.clone();
-    let raw: Option<String> = redis.get_del(format!("auth:{scope}:{}", hash_token(token))).await?;
-    Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
+    Ok(sqlx::query_scalar("DELETE FROM auth_link_tokens WHERE hash = $1 AND scope = $2 AND expires_at > now() RETURNING value")
+        .bind(hash_token(token))
+        .bind(scope)
+        .fetch_optional(&state.db)
+        .await?)
 }
 
 pub async fn revoke_link_tokens(state: &AppState, scope: &str, owner: Uuid) -> AppResult<()> {
-    let mut redis = state.redis.clone();
-    let owner_key = format!("auth:{scope}_owner:{owner}");
-    let previous: Option<String> = redis.get_del(&owner_key).await?;
-    if let Some(prev) = previous {
-        let _: () = redis.del(format!("auth:{scope}:{prev}")).await?;
-    }
+    sqlx::query("DELETE FROM auth_link_tokens WHERE scope = $1 AND owner_id = $2").bind(scope).bind(owner).execute(&state.db).await?;
     Ok(())
 }

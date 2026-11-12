@@ -136,6 +136,12 @@ async fn main() -> Result<()> {
     };
 
     blob::check_at_start(&state).await?;
+    if routes::admin::redis_persistence(&state).await["persistent"] != serde_json::json!(true) {
+        tracing::warn!("Redis keeps nothing across a restart (no appendonly file or snapshots): rate limits and caches start empty after one; see SETUP.md");
+    }
+    if let Err(e) = auth::tokens::adopt_redis_sessions(&state).await {
+        tracing::warn!(error = %e, "could not copy sessions from Redis to the database");
+    }
     crm::docs::detect(&state).await;
     crm::docs::seed(&state).await.context("adding built-in document templates")?;
 

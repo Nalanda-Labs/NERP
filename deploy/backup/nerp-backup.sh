@@ -16,7 +16,7 @@
 # - Backups older than --keep-days are removed.
 # - Settings come from backend/.env (DATABASE_URL, UPLOAD_DIR), like the server's.
 #
-# Not included, on purpose: Redis (sessions and caches; people just sign in again) and
+# Not included, on purpose: Redis (rate limits and caches; sessions are in the database) and
 # backend/.env itself. Keep a copy of .env somewhere safe and separate: without its
 # JWT_SECRET and DATA_ENCRYPTION_KEY, mailbox passwords and other stored secrets in the
 # database cannot be read.

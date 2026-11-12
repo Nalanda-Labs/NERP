@@ -103,6 +103,26 @@ SQL
 Valkey listening on localhost only (the defaults). If Valkey has a password (`requirepass`),
 put it in `REDIS_URL` as `redis://:password@127.0.0.1:6379`.
 
+Let Valkey/Redis keep its data across restarts, with the append-only file
+(`/etc/valkey/valkey.conf` or `/etc/redis/redis.conf`):
+
+```ini
+appendonly yes
+appendfsync everysec          # at most a second of changes lost in a crash
+```
+
+```sh
+sudo systemctl restart valkey        # or redis-server
+redis-cli INFO persistence | grep aof_enabled     # aof_enabled:1
+```
+
+Sign-ins don't depend on it: sessions, refresh tokens and emailed links (password reset,
+invitations) are kept in PostgreSQL, with Redis holding a copy. What only Redis holds is
+short-lived: rate limits and sign-in lockouts, download links (10 minutes), sign-in round
+trips with outside providers, live-update routing and caches. Without persistence a Redis
+restart resets those (people mid-way through signing in with an outside provider start
+again; lockouts are lifted early). System → the server card shows whether Redis keeps its data.
+
 For point-in-time restores (step 8) the `nerp` role also streams the database's change log:
 
 ```sh

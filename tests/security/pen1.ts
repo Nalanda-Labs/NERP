@@ -65,12 +65,17 @@ const freshAccess = r.json.access_token;
 ok('the same refresh token is refused the second time', (await raw('POST', '/auth/refresh', { headers: { cookie: stolen } })).status === 401);
 // Past the grace period for two tabs, a reused token means a copy is out there: the
 // whole session ends, for the thief and the owner alike.
-const { execFileSync } = await import('node:child_process');
-const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+// Exchanged tokens are remembered in the database (auth_used_refresh); move this one's
+// exchange into the past instead of waiting out the grace period.
+const pg = (await import('pg')).default;
+const { dbUrl } = await import('../db/cleanup.ts');
+const db = new pg.Client({ connectionString: dbUrl });
+await db.connect();
 const hash = (await import('node:crypto')).createHash('sha256').update(stolen.slice(stolen.indexOf('=') + 1)).digest('hex');
-const used = execFileSync('redis-cli', ['-u', url, 'GET', `auth:rt_used:${hash}`]).toString().trim();
-ok('the exchanged token is remembered', used.includes('|'), used);
-execFileSync('redis-cli', ['-u', url, 'SET', `auth:rt_used:${hash}`, used.replace(/\|\d+$/, '|1000'), 'EX', '600']);
+const used = (await db.query('SELECT session_id FROM auth_used_refresh WHERE hash = $1', [hash])).rows[0];
+ok('the exchanged token is remembered', !!used?.session_id, used);
+await db.query("UPDATE auth_used_refresh SET used_at = now() - interval '10 minutes' WHERE hash = $1", [hash]);
+await db.end();
 ok('reusing it later is refused…', (await raw('POST', '/auth/refresh', { headers: { cookie: stolen } })).status === 401);
 ok('…and ends the session: the newer refresh token is dead', (await raw('POST', '/auth/refresh', { headers: { cookie: fresh } })).status === 401);
 ok('…and so is its access token', (await call(freshAccess)).status === 401);
