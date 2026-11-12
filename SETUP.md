@@ -75,7 +75,9 @@ sudo apt install -y texlive-luatex texlive-latex-recommended texlive-latex-extra
 
 (Arch: `postgresql valkey xmlsec libxml2 clang noto-fonts noto-fonts-cjk texlive-luatex
 texlive-latexextra libreoffice-fresh nodejs`.) xmlsec and libxml2 are for SAML sign-on: NERP
-checks SAML signatures with them.
+checks SAML signatures with them. NERP links to the installed xmlsec, so after a system update
+that changes its version, rebuild NERP (`cargo clean -p samael && cargo build --release`) or it
+won't start ("libxmlsec1.so… cannot open shared object file").
 
 **When PostgreSQL runs on another machine** (the usual case beyond a small office), install
 `postgresql-18` there as above, and on the NERP machine only what the backups need, from the
