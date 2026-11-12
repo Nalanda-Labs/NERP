@@ -394,6 +394,23 @@ CRM → **Insights**, built only from the company's own records (no outside serv
   made once each time a client goes quiet.
 - Everything is limited to records the viewer may see.
 
+#### Duplicates caught while typing
+
+While a contact, lead or company is entered, the form shows what is already known about
+them (`GET /crm/{type}/match`):
+
+- **Records of all three types** with the same email or phone, the same or a similar name
+  (trigram similarity, so typos and spelling variants match; people by first, middle and
+  last name), or the same business under another legal form ("Acme Ltd" and "Acme
+  Limited"); each with its type and why it matched, so the existing one is used instead.
+  Records the person may not see are only counted.
+- **Mail senders** whose emails came into a connected mailbox but who aren't in the CRM, and
+  **live chat visitors** who left that email. Creating the record with *Attach those*
+  (`adopt_history`) links their earlier emails and chats to it; a lead made from a live chat
+  gets them too.
+
+Other record types keep the same-type check by phone, email and exact name.
+
 #### Everything about a client
 
 A contact's or company's page shows **Everything**: the client's history across every module,

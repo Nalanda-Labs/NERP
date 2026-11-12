@@ -1214,10 +1214,15 @@ pub async fn import_item(
     Ok(id)
 }
 
-async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(body): Json<Map<String, Value>>) -> AppResult<Json<Detail>> {
+async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<String>, Json(mut body): Json<Map<String, Value>>) -> AppResult<Json<Detail>> {
     let t = entity_type(&state, &code).await?;
+    // Attach the person's earlier emails and live chats (found while typing) to the new record.
+    let adopt = body.remove("adopt_history").and_then(|v| v.as_bool()).unwrap_or(false);
     refuse_hidden(&body, &hidden_codes(&state, &auth, t.id).await?)?;
     let id = create_item(&state, &auth, &t, body, None).await?;
+    if adopt && [super::LEAD, super::CONTACT, super::COMPANY].contains(&t.id) {
+        super::matching::adopt_history(&state, id).await?;
+    }
     Ok(Json(load_detail(&state, &auth, &t, id).await?))
 }
 

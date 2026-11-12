@@ -291,6 +291,8 @@ async fn welcome(state: &AppState, c: &Channel, s: &Session, body: &str) -> AppR
         m.insert("assigned_to".into(), json!(operator));
         let t = entity_type_by_id(state, LEAD).await?;
         let id = create_item(state, &auth, &t, m, None).await?;
+        // Their earlier emails (and chats) belong with the new lead.
+        crate::crm::matching::adopt_history(state, id).await?;
         broadcast(state, LEAD, id, false).await;
         item = Some(id);
     }
