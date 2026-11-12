@@ -59,4 +59,12 @@ changed="$(diff <(count_all "$SCRATCH_URL") <(count_all "$LIVE_URL") | grep -c '
 total_rows="$(count_all "$SCRATCH_URL" | awk -F'|' '{s += $2} END {print s}')"
 echo "restored $(tables "$SCRATCH_URL" | wc -l) tables, $total_rows rows, $people people; $changed tables changed in the live database since"
 
-if [ "$fail" = 0 ]; then echo "backup OK"; else echo "backup FAILED verification"; exit 1; fi
+# The result goes into the backup's manifest, where System → Health reads it.
+if [ "$fail" = 0 ]; then
+  echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$BACKUP/manifest.txt" 2>/dev/null || true
+  echo "backup OK"
+else
+  echo "verify_failed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$BACKUP/manifest.txt" 2>/dev/null || true
+  echo "backup FAILED verification"
+  exit 1
+fi

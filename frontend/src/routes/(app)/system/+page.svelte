@@ -87,7 +87,7 @@
 <div class="space-y-6">
 	<div>
 		<h1 class="text-2xl font-semibold text-slate-900">System</h1>
-		<p class="text-sm text-slate-500">Background jobs, outgoing email and live connections. <a class="text-brand-600 hover:underline" href="/system/storage">Storage →</a> <a class="ml-2 text-brand-600 hover:underline" href="/system/backups">Backups →</a></p>
+		<p class="text-sm text-slate-500">Background jobs, outgoing email and live connections. <a class="text-brand-600 hover:underline" href="/system/storage">Storage →</a> <a class="ml-2 text-brand-600 hover:underline" href="/system/backups">Backups →</a> <a class="ml-2 text-brand-600 hover:underline" href="/system/health">Health →</a></p>
 	</div>
 
 	<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

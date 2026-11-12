@@ -69,6 +69,11 @@ impl Mailer {
         })
     }
 
+    /// Connects to the mail server (and signs in, when there are credentials) without sending.
+    pub async fn test_connection(&self) -> Result<bool> {
+        Ok(self.transport.test_connection().await?)
+    }
+
     pub async fn send(&self, email: &Email, attachments: Vec<Attachment>) -> Result<()> {
         let builder = Message::builder()
             .from(self.from.clone())
