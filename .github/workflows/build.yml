@@ -25,6 +25,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
+      # SAML sign-on verifies signatures with xmlsec (samael builds its bindings with clang).
+      - name: Install xmlsec and libxml2
+        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libxmlsec1-dev libxml2-dev libclang-dev pkg-config
       - run: cargo build --locked
       - run: cargo test --locked
 

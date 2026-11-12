@@ -59,7 +59,8 @@ jobs:
           echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            dovecot-imapd postgresql-client-18 postgresql-18 poppler-utils redis-tools ffmpeg \
+            dovecot-imapd postgresql-client-18 postgresql-18 poppler-utils \
+            libxmlsec1-dev libxml2-dev libclang-dev pkg-config redis-tools ffmpeg \
             slapd ldap-utils coturn \
             texlive-luatex texlive-latex-recommended texlive-latex-extra texlive-pictures \
             fonts-noto-core fonts-noto-cjk fonts-texgyre fonts-liberation fonts-dejavu-core \

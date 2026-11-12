@@ -65,6 +65,7 @@ The steps for Debian/Ubuntu; Arch package names are noted where they differ.
 sudo apt install -y postgresql-common
 sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
 sudo apt install -y postgresql-18 redis-server build-essential pkg-config rsync git \
+  libxmlsec1-dev libxml2-dev libclang-dev \
   fonts-noto-core fonts-noto-cjk          # valkey-server instead of redis-server where packaged
 # Optional document engines
 sudo apt install -y texlive-luatex texlive-latex-recommended texlive-latex-extra fonts-texgyre \
@@ -72,8 +73,9 @@ sudo apt install -y texlive-luatex texlive-latex-recommended texlive-latex-extra
 # Node 24: from nodejs.org or your distribution (Rust is installed for the nerp user below)
 ```
 
-(Arch: `postgresql valkey noto-fonts noto-fonts-cjk texlive-luatex texlive-latexextra
-libreoffice-fresh nodejs`.)
+(Arch: `postgresql valkey xmlsec libxml2 clang noto-fonts noto-fonts-cjk texlive-luatex
+texlive-latexextra libreoffice-fresh nodejs`.) xmlsec and libxml2 are for SAML sign-on: NERP
+checks SAML signatures with them.
 
 **When PostgreSQL runs on another machine** (the usual case beyond a small office), install
 `postgresql-18` there as above, and on the NERP machine only what the backups need, from the

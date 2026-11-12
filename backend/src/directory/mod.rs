@@ -4,12 +4,14 @@
 //!   those accounts sign in with their directory password (checked by binding as them).
 //!   Someone in the directory who has no NERP account yet gets one on first sign-in.
 //! - OpenID Connect: a "Sign in with …" button on the login page.
+//! - SAML 2.0: the same for identity providers that speak SAML (see `saml`).
 //! - Other accounts (Google, Microsoft, Apple, Facebook, X, more OpenID Connect providers)
 //!   for existing employees (see `social`).
 //!
 //! Settings live in the one-row `directory_config` table; secrets are sealed with the data key.
 
 pub mod ldap;
+pub mod saml;
 pub mod social;
 pub mod sso;
 
@@ -42,6 +44,11 @@ pub fn router() -> Router<AppState> {
         .route("/auth/sso", get(sso::public_info))
         .route("/auth/sso/start", get(sso::start))
         .route("/auth/sso/callback", get(sso::callback))
+        .route("/directory/saml", put(saml::put_config))
+        .route("/directory/saml/refresh", post(saml::refresh))
+        .route("/auth/saml/metadata", get(saml::metadata))
+        .route("/auth/saml/start", get(saml::start))
+        .route("/auth/saml/acs", post(saml::acs))
         // Other accounts (Google, Microsoft, Apple, Facebook, X, OpenID Connect).
         .route("/directory/providers", get(social::list).post(social::create))
         .route("/directory/providers/{id}", put(social::change).delete(social::remove))
@@ -107,6 +114,7 @@ async fn get_config(State(state): State<AppState>, auth: AuthUser) -> AppResult<
         "sso": s.sso,
         "sso_has_secret": s.sso_secret.is_some(),
         "sso_redirect_uri": sso::redirect_uri(&state),
+        "saml": saml::settings(&state).await?,
         "accounts": counts.into_iter().map(|(k, v)| (k, json!(v))).collect::<serde_json::Map<_, _>>(),
     })))
 }

@@ -2,6 +2,7 @@
 	// Employees from an LDAP directory, and single sign-on through an OpenID Connect provider.
 	import { onMount } from 'svelte';
 	import SignInProviders from '#lib/components/SignInProviders.svelte';
+	import SamlSettings from '#lib/components/SamlSettings.svelte';
 	import { api } from '#lib/api.ts';
 	import { formatDateTime } from '#lib/format.ts';
 	import { toasts } from '#lib/toast.svelte.ts';
@@ -256,10 +257,12 @@
 			<p class="text-xs text-slate-500">People are matched by email. The provider's sign-in replaces the NERP password; a code from the authenticator app is still asked for when the person has one or the company requires it.</p>
 		</form>
 
+		<SamlSettings />
+
 		<SignInProviders />
 
 		<p class="text-sm text-slate-500" data-accounts>
-			Active accounts: {cfg.accounts.local ?? 0} with a NERP password, {cfg.accounts.ldap ?? 0} from the directory, {cfg.accounts.sso ?? 0} through sign-on only.
+			Active accounts: {cfg.accounts.local ?? 0} with a NERP password, {cfg.accounts.ldap ?? 0} from the directory, {(cfg.accounts.sso ?? 0) + (cfg.accounts.saml ?? 0)} through sign-on only.
 		</p>
 	{/if}
 </div>

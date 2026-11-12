@@ -117,7 +117,7 @@ try {
   const evil = ['https://evil.example/x', '//evil.example/x', '/\\evil.example', 'javascript:alert(1)', '\\\\evil.example', '/%2F%2Fevil.example', 'https:evil.example'];
   const bad: string[] = [];
   for (const target of evil) {
-    for (const path of [`/auth/sso/start?next=${encodeURIComponent(target)}`, `/auth/sso/start?return_to=${encodeURIComponent(target)}`, `/auth/providers/00000000-0000-4000-8000-000000000000/start?next=${encodeURIComponent(target)}`]) {
+    for (const path of [`/auth/sso/start?next=${encodeURIComponent(target)}`, `/auth/sso/start?return_to=${encodeURIComponent(target)}`, `/auth/providers/00000000-0000-4000-8000-000000000000/start?next=${encodeURIComponent(target)}`, `/auth/saml/start?RelayState=${encodeURIComponent(target)}`]) {
       const x = await raw('GET', path);
       const loc = x.headers.get('location') ?? '';
       if (/^(https?:)?\/\/evil|^\/\\|^\\\\|^javascript:|evil\.example/i.test(loc) && !/accounts\.|login\.|appleid|facebook|twitter|oauth/i.test(loc.split('?')[0])) bad.push(`${path} → ${loc}`);
