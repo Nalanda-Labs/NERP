@@ -3,7 +3,7 @@
 //!
 //! For every invoice in the period (CRM invoices that aren't lost or deleted), in the base
 //! currency:
-//! - **revenue**: its rows' amounts without tax (after discounts), or its amount when it has
+//! - **revenue**: its rows' amounts without tax (after discounts and credit notes), or its amount when it has
 //!   no rows; **discounts**: what the discounts took off the list prices;
 //! - **goods**: what the products cost (each row's cost, else the product's stock cost);
 //! - **support** and **task time**: minutes support spent answering the client's tickets and
@@ -120,6 +120,8 @@ struct Invoice {
     total_base: Option<Decimal>,
     paid_on: Option<NaiveDate>,
     open: bool,
+    /// The share of the invoice taken back by credit notes.
+    credited_share: Option<Decimal>,
 }
 
 async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<ReportQuery>) -> AppResult<Json<Value>> {
@@ -146,7 +148,8 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
                 a.due_date, a.total * a.fx_rate AS total_base,
                 (SELECT MAX(p.date) FROM acc_allocations al JOIN acc_payments p ON p.id = al.payment_id
                   WHERE al.doc_kind = 'invoice' AND al.doc_id = i.id AND p.status = 'posted') AS paid_on,
-                COALESCE(a.status = 'open', FALSE) AS open
+                COALESCE(a.status = 'open', FALSE) AS open,
+                a.credited / NULLIF(a.total, 0) AS credited_share
          FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
          LEFT JOIN crm_stages s ON s.id = i.stage_id
          LEFT JOIN acc_invoices a ON a.item_id = i.id AND a.status <> 'void'
@@ -184,9 +187,11 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
                 }
                 _ => None,
             };
+            // Credit notes take back their share of each row's revenue (shown with the discounts).
+            let kept = Decimal::ONE - inv.credited_share.unwrap_or_default();
             let rf = Figures {
-                revenue: l.net * inv.rate,
-                discounts: (list.net - l.net).max(Decimal::ZERO) * inv.rate,
+                revenue: l.net * kept * inv.rate,
+                discounts: ((list.net - l.net).max(Decimal::ZERO) + l.net * (Decimal::ONE - kept)) * inv.rate,
                 goods: unit_cost_here.unwrap_or_default() * r.quantity * inv.rate,
                 ..Default::default()
             };
@@ -194,7 +199,9 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
             row_figs.push((r.product_id, r.name.clone(), rf));
         }
         if rows.is_empty() {
-            f.revenue = inv.opportunity * inv.rate;
+            let kept = Decimal::ONE - inv.credited_share.unwrap_or_default();
+            f.revenue = inv.opportunity * kept * inv.rate;
+            f.discounts = inv.opportunity * (Decimal::ONE - kept) * inv.rate;
         }
         // Late payment: days after the due date (paid, or overdue so far).
         if let (Some(due), Some(total)) = (inv.due_date, inv.total_base) {

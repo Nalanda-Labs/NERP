@@ -95,5 +95,6 @@ export const STATUS_BADGE: Record<string, string> = {
 	open: 'bg-sky-50 text-sky-700',
 	posted: 'bg-sky-50 text-sky-700',
 	paid: 'bg-emerald-50 text-emerald-700',
+	credited: 'bg-amber-50 text-amber-800',
 	void: 'bg-red-50 text-red-700'
 };

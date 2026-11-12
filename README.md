@@ -1248,6 +1248,32 @@ configured, not built in for one country, and there are no country-specific retu
     the lowest point and the first week it would go below zero. Each week opens to show what
     makes it up; deals without a close date are listed apart.
 
+### Credit notes
+
+On an invoice in the books, **Credit note…** takes back part or all of it (a return, a
+discount given afterwards, a mistake). Its entry reverses the invoice's own lines in
+proportion — receivable, sales by account and each tax — and the invoice is owed that much
+less; once payments and credit notes cover it, it is settled (*credited* when credit notes did
+part of it). A credit note on a paid invoice leaves the client in credit. Credit notes can be
+voided (a reversing entry); an invoice with credit notes is voided only after them. Aging,
+receivables, the cash forecast and true profit count them.
+
+### Commissions
+
+CRM → **Commissions**. Plans (permission *Manage commissions*) pay a percent of the paid sale
+without tax, in the base currency — optionally only on some products, with monthly tiers (a
+higher rate once a person's paid sales in the month pass an amount), for chosen people,
+departments or everyone. An invoice's responsible person earns as its money comes in: what an
+invoice has earned is the sale × the share paid and not credited. Every change — a payment, a
+voided payment, a credit note, a void — enters the difference in the current open month,
+earned or taken back, so statements always add up to what was really paid.
+
+- **Statements:** everyone sees their own month, line by line; department heads and deputies
+  their team's; those who manage commissions everyone's.
+- **Payroll:** lock a month once paid out (later changes land in the next open month), export
+  it as CSV (month, employee, email, earned, taken back, net, currency), and *Recalculate*
+  after changing plans.
+
 ## Workgroups and projects
 
 Under Workgroups in the sidebar. A **workgroup** is an ongoing team space; a **project** is the

@@ -55,13 +55,14 @@ pub async fn paid(db: impl sqlx::PgExecutor<'_>, kind: &str, doc: Uuid) -> AppRe
 
 /// Open or paid, from what has been paid. Returns true when it just became paid.
 pub async fn refresh(tx: &mut ledger::Tx<'_>, item: Uuid) -> AppResult<bool> {
-    let row: Option<(Decimal, String)> = sqlx::query_as("SELECT total, status FROM acc_invoices WHERE item_id = $1 FOR UPDATE").bind(item).fetch_optional(&mut **tx).await?;
-    let Some((total, status)) = row else { return Ok(false) };
+    let row: Option<(Decimal, Decimal, String)> = sqlx::query_as("SELECT total, credited, status FROM acc_invoices WHERE item_id = $1 FOR UPDATE").bind(item).fetch_optional(&mut **tx).await?;
+    let Some((total, credited, status)) = row else { return Ok(false) };
     if status == "void" {
         return Ok(false);
     }
     let p = paid(&mut **tx, "invoice", item).await?;
-    let new = if p >= total { "paid" } else { "open" };
+    // Settled by payments, or by credit notes (with or without payments).
+    let new = if p + credited < total { "open" } else if credited.is_zero() || p >= total { "paid" } else { "credited" };
     sqlx::query("UPDATE acc_invoices SET status = $2 WHERE item_id = $1").bind(item).bind(new).execute(&mut **tx).await?;
     Ok(new == "paid" && status != "paid")
 }
@@ -123,7 +124,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Lis
     let rows: Vec<R> = sqlx::query_as(
         "WITH x AS (
             SELECT i.id, i.number, i.title, i.currency, COALESCE(a.party_id, i.company_id, (SELECT c.contact_id FROM crm_item_contacts c WHERE c.item_id = i.id ORDER BY c.is_primary DESC, c.sort LIMIT 1)) AS party,
-                   i.opportunity, i.stage_semantics, a.date, COALESCE(a.due_date, i.close_date) AS due, a.total, a.status, s.name AS stage,
+                   i.opportunity, i.stage_semantics, a.date, COALESCE(a.due_date, i.close_date) AS due, a.total - a.credited AS total, a.status, s.name AS stage,
                    COALESCE((SELECT SUM(al.amount) FROM acc_allocations al JOIN acc_payments p ON p.id = al.payment_id WHERE al.doc_kind = 'invoice' AND al.doc_id = i.id AND p.status = 'posted'), 0) AS paid
             FROM crm_items i LEFT JOIN acc_invoices a ON a.item_id = i.id LEFT JOIN crm_stages s ON s.id = i.stage_id
             WHERE i.entity_type = 6 AND i.deleted_at IS NULL)
@@ -133,7 +134,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Lis
              WHEN 'unposted' THEN (x.status IS NULL OR x.status = 'void') AND x.stage_semantics <> 'failure'
              WHEN 'open' THEN x.status = 'open'
              WHEN 'overdue' THEN x.status = 'open' AND x.due < current_date
-             WHEN 'paid' THEN x.status = 'paid'
+             WHEN 'paid' THEN x.status IN ('paid', 'credited')
              WHEN 'void' THEN x.status = 'void'
              ELSE x.stage_semantics <> 'failure' OR x.status IS NOT NULL END
            AND ($2::uuid IS NULL OR x.party = $2)
@@ -171,9 +172,9 @@ async fn detail(State(state): State<AppState>, auth: AuthUser, Path(item): Path<
 }
 
 pub async fn invoice_json(state: &AppState, item: Uuid) -> AppResult<Value> {
-    type A = (Uuid, NaiveDate, Option<NaiveDate>, Option<Uuid>, Option<String>, String, Decimal, Decimal, String, Option<i64>);
+    type A = (Uuid, NaiveDate, Option<NaiveDate>, Option<Uuid>, Option<String>, String, Decimal, Decimal, String, Option<i64>, Decimal);
     let a: Option<A> = sqlx::query_as(
-        "SELECT a.entry_id, a.date, a.due_date, a.party_id, p.title, a.currency, a.fx_rate, a.total, a.status, e.number
+        "SELECT a.entry_id, a.date, a.due_date, a.party_id, p.title, a.currency, a.fx_rate, a.total, a.status, e.number, a.credited
          FROM acc_invoices a LEFT JOIN crm_items p ON p.id = a.party_id LEFT JOIN acc_entries e ON e.id = a.entry_id WHERE a.item_id = $1",
     )
     .bind(item)
@@ -187,11 +188,19 @@ pub async fn invoice_json(state: &AppState, item: Uuid) -> AppResult<Value> {
     .fetch_all(&state.db)
     .await?;
     let paid = paid(&state.db, "invoice", item).await?;
+    let credits: Vec<(Uuid, i64, NaiveDate, Decimal, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, number, date, amount, reason, status FROM acc_credit_notes WHERE invoice_id = $1 ORDER BY number",
+    )
+    .bind(item)
+    .fetch_all(&state.db)
+    .await?;
     Ok(match a {
         None => json!({ "item_id": item, "status": "unposted", "payments": [] }),
         Some(a) => json!({
             "item_id": item, "entry_id": a.0, "date": a.1, "due_date": a.2, "party_id": a.3, "party_name": a.4, "currency": a.5, "fx_rate": a.6,
-            "total": a.7, "status": a.8, "entry_number": a.9, "paid": paid, "balance": if a.8 == "void" { Decimal::ZERO } else { a.7 - paid },
+            "total": a.7, "status": a.8, "entry_number": a.9, "paid": paid, "credited": a.10,
+            "balance": if a.8 == "void" { Decimal::ZERO } else { a.7 - a.10 - paid },
+            "credit_notes": credits.into_iter().map(|(id, n, d, amt, r, st)| json!({ "id": id, "number": n, "date": d, "amount": amt, "reason": r, "status": st })).collect::<Vec<_>>(),
             "payments": payments.into_iter().map(|(id, n, d, amt, st, acc)| json!({ "id": id, "number": n, "date": d, "amount": amt, "status": st, "account": acc })).collect::<Vec<_>>(),
         }),
     })
@@ -333,6 +342,10 @@ async fn void_invoice(State(state): State<AppState>, auth: AuthUser, Path(item):
     if !paid(&mut *tx, "invoice", item).await?.is_zero() {
         return Err(AppError::bad("payments are allocated to this invoice; void those payments first"));
     }
+    let credited: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_credit_notes WHERE invoice_id = $1 AND status = 'posted')").bind(item).fetch_one(&mut *tx).await?;
+    if credited {
+        return Err(AppError::bad("credit notes are posted against this invoice; void them first"));
+    }
     let when = match body.and_then(|b| b.0.date) {
         Some(d) => d,
         None => void_date(&state, date).await?,
@@ -342,5 +355,6 @@ async fn void_invoice(State(state): State<AppState>, auth: AuthUser, Path(item):
     tx.commit().await?;
     let _ = crate::crm::timeline(&state.db, item, "accounting", Some(auth.id), None, json!({ "event": "voided" })).await;
     audit::record(&state.db, Some(auth.id), "accounting.invoice_void", "crm_item", Some(item.to_string()), json!({}), None).await;
+    crate::commissions::sync_invoice(&state, item).await;
     Ok(Json(invoice_json(&state, item).await?))
 }
