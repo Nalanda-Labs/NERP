@@ -326,6 +326,37 @@ sudo systemctl restart nerp
 Database changes apply on start: each migration runs in one transaction (a failed one changes
 nothing), and when several instances start together only one migrates while the others wait.
 
+### Sandbox
+
+An anonymised copy of the company to try automation, imports and settings on (System →
+Sandbox). It needs a second database and a second NERP running on it in sandbox mode:
+
+```sh
+# The live NERP's backend/.env: where the copy goes and where people open it.
+SANDBOX_DATABASE_URL=postgres://nerp:<password>@db-host/nerp_sandbox   # the role needs CREATEDB
+SANDBOX_URL=https://sandbox.erp.example.com
+
+# /opt/nerp/backend/sandbox.env, for the sandbox's own server:
+DATABASE_URL=postgres://nerp:<password>@db-host/nerp_sandbox
+BIND_ADDR=127.0.0.1:8081
+PUBLIC_URL=https://sandbox.erp.example.com
+REDIS_URL=redis://127.0.0.1:6379/1      # another Redis database than the live one
+UPLOAD_DIR=/opt/nerp/backend/sandbox-data
+SANDBOX_DATABASE_URL=
+
+sudo install -d -o nerp -g nerp /opt/nerp/backend/sandbox-data
+sudo cp deploy/systemd/nerp-sandbox.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now nerp-sandbox
+```
+
+Point `sandbox.erp.example.com` at 127.0.0.1:8081 in the proxy like the live site, then press
+*Refresh the sandbox* on the live System → Sandbox page (it copies the database with
+`pg_dump`/`pg_restore` — the same version as the server; `PG_BIN` if they aren't on the path —
+and anonymises it; a copy that couldn't be fully anonymised is removed). The sandbox shows a
+banner on every page, keeps its emails in an outbox instead of sending them, calls nothing
+outside, polls no mailbox or calendar and refuses backups. Refresh it whenever you like; it
+replaces the copy.
+
 ### Several instances
 
 Run more instances on other machines with the same `.env` (same database, Redis and

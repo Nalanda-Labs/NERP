@@ -97,6 +97,9 @@ pub struct Failure {
 /// CRM_WEBHOOK_ALLOW_PRIVATE), without redirects.
 async fn pinned_client(state: &AppState, url: &reqwest::Url, timeout_secs: u64) -> Result<reqwest::Client, Failure> {
     let fail = |msg: String, retry: bool| Failure { msg, retry, status: None, snippet: None };
+    if state.config.sandbox {
+        return Err(fail("this is a sandbox: it doesn't call outside services".into(), false));
+    }
     let host = url.host_str().unwrap_or("").trim_start_matches('[').trim_end_matches(']').to_string();
     let port = url.port_or_known_default().unwrap_or(443);
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))

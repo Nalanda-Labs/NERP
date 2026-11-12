@@ -157,6 +157,10 @@ pub(crate) fn backup_time(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// Runs a script in the background; its outcome is kept under `key` in the settings.
 async fn run(state: &AppState, auth: &AuthUser, ip: Option<&str>, script: &str, key: &'static str, what: &'static str) -> AppResult<Json<Value>> {
     auth.require(perm::SYSTEM_MANAGE)?;
+    // The scripts work on the live database (backend/.env): never from a sandbox.
+    if state.config.sandbox {
+        return Err(AppError::bad("this is a sandbox: backups are made on the live system"));
+    }
     let path = scripts().join(script);
     if !path.is_file() {
         return Err(AppError::bad(format!("{} was not found (set BACKUP_SCRIPTS)", path.display())));
@@ -274,6 +278,9 @@ async fn restore_to_moment(State(state): State<AppState>, auth: AuthUser, Client
 /// Pauses the app, runs a restore script over the live data, brings the schema up to date
 /// and carries on; the outcome is kept as `backup_restore_last`.
 async fn restore_with(state: &AppState, auth: &AuthUser, ip: Option<&str>, script: &str, args: Vec<String>, name: String, action: &str) -> AppResult<Json<Value>> {
+    if state.config.sandbox {
+        return Err(AppError::bad("this is a sandbox: restores are done on the live system"));
+    }
     let script = scripts().join(script);
     if !script.is_file() {
         return Err(AppError::bad(format!("{} was not found (set BACKUP_SCRIPTS)", script.display())));

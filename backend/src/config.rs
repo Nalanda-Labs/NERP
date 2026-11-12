@@ -25,6 +25,8 @@ pub struct Config {
     pub smtp: SmtpConfig,
     /// Run the background job worker in this process.
     pub worker_enabled: bool,
+    /// A sandbox instance (an anonymised copy): nothing leaves it — no email, no outside calls.
+    pub sandbox: bool,
     pub worker_concurrency: usize,
     pub docs: DocsConfig,
     /// Key for secrets stored in the database (mailbox passwords).
@@ -204,6 +206,7 @@ impl Config {
                 from: var_or("MAIL_FROM", "NERP <no-reply@nerp.local>"),
             },
             worker_enabled: parse("WORKER_ENABLED", "true")?,
+            sandbox: parse("SANDBOX", "false")?,
             worker_concurrency: parse("WORKER_CONCURRENCY", "4")?,
             data_key,
             file_keys: crate::blob::Keys::from_env()?,

@@ -1,0 +1,33 @@
+# A sandbox: a second NERP on the anonymised copy that System → Sandbox refreshes. It sends no
+# email, calls nothing outside and can't run backups. Install: copy to /etc/systemd/system/,
+# put the sandbox's settings in /opt/nerp/backend/sandbox.env (see SETUP.md), then
+#   systemctl enable --now nerp-sandbox
+[Unit]
+Description=NERP sandbox
+After=network-online.target postgresql.service redis.service valkey.service
+Wants=network-online.target
+
+[Service]
+User=nerp
+Group=nerp
+WorkingDirectory=/opt/nerp/backend
+# These override backend/.env (which NERP also reads): its own database, port, address,
+# Redis database and an empty upload folder.
+EnvironmentFile=/opt/nerp/backend/sandbox.env
+Environment=SANDBOX=true
+ExecStart=/opt/nerp/backend/target/release/nerp
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/nerp/backend/sandbox-data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

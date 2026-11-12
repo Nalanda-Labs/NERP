@@ -1906,6 +1906,23 @@ documents and warehouses need the "Manage inventory" permission.
     Transfers aren't posted. A movement that can't be posted (a locked period) still moves
     the stock, and is logged.
 
+## Sandbox
+
+System → **Sandbox** (system managers) keeps an anonymised copy of the company in a second
+database (`SANDBOX_DATABASE_URL`) for trying automation, imports and settings. *Refresh*
+copies the live database (`pg_dump`/`pg_restore`) and, in one transaction, anonymises it:
+clients' names, contact details, addresses, notes, custom fields, emails, chats, tickets, form
+data, bookings, orders and campaign recipients are made up or removed; API keys, app
+passwords, webhooks, mailbox and calendar connections, directory and sign-in secrets, BI
+passwords and employees' hourly costs go; stored files are out of reach; sessions and queued
+jobs are cleared. Amounts, dates, pipelines, stages, products and automation stay, and
+employees sign in as usual. If anonymising fails, the copy is dropped.
+
+A second NERP runs on the copy with `SANDBOX=true` (deploy/systemd/nerp-sandbox.service; see
+SETUP.md): every page shows a banner, its emails stay in an outbox (System → Sandbox) instead
+of being sent, it calls no outside service, polls no mailbox or calendar, syncs no directory,
+refuses backups and restores, and uses its own real-time channel.
+
 ## Personal data requests
 
 Administration → **Data requests** (permission *Handle personal data requests*) answers people
