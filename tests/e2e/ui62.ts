@@ -21,7 +21,8 @@ const board = (await admin.post('/boards', { title: `Links ${s}` })).data;
 const ctx = async (email: string | null, password = 'password123') => {
   const p = await (await browser.newContext({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', locale: 'en-GB' })).newPage();
   p.on('pageerror', (e) => errors.push('PAGEERROR ' + e.message));
-  p.on('console', (m) => m.type() === 'error' && !/401|400|403|404|409|Failed to load resource/.test(m.text()) && errors.push(m.text()));
+  // The board library's unload handler is refused by the app's permissions policy (as in ui55).
+  p.on('console', (m) => m.type() === 'error' && !/401|400|403|404|409|Failed to load resource|unload is not allowed/.test(m.text()) && errors.push(m.text()));
   pages.push(p);
   if (email) {
     await p.goto(B + '/login'); await p.fill('#email', email); await p.fill('#password', password);

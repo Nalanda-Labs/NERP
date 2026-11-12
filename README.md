@@ -831,7 +831,7 @@ All settings are environment variables (see `backend/.env.example`):
 |---|---|---|
 | `DATABASE_URL` | — | `postgres://user:pass@host:5433/nerp` |
 | `DATABASE_MAX_CONNECTIONS` | `20` | connections in the pool |
-| `REDIS_URL` | `redis://127.0.0.1:6379` | |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | rate limits, lockouts, caches and live updates; turn on its append-only file (SETUP.md). Sessions and emailed links are in PostgreSQL |
 | `JWT_SECRET` | — | at least 32 characters |
 | `BIND_ADDR` | `127.0.0.1:8080` | |
 | `UPLOAD_DIR` | `./data/uploads` | back this up together with the database |
