@@ -31,6 +31,8 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(files::router(&state))
         .merge(settings::router())
         .merge(audit::router())
+        .merge(crate::audit_chain::router())
+        .merge(crate::export::router())
         .merge(security::router())
         .merge(admin::router())
         .merge(crate::notify::router())

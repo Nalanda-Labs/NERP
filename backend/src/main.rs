@@ -1,5 +1,7 @@
 mod api;
 mod audit;
+mod audit_chain;
+mod export;
 mod auth;
 mod bi;
 mod blob;
@@ -136,6 +138,9 @@ async fn main() -> Result<()> {
     };
 
     blob::check_at_start(&state).await?;
+    if let Err(e) = export::at_start(&state).await {
+        tracing::warn!(error = ?e, "marking interrupted exports failed");
+    }
     if routes::admin::redis_persistence(&state).await["persistent"] != serde_json::json!(true) {
         tracing::warn!("Redis keeps nothing across a restart (no appendonly file or snapshots): rate limits and caches start empty after one; see SETUP.md");
     }
