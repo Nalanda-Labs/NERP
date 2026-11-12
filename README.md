@@ -354,6 +354,27 @@ amounts.
   - Won and lost count by closing date; new deals and the funnel count by creation date.
   - Everything is limited to records the viewer may see.
 
+
+#### True profit
+
+CRM → Analytics → **True profit** (for those who read the books, and CRM administrators): what
+each client, deal, product or salesperson really earned in a period.
+
+- **Revenue:** invoices in the period (not lost or deleted), without tax and after discounts
+  (the discounts are shown); in the base currency.
+- **Goods:** what the products cost — each row's cost, which follows the stock's FIFO or
+  average cost for counted products, else the product's cost.
+- **Support time:** minutes support logged answering the client's tickets (a company's
+  contacts count too), and **task time:** time logged on tasks linked to the client, its
+  contacts, deals and invoices — each at the person's hourly cost (Costs and rates: per person,
+  or a default). A client's time is spread over its invoices by revenue.
+- **Late payment:** for invoices in the books, days paid after the due date (or overdue so
+  far) × the amount × the yearly financing rate.
+- Profit = revenue − goods − support − task time − late payment, with the margin. The same
+  invoice figures add up by client, deal (through a quote to its deal), salesperson (the
+  invoice's responsible person) or product (its costs spread over its rows by revenue).
+- Hourly costs and rates are set by those who manage employees or CRM administrators.
+
 ### Automation (robots and triggers)
 
 CRM settings → Automation shows each pipeline as columns of stages.

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { PERM } from '#lib/types.ts';
+	import { session } from '#lib/session.svelte.ts';
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { replaceState } from '$app/navigation';
@@ -262,6 +264,7 @@
 		<h1 class="text-2xl font-semibold text-slate-900">Sales analytics</h1>
 		{#if report}<span class="text-sm text-slate-500">{periodText}</span>{/if}
 		{#if loading && report}<span class="text-xs text-slate-400">Updating…</span>{/if}
+		{#if session.can(PERM.ACCOUNTING_VIEW) || session.can(PERM.CRM_ADMIN)}<a class="btn btn-secondary ml-auto" href="/crm/analytics/profit" data-true-profit>True profit</a>{/if}
 	</div>
 
 	<!-- Filters: one row above the charts -->

@@ -15,6 +15,7 @@ pub mod docs;
 pub mod email;
 mod fields;
 pub mod migrate;
+mod profit;
 pub(crate) use fields::custom_fields as fields_custom;
 pub(crate) mod items;
 pub(crate) mod money;
@@ -53,6 +54,7 @@ pub fn router() -> Router<AppState> {
         .merge(permissions::router())
         .merge(tools::router())
         .merge(migrate::router())
+        .merge(profit::router())
         .merge(docs::api::router())
         .merge(requisites::router())
         .merge(automation::router())
