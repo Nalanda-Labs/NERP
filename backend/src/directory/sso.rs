@@ -121,7 +121,7 @@ pub(crate) fn issuer_ok_pub(issuer: &str) -> bool {
 pub async fn public_info(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let s = load(&state).await?;
     let on = s.sso.enabled && s.sso_secret.is_some();
-    Ok(Json(json!({ "enabled": on, "label": if on { Some(s.sso.button_label) } else { None } })))
+    Ok(Json(json!({ "enabled": on, "label": if on { Some(s.sso.button_label) } else { None }, "saml": super::saml::public_info(&state).await })))
 }
 
 fn to_login(error: &str) -> Response {
@@ -176,25 +176,28 @@ pub async fn callback(State(state): State<AppState>, meta: ClientMeta, Query(q):
         return to_login(&q.error_description.unwrap_or(e));
     }
     match finish(&state, &meta, q.code.unwrap_or_default(), q.state.unwrap_or_default()).await {
-        // A code from the authenticator app (or setting one up) still comes next; the login
-        // page takes it from here.
-        Ok(user) => match second_step(&state, user).await {
-            Ok(Some(next)) => {
-                let step = if next["two_factor_required"] == json!(true) { "code" } else { "setup" };
-                Redirect::to(&format!("/login?{}", url_encode(&[("step", step), ("challenge", next["challenge"].as_str().unwrap_or_default())]))).into_response()
-            }
-            Ok(None) => match tokens::create_session(&state, user, &meta).await {
-            Ok((_, refresh)) => {
-                (AppendHeaders([(header::SET_COOKIE, tokens::refresh_cookie(&state, &refresh))]), Redirect::to("/")).into_response()
-            }
-                Err(e) => to_login(&e.to_string()),
-            },
-            Err(e) => to_login(&e.to_string()),
-        },
+        Ok(user) => complete_sign_in(&state, &meta, user).await,
         Err(e) => {
             audit::record(&state.db, None, "auth.sso_failed", "user", None, json!({ "error": e }), meta.ip.as_deref()).await;
             to_login(&e)
         }
+    }
+}
+
+/// After an outside sign-in (OpenID Connect, SAML): a code from the authenticator app (or
+/// setting one up) may still come next, which the login page takes from here; otherwise the
+/// refresh cookie is set and the app opens.
+pub(crate) async fn complete_sign_in(state: &AppState, meta: &ClientMeta, user: Uuid) -> Response {
+    match second_step(state, user).await {
+        Ok(Some(next)) => {
+            let step = if next["two_factor_required"] == json!(true) { "code" } else { "setup" };
+            Redirect::to(&format!("/login?{}", url_encode(&[("step", step), ("challenge", next["challenge"].as_str().unwrap_or_default())]))).into_response()
+        }
+        Ok(None) => match tokens::create_session(state, user, meta).await {
+            Ok((_, refresh)) => (AppendHeaders([(header::SET_COOKIE, tokens::refresh_cookie(state, &refresh))]), Redirect::to("/")).into_response(),
+            Err(e) => to_login(&e.to_string()),
+        },
+        Err(e) => to_login(&e.to_string()),
     }
 }
 

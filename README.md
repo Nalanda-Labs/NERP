@@ -1208,7 +1208,26 @@ Administration → Directory & sign-on (needs "Manage settings").
     Passwords still work for accounts that have one.
   - The flow uses PKCE and a nonce; the ID token's issuer, audience, nonce and expiry are
     checked. The issuer must be https (plain http only for localhost).
-- SAML is not built in; most providers that offer SAML also offer OpenID Connect.
+- **SAML 2.0 single sign-on** (Microsoft Entra ID / ADFS, Okta, Google Workspace, Keycloak,
+  Shibboleth, OneLogin, …), next to OpenID Connect, with its own button on the sign-in page.
+  - Give the identity provider NERP's metadata address (`PUBLIC_URL` +
+    `/api/auth/saml/metadata`), or its entity ID (the same address) and assertion consumer
+    service (`/api/auth/saml/acs`, HTTP-POST). NERP makes its own key and certificate the
+    first time (kept sealed with the data key), signs its requests with them and can read
+    assertions encrypted for it.
+  - Set the identity provider up from its metadata address ("Read again" when it changes its
+    certificate) or paste the metadata. It must have a signing certificate and a sign-in
+    address with the HTTP-Redirect binding.
+  - Responses are accepted only when signed (SHA-256 or stronger) by the identity provider's
+    certificate; only the signed part is read (against signature wrapping); the issuer,
+    audience, destination, recipient, time limits and the request being answered are checked;
+    each assertion is accepted once; sign-ins started at the identity provider are refused.
+  - The email comes from the `email`/`mail` attribute (or a chosen one), else the NameID; names
+    from `givenName` and `sn`. Matching, new accounts, allowed domains and the authenticator
+    code work as for OpenID Connect.
+  - Single logout is not offered: signing out of NERP ends the NERP session only.
+  - Building NERP needs xmlsec and libxml2 (`libxmlsec1-dev libxml2-dev libclang-dev`; Arch:
+    `xmlsec libxml2 clang`); the server needs `libxmlsec1` and `libxmlsec1-openssl` at run time.
 
 ## Lists and business processes
 

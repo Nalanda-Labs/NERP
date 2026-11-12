@@ -102,6 +102,22 @@ paths (939 endpoints).
   public forms); a line break in a name adds no recipients. **Public forms** ignore fields
   they don't have; one live-chat visitor can't read another's conversation.
 
+## SAML sign-on
+
+- Responses must carry a valid signature by the identity provider's certificate from its
+  metadata (xmlsec); metadata without a signing certificate is refused when it is saved, since
+  the library would otherwise accept unsigned responses. Only the signed part of the document
+  is read, so a forged assertion wrapped around a genuine one can't stand in for it (tested:
+  it signs in as the genuine person, never the forged one). SHA-1 and DSA signatures are
+  refused.
+- Issuer, audience, destination, recipient, NotBefore/NotOnOrAfter (3 minutes' clock skew,
+  5 minutes' issue delay), the bearer confirmation and InResponseTo (the request NERP sent,
+  remembered for 10 minutes and used once) are all checked; each assertion ID is accepted once
+  (an hour in Redis); IdP-initiated sign-in is refused.
+- Tested against a stand-in identity provider with unsigned, wrongly signed, altered, SHA-1,
+  wrapped, wrong-audience, expired, replayed, unrequested and other-request answers
+  (tests/e2e/api103.ts).
+
 ## Encryption at rest
 
 - **Uploaded files** are encrypted by NERP when `FILE_ENCRYPTION_KEY` is set: AES-256-GCM in
