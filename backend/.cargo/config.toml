@@ -1,0 +1,5 @@
+[env]
+# samael (SAML) generates its xmlsec bindings at build time. Since xmlsec 1.3.13 the headers it
+# includes no longer pull in xmlsec/dl.h, where xmlSecCryptoDLLoadLibrary is declared, so it is
+# included explicitly (harmless with older xmlsec, whose headers include it already).
+BINDGEN_EXTRA_CLANG_ARGS = "-include xmlsec/dl.h"

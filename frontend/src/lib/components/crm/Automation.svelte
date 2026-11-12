@@ -158,6 +158,18 @@
 		...(type?.custom_fields.map((f) => ({ code: `uf.${f.code}`, label: f.label, kind: f.kind })) ?? [])
 	]);
 	const settable = $derived(fields.filter((f) => f.code !== 'assigned_to'));
+	type AssignPreview = { how: string; people: { id: string; name: string; picked: boolean; eligible: boolean; why: string; open_tasks: number; open_records: number; skills: string[] }[] };
+	let assignPreview = $state<AssignPreview | null>(null);
+	async function previewAssign(p: Record<string, any>) {
+		const q = new URLSearchParams({ type: typeCode, users: p.users.join(','), checked_in: String(!!p.checked_in), skills_required: String(!!p.skills_required), if_nobody: p.if_nobody ?? 'least_busy' });
+		if (p.max_open) q.set('max_open', String(p.max_open));
+		if (p.skill_field) q.set('skill_field', p.skill_field);
+		try {
+			assignPreview = await api.get<AssignPreview>(`/crm/assign/preview?${q}`);
+		} catch (e) {
+			toasts.error(e);
+		}
+	}
 	const stageName = (id: string) => category?.stages.find((s) => s.id === id)?.name ?? '?';
 
 	/** 0 → "", 90 → "1 h 30 min". */
@@ -202,7 +214,7 @@
 			case 'notify': return { to: ['assigned'], message: '{{title}} moved to {{stage}}' };
 			case 'email': return { subject: 'About {{title}}', body: 'Hello,\n\n…\n\nBest regards,\n{{assigned}}', template_id: '' };
 			case 'set_field': return { field: settable[0]?.code ?? 'probability', value: '' };
-			case 'assign': return { users: [], mode: 'round_robin' };
+			case 'assign': return { users: [], mode: 'round_robin', skill_field: null, skills_required: false, checked_in: false, max_open: null, if_nobody: 'least_busy' };
 			case 'move_stage': return { stage_id: category?.stages.find((s) => s.semantics === 'process')?.id ?? '' };
 			case 'document': return { template_id: typeTemplates[0]?.id ?? '' };
 			case 'sign': return { sign_template_id: typeSignTemplates[0]?.id ?? '' };
@@ -419,7 +431,7 @@
 			case 'notify': return p.message;
 			case 'email': return p.template_id ? `${p.subject} + ${templates.find((t) => t.id === p.template_id)?.name ?? 'document'}` : p.subject;
 			case 'set_field': return `${fields.find((f) => f.code === p.field)?.label ?? p.field} → ${p.value}`;
-			case 'assign': return `${p.users.length} employee${p.users.length === 1 ? '' : 's'}, ${p.mode === 'random' ? 'random' : p.mode === 'least_busy' ? 'least busy' : 'in turn'}`;
+			case 'assign': return `${p.users.length} employee${p.users.length === 1 ? '' : 's'}, ${p.mode === 'random' ? 'random' : p.mode === 'least_busy' ? 'least busy' : p.mode === 'capacity' ? 'who\'s in, least busy' : 'in turn'}`;
 			case 'move_stage': return `→ ${stageName(p.stage_id)}`;
 			case 'document': return templates.find((t) => t.id === p.template_id)?.name ?? 'Template';
 			case 'sign': return signTemplates.find((t) => t.id === p.sign_template_id)?.name ?? 'Signing template';
@@ -573,7 +585,40 @@
 				<label class="flex items-center gap-1.5"><input type="radio" class="text-brand-600" value="round_robin" bind:group={p.mode} /> In turn</label>
 				<label class="flex items-center gap-1.5"><input type="radio" class="text-brand-600" value="least_busy" bind:group={p.mode} /> Fewest open records</label>
 				<label class="flex items-center gap-1.5"><input type="radio" class="text-brand-600" value="random" bind:group={p.mode} /> At random</label>
+				<label class="flex items-center gap-1.5"><input type="radio" class="text-brand-600" value="capacity" bind:group={p.mode} data-mode-capacity /> Who's in, with the least on their plate</label>
 			</div>
+			{#if p.mode === 'capacity'}
+				<div class="grid gap-3 rounded-lg bg-slate-50 p-3 sm:grid-cols-2" data-capacity>
+					<p class="text-xs text-slate-500 sm:col-span-2">Only people working today (not on leave or a holiday, on their rota or the working week); the one with the fewest open tasks and records gets it, ties in turn.</p>
+					<div>
+						<label class="label" for="au-skill">Match people's skills to</label>
+						<select id="au-skill" class="input" bind:value={p.skill_field}>
+							<option value={null}>— no skills —</option>
+							{#each [...settable, { code: 'country', label: 'Country (address)' }] as f (f.code)}<option value={f.code}>{f.label}</option>{/each}
+						</select>
+						{#if p.skill_field}<label class="mt-1 flex items-center gap-1.5 text-xs"><input type="checkbox" bind:checked={p.skills_required} /> Only people with the skill</label>{/if}
+					</div>
+					<div>
+						<label class="label" for="au-cap">Skip people with this many open tasks and records</label>
+						<input id="au-cap" type="number" min="1" class="input w-32" placeholder="no cap" bind:value={p.max_open} />
+					</div>
+					<label class="flex items-center gap-1.5 text-sm"><input type="checkbox" bind:checked={p.checked_in} /> Only people who checked in today</label>
+					<label class="text-sm">If nobody is available
+						<select class="input mt-1" bind:value={p.if_nobody}><option value="least_busy">give it to the least busy anyway</option><option value="keep">leave it as it is</option></select>
+					</label>
+					<div class="sm:col-span-2">
+						<button type="button" class="text-brand-700 hover:underline" disabled={!p.users.length} onclick={() => previewAssign(p)} data-assign-preview>Who would get the next one?</button>
+						{#if assignPreview}
+							<p class="mt-1 text-xs text-slate-600" data-preview-how>{assignPreview.how}</p>
+							<ul class="mt-1 space-y-0.5 text-xs">
+								{#each assignPreview.people as x (x.id)}
+									<li class={x.picked ? 'font-medium text-emerald-800' : x.eligible ? 'text-slate-700' : 'text-slate-400'} data-preview-person={x.name}>{x.picked ? '→ ' : ''}{x.name}: {x.why}, {x.open_tasks} tasks, {x.open_records} open{x.skills.length ? ` · ${x.skills.join(', ')}` : ''}</li>
+								{/each}
+							</ul>
+						{/if}
+					</div>
+				</div>
+			{/if}
 		{:else if action === 'move_stage'}
 			<div><label class="label" for="au-to">Move to</label><select id="au-to" class="input" bind:value={p.stage_id}>{#each category?.stages ?? [] as s (s.id)}<option value={s.id}>{s.name}</option>{/each}</select></div>
 		{:else if action === 'document'}

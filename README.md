@@ -529,6 +529,23 @@ CRM settings → Automation shows each pipeline as columns of stages.
 - **Loop protection:** chains of automated stage changes stop after 5 steps, and each record
   has a budget of 200 robot runs per hour. When either limit is hit, the timeline says so.
 
+### Giving work to whoever is in
+
+The *Change the responsible person* robot has a fourth way to choose: **who's in, with the
+least on their plate** (`mode: capacity`).
+
+- **Who's in today:** not on approved time off, not a company holiday, and working today by
+  their rota (when they have one this week) or the company's working week; optionally only
+  those who checked in and haven't ended their day.
+- **Skills:** employees list what they are good at on their profile (their own, or anyone's
+  for those who manage employees). A rule can match them against a field of the record (a
+  language, a product line, the country…): people with the skill come first, or only them.
+- **Least on their plate:** open tasks plus open records of the same type, with an optional
+  cap above which people are skipped; ties go round in turn.
+- With nobody available the record goes to the least busy of all the chosen, or stays as it
+  is. *Who would get the next one?* in the robot's settings shows the pick and why each of
+  the others wasn't chosen; the robot's run says the same.
+
 ### Record cards
 
 Each record type's page shows its fields in sections (by default "About", "Contact details"

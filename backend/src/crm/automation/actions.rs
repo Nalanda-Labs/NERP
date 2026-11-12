@@ -261,10 +261,30 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
                 ids.push(s);
             }
             let mode = p.get("mode").and_then(Value::as_str).unwrap_or("round_robin");
-            if !["round_robin", "random", "least_busy"].contains(&mode) {
-                return Err(AppError::bad("mode must be round_robin, random or least_busy"));
+            if !["round_robin", "random", "least_busy", "capacity"].contains(&mode) {
+                return Err(AppError::bad("mode must be round_robin, random, least_busy or capacity"));
             }
-            json!({ "users": ids, "mode": mode })
+            if mode == "capacity" {
+                // Who is in today, fits the record and has the least on their plate.
+                let skill_field = p.get("skill_field").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+                if skill_field.is_some_and(|f| f.len() > 80 || !f.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')) {
+                    return Err(AppError::bad("choose a field of the record for skills"));
+                }
+                let max_open = p.get("max_open").and_then(Value::as_i64);
+                if max_open.is_some_and(|m| !(1..=10000).contains(&m)) {
+                    return Err(AppError::bad("the cap must be between 1 and 10000"));
+                }
+                let if_nobody = p.get("if_nobody").and_then(Value::as_str).unwrap_or("least_busy");
+                if !["least_busy", "keep"].contains(&if_nobody) {
+                    return Err(AppError::bad("if nobody is available: least_busy or keep"));
+                }
+                json!({
+                    "users": ids, "mode": mode, "skill_field": skill_field, "skills_required": p.get("skills_required").and_then(Value::as_bool).unwrap_or(false),
+                    "checked_in": p.get("checked_in").and_then(Value::as_bool).unwrap_or(false), "max_open": max_open, "if_nobody": if_nobody,
+                })
+            } else {
+                json!({ "users": ids, "mode": mode })
+            }
         }
         "move_stage" => {
             let s = p.get("stage_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::bad("choose a stage"))?;
@@ -580,6 +600,16 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
             }
             if candidates.is_empty() {
                 return Err("none of the chosen employees is active".into());
+            }
+            if p["mode"] == "capacity" {
+                let o: crate::crm::assign::Options = serde_json::from_value(p.clone()).unwrap_or_default();
+                let (who, how) = crate::crm::assign::pick(state, robot.id, et.id, item, &candidates, &o).await.map_err(err)?;
+                let Some(who) = who else { return done(format!("not reassigned: {how}")) };
+                let mut body = Map::new();
+                body.insert("assigned_to".into(), json!(who));
+                update_item(state, &system_auth(), &et, item, body).await.map_err(err)?;
+                let name: String = sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1").bind(who).fetch_one(&state.db).await.map_err(err)?;
+                return done(format!("made {name} responsible ({how})"));
             }
             let who = match p["mode"].as_str() {
                 Some("random") => candidates[rand::random_range(0..candidates.len())],
