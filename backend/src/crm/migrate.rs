@@ -39,7 +39,17 @@ use crate::{
 pub const JOB: &str = "crm.migrate";
 const SOURCES: &[&str] = &["hubspot", "salesforce", "pipedrive", "zoho", "other"];
 /// Kinds in the order they are brought over (links point backwards).
-const KINDS: &[&str] = &["user", "company", "contact", "lead", "deal", "activity", "note"];
+const KINDS: &[&str] = &["user", "product", "company", "contact", "lead", "deal", "line", "activity", "note", "attachment"];
+/// Kinds whose records can have custom fields (and their NERP record type).
+fn entity_of(kind: &str) -> Option<i16> {
+    match kind {
+        "company" => Some(COMPANY),
+        "contact" => Some(CONTACT),
+        "lead" => Some(LEAD),
+        "deal" => Some(DEAL),
+        _ => None,
+    }
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -63,21 +73,101 @@ struct Table {
     rows: Vec<Vec<String>>,
 }
 
-/// The CSV files in the uploads (ZIP archives are opened; other files are ignored).
-async fn tables(state: &AppState, auth: &AuthUser, file_ids: &[Uuid]) -> AppResult<Vec<Table>> {
-    let mut out = Vec::new();
+/// An uploaded ZIP, decrypted to a private temporary file (removed when dropped) so its
+/// attachments can be read one at a time, however large the archive is.
+struct Archive {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+    /// Its files other than the CSVs (attachments), by their path inside the archive.
+    entries: Vec<String>,
+}
+
+impl Drop for Archive {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Archive {
+    /// An attachment by its path in the archive (as a CSV names it), or else by the old
+    /// system's id as its file name (Salesforce's Attachments/<Id>, ContentVersion/<Id>).
+    fn find(&self, path: Option<&str>, id: Option<&str>) -> Option<&str> {
+        if let Some(p) = path.map(|p| p.trim().replace('\\', "/")).filter(|p| !p.is_empty()) {
+            let p = p.trim_start_matches("./").to_string();
+            if let Some(e) = self.entries.iter().find(|e| **e == p || e.ends_with(&format!("/{p}"))) {
+                return Some(e);
+            }
+        }
+        let id = id?.trim();
+        if id.is_empty() {
+            return None;
+        }
+        self.entries.iter().map(String::as_str).find(|e| {
+            let base = e.rsplit('/').next().unwrap_or(e);
+            base == id || base.split('.').next() == Some(id)
+        })
+    }
+
+    fn read(&self, entry: &str, max: u64) -> Result<Vec<u8>> {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&self.path)?)?;
+        let mut f = zip.by_name(entry)?;
+        if f.size() > max {
+            return Err(anyhow!("{entry} is larger than {} MB", max / 1024 / 1024));
+        }
+        let mut buf = Vec::with_capacity(f.size() as usize);
+        std::io::Read::read_to_end(&mut f, &mut buf)?;
+        Ok(buf)
+    }
+}
+
+struct Export {
+    tables: Vec<Table>,
+    archives: Vec<Archive>,
+}
+
+impl Export {
+    fn find(&self, path: Option<&str>, id: Option<&str>) -> Option<(&Archive, String)> {
+        self.archives.iter().find_map(|a| a.find(path, id).map(|e| (a, e.to_string())))
+    }
+}
+
+/// The CSV files in the uploads; ZIP archives are opened, and their other files kept as
+/// possible attachments.
+async fn read_export(state: &AppState, auth: &AuthUser, file_ids: &[Uuid]) -> AppResult<Export> {
+    let mut out = Export { tables: Vec::new(), archives: Vec::new() };
     for id in file_ids {
         let f = crate::routes::files::fetch(state, *id).await?;
         if f.owner_id != Some(auth.id) {
             return Err(AppError::bad("upload the files first"));
         }
-        let bytes = crate::routes::files::read_content(state, &f).await?;
-        if bytes.starts_with(b"PK\x03\x04") {
-            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| AppError::bad(format!("{}: not a readable ZIP ({e})", f.original_name)))?;
+        let is_zip = f.original_name.to_lowercase().ends_with(".zip") || f.mime_type.contains("zip") || {
+            let head = crate::routes::files::read_content(state, &f).await.ok();
+            head.is_some_and(|b| b.starts_with(b"PK\x03\x04"))
+        };
+        if !is_zip {
+            out.tables.push(parse_csv(f.original_name.clone(), &crate::routes::files::read_content(state, &f).await?)?);
+            continue;
+        }
+        let dir = std::env::temp_dir().join(format!("nerp-migrate-{}", Uuid::new_v4()));
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        }
+        let path = dir.join("export.zip");
+        let mut archive = Archive { dir, path: path.clone(), entries: Vec::new() };
+        crate::routes::files::copy_out(state, &f, &path).await?;
+        let opened = tokio::task::block_in_place(|| -> AppResult<(Vec<Table>, Vec<String>)> {
+            let mut zip = zip::ZipArchive::new(std::fs::File::open(&path)?).map_err(|e| AppError::bad(format!("{}: not a readable ZIP ({e})", f.original_name)))?;
+            let (mut tables, mut entries) = (Vec::new(), Vec::new());
             for i in 0..zip.len() {
                 let mut entry = zip.by_index(i).map_err(|e| AppError::bad(e.to_string()))?;
-                let name = entry.name().map(|n| n.to_string()).unwrap_or_default().rsplit('/').next().unwrap_or("").to_string();
-                if !entry.is_file() || !name.to_lowercase().ends_with(".csv") || name.starts_with("._") {
+                let full = entry.name().map(|n| n.to_string()).unwrap_or_default();
+                let name = full.rsplit('/').next().unwrap_or("").to_string();
+                if !entry.is_file() || name.is_empty() || name.starts_with("._") || full.contains("__MACOSX") {
+                    continue;
+                }
+                if !name.to_lowercase().ends_with(".csv") {
+                    entries.push(full);
                     continue;
                 }
                 if entry.size() > 500 * 1024 * 1024 {
@@ -85,16 +175,22 @@ async fn tables(state: &AppState, auth: &AuthUser, file_ids: &[Uuid]) -> AppResu
                 }
                 let mut buf = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| AppError::bad(e.to_string()))?;
-                out.push(parse_csv(name, &buf)?);
+                tables.push(parse_csv(name, &buf)?);
             }
-        } else {
-            out.push(parse_csv(f.original_name.clone(), &bytes)?);
-        }
+            Ok((tables, entries))
+        })?;
+        out.tables.extend(opened.0);
+        archive.entries = opened.1;
+        out.archives.push(archive);
     }
-    if out.is_empty() {
+    if out.tables.is_empty() {
         return Err(AppError::bad("no CSV files found in the upload"));
     }
     Ok(out)
+}
+
+async fn tables(state: &AppState, auth: &AuthUser, file_ids: &[Uuid]) -> AppResult<Vec<Table>> {
+    Ok(read_export(state, auth, file_ids).await?.tables)
 }
 
 fn parse_csv(name: String, bytes: &[u8]) -> AppResult<Table> {
@@ -236,6 +332,38 @@ fn synonyms(kind: &str) -> &'static [(&'static str, &'static [&'static str])] {
         ("last_name", &["lastname"]),
         ("full_name", &["name", "fullname"]),
     ];
+    const PRODUCT_F: &[(&str, &[&str])] = &[
+        ("id", &["recordid", "id", "productid"]),
+        ("name", &["name", "productname", "title", "product"]),
+        ("sku", &["sku", "productcode", "code", "itemcode", "partnumber"]),
+        ("price", &["unitprice", "price", "listprice", "productprice"]),
+        ("currency", &["currency", "currencyisocode", "currencycode", "pricecurrency"]),
+        ("unit", &["unit", "unitofmeasure", "usageunit", "quantityunitofmeasure"]),
+        ("tax_rate", &["taxrate", "tax", "taxpercent", "vat", "vatrate"]),
+        ("cost", &["cost", "unitcost", "costprice", "costofgoodssold", "purchaseprice", "purchasecost"]),
+        ("description", &["description", "productdescription"]),
+    ];
+    const LINE_F: &[(&str, &[&str])] = &[
+        ("id", &["recordid", "id", "lineitemid", "opportunitylineitemid"]),
+        ("deal_ref", &["opportunityid", "dealid", "associateddealids", "associateddealid", "dealidid", "opportunity"]),
+        ("product_ref", &["product2id", "productid", "hsproductid", "productidid"]),
+        ("product_name", &["name", "productname", "product", "lineitemname", "title", "itemname"]),
+        ("quantity", &["quantity", "qty", "amountofproducts"]),
+        ("price", &["unitprice", "price", "itemprice", "salesprice", "listprice"]),
+        ("discount_percent", &["discount", "discountpercent", "discountpercentage", "hsdiscountpercentage"]),
+        ("discount_amount", &["discountamount", "unitdiscount", "discountvalue"]),
+        ("tax_rate", &["taxrate", "tax", "taxpercent", "vat"]),
+        ("unit", &["unit", "unitofmeasure"]),
+    ];
+    const ATTACHMENT_F: &[(&str, &[&str])] = &[
+        ("id", &["recordid", "id", "attachmentid", "contentversionid", "fileid"]),
+        ("parent_ref", &["parentid", "firstpublishlocationid", "linkedentityid", "associatedobjectid", "dealid", "personid", "organizationid", "leadid", "relatedtoid", "associateddealids", "associatedcontactids", "associatedcompanyids", "parentidid"]),
+        ("name", &["name", "filename", "pathonclient", "originalfilename", "title"]),
+        ("path", &["path", "filepath", "versiondata", "body", "file", "location", "filelocation"]),
+        ("description", &["description"]),
+        ("owner", &["ownerid", "owner", "createdbyid", "createdby"]),
+        ("created_at", &["createddate", "createdat", "addtime", "createdtime"]),
+    ];
     match kind {
         "company" => &COMPANY_F,
         "contact" => &CONTACT_F,
@@ -244,6 +372,9 @@ fn synonyms(kind: &str) -> &'static [(&'static str, &'static [&'static str])] {
         "activity" => ACTIVITY_F,
         "note" => NOTE_F,
         "user" => USER_F,
+        "product" => PRODUCT_F,
+        "line" => LINE_F,
+        "attachment" => ATTACHMENT_F,
         _ => &[],
     }
 }
@@ -257,6 +388,19 @@ fn fields_of(kind: &str) -> Vec<&'static str> {
 fn kind_of(t: &Table) -> &'static str {
     let n = t.name.to_lowercase();
     let n = n.trim_end_matches(".csv");
+    let compact: String = n.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if ["lineitem", "dealproduct", "opportunityproduct", "quoteitem"].iter().any(|w| compact.contains(w)) {
+        return "line";
+    }
+    if ["attachment", "contentversion", "files"].iter().any(|w| compact.contains(w)) {
+        return "attachment";
+    }
+    if compact.contains("pricebook") {
+        return "skip";
+    }
+    if compact.contains("product") {
+        return "product";
+    }
     let by_name = [
         (&["user"][..], "user"),
         (&["note"][..], "note"),
@@ -400,15 +544,40 @@ async fn analyze(State(state): State<AppState>, auth: AuthUser, Json(b): Json<An
     if b.file_ids.is_empty() || b.file_ids.len() > 20 {
         return Err(AppError::bad("upload 1 to 20 files"));
     }
-    let tables = tables(&state, &auth, &b.file_ids).await?;
+    let export = read_export(&state, &auth, &b.file_ids).await?;
+    let tables = &export.tables;
     let source = match b.source.as_deref() {
         Some(s) if SOURCES.contains(&s) => s,
-        _ => source_of(&tables),
+        _ => source_of(tables),
     };
+    // Custom fields of each record type; columns named like one go to it.
+    let mut custom: BTreeMap<&str, Vec<super::fields::FieldDef>> = BTreeMap::new();
+    for k in ["company", "contact", "lead", "deal"] {
+        custom.insert(k, super::fields::custom_fields(&state, entity_of(k).unwrap()).await?);
+    }
     let mapped: Vec<(String, &Table, BTreeMap<String, String>)> = tables.iter().map(|t| {
         let k = kind_of(t);
-        (k.to_string(), t, auto_mapping(k, &t.headers))
+        let mut m = auto_mapping(k, &t.headers);
+        if let Some(defs) = custom.get(k) {
+            for h in &t.headers {
+                if !m.contains_key(h)
+                    && let Some(d) = defs.iter().find(|d| d.label.trim().eq_ignore_ascii_case(h.trim())) {
+                        m.insert(h.clone(), format!("uf:{}", d.code));
+                    }
+            }
+        }
+        (k.to_string(), t, m)
     }).collect();
+    // Attachments: how many of each list's files are in the archives.
+    let attachments: Vec<Value> = mapped
+        .iter()
+        .filter(|(k, _, _)| k == "attachment")
+        .map(|(_, t, m)| {
+            let (id, path) = (col(t, m, "id"), col(t, m, "path"));
+            let found = t.rows.iter().filter(|r| export.find(val(r, &path), val(r, &id)).is_some()).count();
+            json!({ "file": t.name, "rows": t.rows.len(), "found": found })
+        })
+        .collect();
     let users = users_file(&mapped);
     let staff = employees(&state).await?;
 
@@ -486,6 +655,9 @@ async fn analyze(State(state): State<AppState>, auth: AuthUser, Json(b): Json<An
         "owners": owners.iter().map(|(o, n)| json!({
             "value": o, "count": n, "via": users.get(o), "user_id": match_owner(o, &users, &staff),
         })).collect::<Vec<_>>(),
+        "custom_fields": custom.iter().map(|(k, defs)| (k.to_string(), json!(defs.iter().map(|d| json!({ "code": d.code, "label": d.label, "kind": d.kind })).collect::<Vec<_>>()))).collect::<Map<String, Value>>(),
+        "attachments": attachments,
+        "archive_files": export.archives.iter().map(|a| a.entries.len()).sum::<usize>(),
         "currencies": currencies.iter().map(|(c, n)| json!({ "code": c, "count": n, "enabled": enabled.iter().any(|e| e.trim() == c) })).collect::<Vec<_>>(),
     })))
 }
@@ -533,6 +705,10 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Json(p): Json<Plan
         return Err(AppError::bad("duplicates must be update or skip"));
     }
     let names: Vec<String> = tables(&state, &auth, &p.file_ids).await?.into_iter().map(|t| t.name).collect();
+    let mut codes: HashMap<&str, Vec<String>> = HashMap::new();
+    for k in ["company", "contact", "lead", "deal"] {
+        codes.insert(k, super::fields::custom_fields(&state, entity_of(k).unwrap()).await?.into_iter().map(|d| d.code).collect());
+    }
     for f in &p.files {
         if !names.contains(&f.name) {
             return Err(AppError::bad(format!("{} is not in the upload", f.name)));
@@ -541,7 +717,13 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Json(p): Json<Plan
             return Err(AppError::bad(format!("{}: unknown kind {}", f.name, f.kind)));
         }
         let fields = fields_of(&f.kind);
-        if let Some((c, bad)) = f.mapping.iter().find(|(_, v)| !v.is_empty() && v.as_str() != "skip" && !fields.contains(&v.as_str())) {
+        // Custom fields: an existing one of the record type, or "uf:new" (made from the column).
+        let custom_ok = |v: &str| match v.strip_prefix("uf:") {
+            Some("new") => entity_of(&f.kind).is_some(),
+            Some(code) => codes.get(f.kind.as_str()).is_some_and(|c| c.iter().any(|x| x == code)),
+            None => false,
+        };
+        if let Some((c, bad)) = f.mapping.iter().find(|(_, v)| !v.is_empty() && v.as_str() != "skip" && !fields.contains(&v.as_str()) && !custom_ok(v)) {
             return Err(AppError::bad(format!("{}: column {c} can't go to {bad}", f.name)));
         }
     }
@@ -618,11 +800,40 @@ async fn undo(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
         .execute(&mut *tx)
         .await?
         .rows_affected();
+    let attached: Vec<Vec<Uuid>> = sqlx::query_scalar(
+        "DELETE FROM crm_timeline WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'attachment') RETURNING file_ids",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let attached: Vec<Uuid> = attached.into_iter().flatten().collect();
+    let lines: Vec<Uuid> = sqlx::query_scalar(
+        "DELETE FROM crm_item_products WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'line') RETURNING item_id",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let products = sqlx::query("DELETE FROM crm_products WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'product')")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
     sqlx::query("DELETE FROM crm_migration_ids WHERE migration_id = $1").bind(id).execute(&mut *tx).await?;
     sqlx::query("UPDATE crm_migrations SET status = 'undone', undone_at = now() WHERE id = $1").bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    crate::audit::record(&state.db, Some(auth.id), "crm.migration_undo", "crm_migration", Some(id.to_string()), json!({ "records": records, "activities": activities, "notes": notes }), None).await;
-    Ok(Json(json!({ "records": records, "activities": activities, "notes": notes })))
+    for f in &attached {
+        crate::routes::files::delete_stored(&state, *f).await;
+    }
+    // Deals that keep existing (they were only updated) follow their remaining products.
+    let mut deals = lines.clone();
+    deals.sort();
+    deals.dedup();
+    for d in deals {
+        let _ = super::money::totals(&state, d).await;
+    }
+    let (attachments, lines, products) = (attached.len(), lines.len(), products);
+    crate::audit::record(&state.db, Some(auth.id), "crm.migration_undo", "crm_migration", Some(id.to_string()), json!({ "records": records, "activities": activities, "notes": notes, "attachments": attachments, "products": products, "lines": lines }), None).await;
+    Ok(Json(json!({ "records": records, "activities": activities, "notes": notes, "attachments": attachments, "products": products, "lines": lines })))
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +885,10 @@ struct Run<'a> {
     /// "kind|pipeline|value" → stage (made as needed).
     stage_ids: HashMap<String, Uuid>,
     currencies: Vec<String>,
+    base_currency: String,
+    /// Custom fields of each record type.
+    defs: HashMap<i16, Vec<super::fields::FieldDef>>,
+    export: &'a Export,
 }
 
 impl Run<'_> {
@@ -691,7 +906,9 @@ impl Run<'_> {
                 alive.then_some(i)
             }
             (Some(i), "activity") => sqlx::query_scalar("SELECT id FROM crm_activities WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
-            (Some(i), "note") => sqlx::query_scalar("SELECT id FROM crm_timeline WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
+            (Some(i), "note" | "attachment") => sqlx::query_scalar("SELECT id FROM crm_timeline WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
+            (Some(i), "product") => sqlx::query_scalar("SELECT id FROM crm_products WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
+            (Some(i), "line") => sqlx::query_scalar("SELECT id FROM crm_item_products WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
             _ => None,
         })
     }
@@ -730,6 +947,18 @@ impl Run<'_> {
                     return Ok(Some((k.to_string(), i)));
                 }
             }
+        }
+        Ok(None)
+    }
+
+    /// The record an attachment belongs to: a record, or the record of a note or activity.
+    async fn record_of(&self, raw: &str) -> Result<Option<Uuid>> {
+        if let Some((_, i)) = self.find_ref(&["deal", "lead", "contact", "company"], raw).await? {
+            return Ok(Some(i));
+        }
+        if let Some((k, i)) = self.find_ref(&["note", "activity"], raw).await? {
+            let sql = if k == "note" { "SELECT item_id FROM crm_timeline WHERE id = $1" } else { "SELECT item_id FROM crm_activities WHERE id = $1" };
+            return Ok(sqlx::query_scalar(sql).bind(i).fetch_optional(&self.state.db).await?);
         }
         Ok(None)
     }
@@ -857,6 +1086,102 @@ impl Run<'_> {
     }
 }
 
+/// The type a new custom field gets from a column's values.
+fn field_kind(values: &[&str]) -> &'static str {
+    if values.is_empty() {
+        return "string";
+    }
+    let all = |f: &dyn Fn(&str) -> bool| values.iter().all(|v| f(v));
+    if all(&|v| v.replace(',', "").parse::<f64>().is_ok()) {
+        "number"
+    } else if all(&|v| ["true", "false", "yes", "no"].contains(&v.to_lowercase().as_str())) {
+        "boolean"
+    } else if all(&|v| v.len() <= 10 && parse_when(v).is_some()) {
+        "date"
+    } else if all(&|v| parse_when(v).is_some()) {
+        "datetime"
+    } else if all(&|v| (v.starts_with("http://") || v.starts_with("https://")) && !v.contains(char::is_whitespace)) {
+        "url"
+    } else if values.iter().any(|v| v.len() > 1000 || v.contains('\n')) {
+        "text"
+    } else {
+        "string"
+    }
+}
+
+/// A value from the export as a custom field takes it; None when it doesn't fit (the field
+/// is then left empty rather than the record refused).
+fn uf_value(def: &super::fields::FieldDef, raw: &str, base_currency: &str, owner: impl Fn(&str) -> Option<Uuid>) -> Option<Value> {
+    let raw = raw.trim();
+    let one = |v: &str| -> Option<Value> {
+        Some(match def.kind.as_str() {
+            "string" => json!(v.chars().take(1000).collect::<String>()),
+            "text" => json!(plain(v).chars().take(20_000).collect::<String>()),
+            "url" => {
+                let u = if v.starts_with("http://") || v.starts_with("https://") { v.to_string() } else if v.contains('.') && !v.contains(' ') { format!("https://{v}") } else { return None };
+                json!(u)
+            }
+            "number" => json!(v.replace(',', "").parse::<f64>().ok()?),
+            "money" => {
+                let n: String = v.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+                n.parse::<f64>().ok()?;
+                json!({ "amount": n, "currency": base_currency })
+            }
+            "date" => json!(parse_when(v)?.format("%Y-%m-%d").to_string()),
+            "datetime" => json!(parse_when(v)?.to_rfc3339()),
+            "boolean" => match v.to_lowercase().as_str() {
+                "true" | "yes" | "1" | "y" => json!(true),
+                "false" | "no" | "0" | "n" => json!(false),
+                _ => return None,
+            },
+            "list" => {
+                let opts = def.settings["options"].as_array()?;
+                let o = opts.iter().find(|o| o["label"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(v)) || o["id"].as_str() == Some(v))?;
+                o["id"].clone()
+            }
+            "user" => json!(owner(v)?),
+            _ => return None,
+        })
+    };
+    if def.is_multiple {
+        let parts: Vec<Value> = raw.split(';').map(str::trim).filter(|p| !p.is_empty()).filter_map(one).collect();
+        (!parts.is_empty()).then(|| Value::Array(parts))
+    } else {
+        one(raw)
+    }
+}
+
+/// A number as exports write it ("1,200.50", "40%", " 3 ").
+fn decimal(raw: Option<&str>) -> Option<rust_decimal::Decimal> {
+    let cleaned: String = raw?.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
+    cleaned.parse().ok()
+}
+
+/// A file's type from its name (exports don't always say).
+fn mime_of(name: &str) -> &'static str {
+    match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
+        Some("pdf") => "application/pdf",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("txt") => "text/plain",
+        Some("csv") => "text/csv",
+        Some("doc") => "application/msword",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xls") => "application/vnd.ms-excel",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Some("odt") => "application/vnd.oasis.opendocument.text",
+        Some("zip") => "application/zip",
+        Some("eml") => "message/rfc822",
+        Some("mp4") => "video/mp4",
+        Some("mp3") => "audio/mpeg",
+        _ => "application/octet-stream",
+    }
+}
+
 /// A person's name parts: from first/last, or a full name split at its last space.
 fn name_parts(first: Option<&str>, last: Option<&str>, full: Option<&str>) -> (Option<String>, Option<String>) {
     if first.is_some() || last.is_some() {
@@ -901,15 +1226,50 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
         fail("the person who started it is no longer active".into()).await?;
         return Ok(());
     };
-    let plan: Plan = serde_json::from_value(plan)?;
-    let all = match tables(state, &auth, &plan.file_ids).await {
+    let mut plan: Plan = serde_json::from_value(plan)?;
+    let export = match read_export(state, &auth, &plan.file_ids).await {
         Ok(t) => t,
         Err(e) => {
             fail(e.to_string()).await?;
             return Ok(());
         }
     };
+    let all = &export.tables;
     sqlx::query("UPDATE crm_migrations SET status = 'running' WHERE id = $1").bind(id).execute(&state.db).await?;
+
+    // Columns to become new custom fields: made once (named after the column, typed by its
+    // values), and the plan remembers them for the runs that carry on.
+    let mut made_fields = false;
+    for f in plan.files.iter_mut() {
+        let Some(entity) = entity_of(&f.kind) else { continue };
+        let Some(t) = all.iter().find(|t| t.name == f.name) else { continue };
+        for (column, target) in f.mapping.iter_mut() {
+            if target != "uf:new" {
+                continue;
+            }
+            let i = t.headers.iter().position(|h| h == column);
+            let values: Vec<&str> = i.map(|i| t.rows.iter().filter_map(|r| r.get(i)).map(String::as_str).filter(|v| !v.is_empty()).collect()).unwrap_or_default();
+            // A field of that name made by an earlier run (or by hand) is used again.
+            let existing: Option<String> = sqlx::query_scalar("SELECT code FROM crm_field_defs WHERE entity_type = $1 AND lower(label) = lower($2) ORDER BY created_at LIMIT 1")
+                .bind(entity)
+                .bind(column.trim())
+                .fetch_optional(&state.db)
+                .await?;
+            let code = match existing {
+                Some(c) => c,
+                None => super::fields::add_plain(state, entity, column, field_kind(&values)).await.map_err(|e| anyhow!(e.to_string()))?,
+            };
+            *target = format!("uf:{code}");
+            made_fields = true;
+        }
+    }
+    if made_fields {
+        sqlx::query("UPDATE crm_migrations SET plan = $2 WHERE id = $1").bind(id).bind(json!(plan)).execute(&state.db).await?;
+    }
+    let mut defs = HashMap::new();
+    for e in [COMPANY, CONTACT, LEAD, DEAL] {
+        defs.insert(e, super::fields::custom_fields(state, e).await.map_err(|e| anyhow!(e.to_string()))?);
+    }
 
     // Files in the order of their kinds.
     let mut work: Vec<(PlanFile, &Table)> = Vec::new();
@@ -931,6 +1291,9 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
         cats: HashMap::new(),
         stage_ids: HashMap::new(),
         currencies: sqlx::query_scalar::<_, String>("SELECT trim(code) FROM crm_currencies").fetch_all(&state.db).await?,
+        base_currency: super::money::base_currency(state).await.map_err(|e| anyhow!(e.to_string()))?,
+        defs,
+        export: &export,
     };
 
     let mut counts = Counts::default();
@@ -1009,6 +1372,142 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
     let owner = run.owner(get("owner").as_deref());
 
     match kind {
+        "product" => {
+            let name = get("name").ok_or_else(|| anyhow!("no product name"))?;
+            let sku = get("sku");
+            if let Some(sid) = &source_id
+                && run.known("product", sid).await?.is_some() {
+                    return Ok(2);
+                }
+            // The catalogue's own product of that code (or name), else a new one.
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM crm_products WHERE ($1::text IS NOT NULL AND sku = $1) OR ($1::text IS NULL AND lower(name) = lower($2)) ORDER BY created_at LIMIT 1",
+            )
+            .bind(&sku)
+            .bind(&name)
+            .fetch_optional(&run.state.db)
+            .await?;
+            if let Some(e) = existing {
+                run.remember("product", source_id.as_deref(), e, false).await?;
+                return Ok(2);
+            }
+            let currency = get("currency").map(|c| c.to_uppercase()).filter(|c| run.currencies.contains(c)).unwrap_or_else(|| run.base_currency.clone());
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO crm_products (name, sku, description, price, currency, tax_rate, unit, cost) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'pcs'), $8) RETURNING id",
+            )
+            .bind(name.chars().take(300).collect::<String>())
+            .bind(&sku)
+            .bind(get("description").map(|d| plain(&d)))
+            .bind(decimal(get("price").as_deref()).unwrap_or_default())
+            .bind(&currency)
+            .bind(decimal(get("tax_rate").as_deref()).filter(|t| !t.is_sign_negative() && *t <= rust_decimal::Decimal::ONE_HUNDRED))
+            .bind(get("unit").map(|u| u.chars().take(20).collect::<String>()))
+            .bind(decimal(get("cost").as_deref()).filter(|c| !c.is_sign_negative()))
+            .fetch_one(&run.state.db)
+            .await?;
+            run.remember("product", source_id.as_deref(), id, true).await?;
+            Ok(0)
+        }
+        "line" => {
+            let deal = match get("deal_ref") {
+                Some(r) => run.find_ref(&["deal", "lead"], &r).await?.map(|x| x.1),
+                None => None,
+            };
+            let Some(deal) = deal else { return Err(anyhow!("the deal it belongs to wasn't brought over")) };
+            if let Some(sid) = &source_id
+                && run.known("line", sid).await?.is_some() {
+                    return Ok(2);
+                }
+            let product = match get("product_ref") {
+                Some(r) => run.find_ref(&["product"], &r).await?.map(|x| x.1),
+                None => None,
+            };
+            let product = match (product, get("sku")) {
+                (Some(p), _) => Some(p),
+                (None, Some(sku)) => sqlx::query_scalar("SELECT id FROM crm_products WHERE sku = $1 LIMIT 1").bind(sku).fetch_optional(&run.state.db).await?,
+                _ => None,
+            };
+            let catalogue: Option<(String, rust_decimal::Decimal, Option<rust_decimal::Decimal>, String)> = match product {
+                Some(p) => sqlx::query_as("SELECT name, price, tax_rate, unit FROM crm_products WHERE id = $1").bind(p).fetch_optional(&run.state.db).await?,
+                None => None,
+            };
+            let name = get("product_name").or_else(|| catalogue.as_ref().map(|c| c.0.clone())).ok_or_else(|| anyhow!("no product name"))?;
+            let quantity = decimal(get("quantity").as_deref()).filter(|q| q.is_sign_positive() && !q.is_zero()).unwrap_or(rust_decimal::Decimal::ONE);
+            let price = decimal(get("price").as_deref()).or_else(|| catalogue.as_ref().map(|c| c.1)).unwrap_or_default().abs();
+            let (dkind, dvalue) = match (decimal(get("discount_percent").as_deref()), decimal(get("discount_amount").as_deref())) {
+                (Some(p), _) if !p.is_zero() => ("percent", p.abs().min(rust_decimal::Decimal::ONE_HUNDRED)),
+                (_, Some(a)) if !a.is_zero() => ("amount", a.abs()),
+                _ => ("percent", rust_decimal::Decimal::ZERO),
+            };
+            let tax = decimal(get("tax_rate").as_deref()).or_else(|| catalogue.as_ref().and_then(|c| c.2)).filter(|t| !t.is_sign_negative() && *t <= rust_decimal::Decimal::ONE_HUNDRED);
+            let unit = get("unit").or_else(|| catalogue.as_ref().map(|c| c.3.clone())).unwrap_or_else(|| "pcs".into());
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, sort)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT COALESCE(MAX(sort), -1) + 1 FROM crm_item_products WHERE item_id = $1)) RETURNING id",
+            )
+            .bind(deal)
+            .bind(product)
+            .bind(name.chars().take(300).collect::<String>())
+            .bind(price)
+            .bind(quantity)
+            .bind(unit.chars().take(20).collect::<String>())
+            .bind(dkind)
+            .bind(dvalue)
+            .bind(tax)
+            .fetch_one(&run.state.db)
+            .await?;
+            // The deal's amount follows its products, unless the export gave the amount.
+            sqlx::query("UPDATE crm_items SET is_manual_amount = FALSE WHERE id = $1 AND opportunity = 0").bind(deal).execute(&run.state.db).await?;
+            super::money::totals(run.state, deal).await.map_err(|e| anyhow!(e.to_string()))?;
+            run.remember("line", source_id.as_deref(), id, true).await?;
+            Ok(0)
+        }
+        "attachment" => {
+            let parent = match get("parent_ref") {
+                Some(_) => {
+                    let mut found = None;
+                    for c in col(t, m, "parent_ref") {
+                        if let Some(v) = row.get(c).filter(|v| !v.is_empty())
+                            && let Some(p) = run.record_of(v).await? {
+                                found = Some(p);
+                                break;
+                            }
+                    }
+                    found
+                }
+                None => None,
+            };
+            let Some(item) = parent else {
+                return Err(anyhow!("the record it belongs to wasn't brought over (or the column linking it isn't mapped)"));
+            };
+            if let Some(sid) = &source_id
+                && run.known("attachment", sid).await?.is_some() {
+                    return Ok(2);
+                }
+            let Some((archive, entry)) = run.export.find(get("path").as_deref(), source_id.as_deref()) else {
+                return Err(anyhow!("its file isn't in the uploaded archive"));
+            };
+            let max = run.state.config.max_upload_bytes as u64;
+            let bytes = tokio::task::block_in_place(|| archive.read(&entry, max))?;
+            let name = get("name").unwrap_or_else(|| entry.rsplit('/').next().unwrap_or("file").to_string());
+            let mime = mime_of(&name);
+            let who = owner.unwrap_or(run.auth.id);
+            let file = crate::routes::files::store_bytes(run.state, Some(who), &name, mime, &bytes).await.map_err(|e| anyhow!(e.to_string()))?;
+            let body = get("description").map(|d| plain(&d)).unwrap_or_default();
+            let entry_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO crm_timeline (item_id, kind, author_id, body, data, file_ids, created_at) VALUES ($1, 'comment', $2, $3, $4, ARRAY[$5]::uuid[], COALESCE($6, now())) RETURNING id",
+            )
+            .bind(item)
+            .bind(who)
+            .bind(body.chars().take(20_000).collect::<String>())
+            .bind(&note)
+            .bind(file)
+            .bind(created_at)
+            .fetch_one(&run.state.db)
+            .await?;
+            run.remember("attachment", source_id.as_deref(), entry_id, true).await?;
+            Ok(0)
+        }
         "activity" | "note" => {
             let parent = match get("parent_ref") {
                 Some(_) => {
@@ -1257,6 +1756,21 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
                 }
                 _ => {}
             }
+            // Custom fields: each column mapped to one, converted to its type.
+            let mut uf = Map::new();
+            if let Some(defs) = run.defs.get(&entity) {
+                for (column, target) in m {
+                    let Some(code) = target.strip_prefix("uf:") else { continue };
+                    let Some(def) = defs.iter().find(|d| d.code == code) else { continue };
+                    let Some(raw) = t.headers.iter().position(|h| h == column).and_then(|i| row.get(i)).filter(|v| !v.trim().is_empty()) else { continue };
+                    if let Some(v) = uf_value(def, raw, &run.base_currency, |o| run.owner(Some(o))) {
+                        uf.insert(code.to_string(), v);
+                    }
+                }
+            }
+            if !uf.is_empty() {
+                body.insert("uf".into(), Value::Object(uf));
+            }
             if !comments.is_empty() {
                 body.insert("comments".into(), json!(comments.join("\n\n").chars().take(20_000).collect::<String>()));
             }
@@ -1367,6 +1881,35 @@ mod tests {
         assert_eq!(m["Billing City"], "address.city");
         assert_eq!(m["Account Owner"], "owner");
         assert_eq!(source_of(&[zo]), "zoho");
+    }
+
+    #[test]
+    fn products_lines_attachments() {
+        let p2 = table("Product2.csv", &["Id", "Name", "ProductCode", "Description", "IsActive"]);
+        assert_eq!(kind_of(&p2), "product");
+        assert_eq!(auto_mapping("product", &p2.headers)["ProductCode"], "sku");
+        let li = table("OpportunityLineItem.csv", &["Id", "OpportunityId", "Product2Id", "Name", "Quantity", "UnitPrice", "Discount"]);
+        assert_eq!(kind_of(&li), "line");
+        let m = auto_mapping("line", &li.headers);
+        assert_eq!((m["OpportunityId"].as_str(), m["Product2Id"].as_str(), m["Discount"].as_str()), ("deal_ref", "product_ref", "discount_percent"));
+        let hub = table("hubspot-crm-exports-line-items.csv", &["Record ID", "Name", "Quantity", "Unit price", "Associated Deal IDs", "SKU"]);
+        assert_eq!(kind_of(&hub), "line");
+        assert_eq!(auto_mapping("line", &hub.headers)["Associated Deal IDs"], "deal_ref");
+        let at = table("Attachment.csv", &["Id", "ParentId", "Name", "ContentType", "Body"]);
+        assert_eq!(kind_of(&at), "attachment");
+        let m = auto_mapping("attachment", &at.headers);
+        assert_eq!((m["ParentId"].as_str(), m["Body"].as_str()), ("parent_ref", "path"));
+        assert_eq!(kind_of(&table("PricebookEntry.csv", &["Id"])), "skip");
+    }
+
+    #[test]
+    fn new_field_types() {
+        assert_eq!(field_kind(&["12", "3.5", "1,200"]), "number");
+        assert_eq!(field_kind(&["2026-01-02", "2025-12-31"]), "date");
+        assert_eq!(field_kind(&["Yes", "no"]), "boolean");
+        assert_eq!(field_kind(&["https://a.example", "http://b.example/x"]), "url");
+        assert_eq!(field_kind(&["Gold", "Silver"]), "string");
+        assert_eq!(field_kind(&[]), "string");
     }
 
     #[test]

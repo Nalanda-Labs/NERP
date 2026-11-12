@@ -171,7 +171,8 @@ The safeguards always keep at least one active administrator, and nobody can dea
 - **Filters:** search by name, phone, email or #number, mine, state, activity (overdue, today,
   planned, none), responsible, source, dates, amount range and custom fields. Filters can be saved.
 - **Timeline** on every record: created, stage changes, assignment, conversion, merge, restore,
-  products and activities, plus comments that can be pinned.
+  products and activities, plus comments that can be pinned and can carry files (up to 20 per
+  comment; whoever can see the record can download them, and deleting the comment removes them).
 - **Activities:** to-dos, calls (incoming or outgoing; logged as done if no time is set), meetings
   and emails, with deadlines, reminders (a background job) and a "My activities" page. Sidebar
   counters show deals and leads that need attention: overdue, due today, or nothing planned.
@@ -192,7 +193,8 @@ The safeguards always keep at least one active administrator, and nobody can dea
     emails, messengers, address, birthday and notes
   - **Move from another CRM** (CRM → Move from another CRM, CRM administrators): upload the
     export of HubSpot, Salesforce (its data export ZIP), Pipedrive or Zoho CRM, or any CSV
-    files. Each file's kind (companies, contacts, leads, deals, activities, notes, users) and
+    files. Each file's kind (companies, contacts, leads, deals, activities, notes, products,
+    products on deals, attachments, users) and
     each column are recognised from the system's own column names; the page shows what it
     found to check and change: the column mapping, deal pipelines (an existing one, or a new
     one made with the stages the export uses), stages and lead statuses, and whose records
@@ -200,11 +202,25 @@ The safeguards always keep at least one active administrator, and nobody can dea
     It runs in the background — companies, contacts, leads, deals, then activities and
     notes — keeping the links between them (contacts to companies, deals to their company
     and contacts, notes and tasks to their record), original creation dates, amounts,
-    close dates and probabilities, and notes' HTML as text. Nothing is sent and no robots,
+    close dates and probabilities, and notes' HTML as text.
+    **Custom fields:** a column named like one of the record type's custom fields goes to it;
+    any other column can go to an existing custom field or to a new one, named after the
+    column and typed by its values (number, date, date and time, yes/no, link, text); values
+    are converted to the field's type (list fields by their option names, people fields by
+    the owner matching) and a value that doesn't fit leaves the field empty rather than
+    failing the record. **Products:** the export's catalogue comes into the product catalogue
+    (matched to existing products by code, else name), and products on deals (Salesforce's
+    OpportunityLineItem, HubSpot's line items, …) become the deals' product rows with
+    quantity, price, discount and tax; a deal whose export gave no amount takes its rows'
+    total. **Attachments:** files inside the uploaded ZIP that the export lists (Salesforce's
+    Attachment and ContentVersion, or any list with a parent id and a file path or id) go on
+    their record's timeline, kept by whoever owned them; an attachment of a note or task goes
+    to that note's or task's record. Nothing is sent and no robots,
     business processes, webhooks or notifications run. Every record's id in the old system is
     remembered, so a second run of the same (or a newer) export updates what came over before
     instead of duplicating it; people and companies already in NERP are matched by email,
-    phone or name. A migration can be undone: what it made goes to the recycle bin
+    phone or name. A migration can be undone: what it made goes to the recycle bin (products,
+    product rows, notes, activities and attachments with their files are removed)
   - a **Booking link** on each record: one of your calendar slot links made out for the
     record's client. What they book is a meeting on the record (and on your calendar, once);
     if they cancel, the meeting is closed as cancelled

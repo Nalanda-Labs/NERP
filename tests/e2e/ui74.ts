@@ -35,7 +35,7 @@ await pa.click('button:has-text("Sign in")'); await pa.waitForURL(B + '/');
 // A Pipedrive export: organisations, people and deals (one deal's notes column left unmapped).
 const orgs = `Organization - ID,Organization - Name,Organization - Address,Organization - Owner\r\n1,Umbrella ${s},Main St 1,admin@acme.test\r\n`;
 const people = `Person - ID,Person - Name,Person - Email,Person - Phone,Person - Organization,Person - Owner\r\n7,Rita Pd${s},rita.${s}@umbrella.test,+1 555 0300,Umbrella ${s},admin@acme.test\r\n`;
-const deals = `Deal - ID,Deal - Title,Deal - Value,Deal - Currency,Deal - Pipeline,Deal - Stage,Deal - Organization,Deal - Contact person,Deal - Owner,Deal - Secret notes\r\n42,Umbrella deal ${s},900,EUR,Field ${s},Proposal made,Umbrella ${s},Rita Pd${s},admin@acme.test,do not import\r\n`;
+const deals = `Deal - ID,Deal - Title,Deal - Value,Deal - Currency,Deal - Pipeline,Deal - Stage,Deal - Organization,Deal - Contact person,Deal - Owner,Deal - Secret notes,Region ${s}\r\n42,Umbrella deal ${s},900,EUR,Field ${s},Proposal made,Umbrella ${s},Rita Pd${s},admin@acme.test,do not import,North\r\n`;
 const files = ['organizations', 'persons', 'deals'].map((n) => `${OUTPUT}/${n}-${s}.csv`);
 writeFileSync(files[0], orgs); writeFileSync(files[1], people); writeFileSync(files[2], deals);
 let migrationId = '';
@@ -61,6 +61,8 @@ try {
     if (await sel('Deal - Secret notes').inputValue() !== '') throw new Error('an unknown column was mapped');
     await sel('Deal - Secret notes').selectOption('description');
     await sel('Deal - Secret notes').selectOption('');
+    // A column of its own becomes a new custom field.
+    await sel(`Region ${s}`).selectOption('uf:new');
   });
 
   await step('pipeline, stage and owner to check', async () => {
@@ -82,11 +84,30 @@ try {
     const deal = (await admin.get(`/crm/deal/items?q=${encodeURIComponent(`Umbrella deal ${s}`)}`)).data.items[0];
     const d = (await admin.get(`/crm/deal/items/${deal.id}`)).data;
     if (d.company_title !== `Umbrella ${s}` || d.contacts.length !== 1 || Number(d.opportunity) !== 900 || (d.comments ?? '').includes('do not import')) throw new Error(JSON.stringify(d).slice(0, 400));
+    const region = (await admin.get('/crm/deal/fields')).data.find((f: any) => f.label === `Region ${s}`);
+    if (d.uf?.[region?.code] !== 'North') throw new Error(`custom field: ${JSON.stringify([region, d.uf])}`);
     migrationId = (await admin.get('/crm/migrations')).data.items[0].id;
     await pa.locator(`[data-history="${migrationId}"]`).waitFor();
   });
 
+  await step('a comment with a file on the record', async () => {
+    const deal = (await admin.get(`/crm/deal/items?q=${encodeURIComponent(`Umbrella deal ${s}`)}`)).data.items[0];
+    await pa.goto(`${B}/crm/deal/${deal.id}`);
+    await pa.setInputFiles('[data-comment-files]', { name: `brief-${s}.txt`, mimeType: 'text/plain', buffer: Buffer.from('the brief') });
+    await pa.locator(`[data-attached] >> text=brief-${s}.txt`).waitFor();
+    await pa.locator('textarea').first().fill('The brief, as agreed');
+    await pa.click('button:has-text("Post")');
+    const files = pa.locator('[data-entry-files]', { hasText: `brief-${s}.txt` });
+    await files.waitFor();
+    const dl = pa.waitForEvent('download');
+    await files.locator('button').first().click();
+    if ((await (await dl).suggestedFilename()) !== `brief-${s}.txt`) throw new Error('wrong download');
+  });
+
   await step('undone from the page', async () => {
+    await pa.goto(B + '/crm/migrate');
+    await pa.locator(`[data-history="${migrationId}"]`).waitFor();
+    await pa.click(`[data-history="${migrationId}"] button:has-text("Details")`);
     pa.once('dialog', (d) => d.accept());
     await pa.click('[data-migration="done"] button:has-text("Undo")');
     await pa.locator('[data-migration="undone"]').waitFor({ timeout: 15000 });
@@ -116,6 +137,7 @@ try {
   await browser.close();
   await db.query(`DELETE FROM crm_items WHERE title ILIKE $1 OR last_name ILIKE $1 OR company_name ILIKE $1`, [`%${s}%`]).catch(() => {});
   await db.query('DELETE FROM crm_categories WHERE name = $1', [`Field ${s}`]).catch(() => {});
+  await db.query('DELETE FROM crm_field_defs WHERE label = $1', [`Region ${s}`]).catch(() => {});
   if (migrationId) await db.query('DELETE FROM crm_migrations WHERE id = $1', [migrationId]).catch(() => {});
   await db.end();
   await cleanupRun(s);
