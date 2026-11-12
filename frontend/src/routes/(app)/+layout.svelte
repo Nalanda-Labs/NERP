@@ -274,6 +274,7 @@
 				{ href: '/roles', label: 'Roles & permissions', icon: 'shield', perm: PERM.ROLES_MANAGE },
 				{ href: '/admin/mailboxes', label: 'Mailboxes', icon: 'mail', perm: PERM.MAIL_ADMIN },
 				{ href: '/audit', label: 'Audit log', icon: 'history', perm: PERM.AUDIT_VIEW },
+				{ href: '/privacy', label: 'Data requests', icon: 'shield', perm: PERM.PRIVACY_MANAGE },
 				{ href: '/developers', label: 'API & webhooks', icon: 'key', perm: PERM.API_KEYS, orPerm: PERM.WEBHOOKS_MANAGE },
 				{ href: '/system', label: 'System', icon: 'cpu', perm: PERM.SYSTEM_MANAGE },
 				{ href: '/settings/directory', label: 'Directory & sign-on', icon: 'lock', perm: PERM.SETTINGS_MANAGE },
