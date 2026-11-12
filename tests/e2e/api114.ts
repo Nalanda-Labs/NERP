@@ -4,6 +4,7 @@ import { Client } from './lib.ts';
 import { cleanupRun } from './cleanup.ts';
 import { dbUrl } from '../db/cleanup.ts';
 import pg from 'pg';
+import { execFileSync } from 'node:child_process';
 
 let pass = 0, fail = 0;
 const ok = (name: string, cond: unknown, extra: unknown = '') => { cond ? pass++ : fail++; console.log(cond ? 'ok  ' : 'FAIL', name, cond ? '' : String(typeof extra === 'string' ? extra : JSON.stringify(extra)).slice(0, 900)); };
@@ -12,6 +13,12 @@ const admin = new Client();
 const me = (await admin.post('/auth/login', { email: 'admin@acme.test', password: 'supersecret1' })).data.user;
 const db = new pg.Client({ connectionString: dbUrl });
 await db.connect();
+// The public form's per-address limits count every local run: start from a clean slate.
+try {
+  const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+  const keys = execFileSync('redis-cli', ['-u', url, '--scan', '--pattern', 'privacy:*']).toString().split('\n').filter(Boolean);
+  if (keys.length) execFileSync('redis-cli', ['-u', url, 'DEL', ...keys]);
+} catch { /* no redis-cli: the limits pass within the hour */ }
 const email = `dora.${s}@example.com`;
 const phone = `+44 20 7${String(Date.now()).slice(-7)}`;
 const made: Record<string, string> = {};

@@ -1818,6 +1818,31 @@ who ask what the company holds on them, or ask for it to be deleted, within 30 d
   address, and requests are limited per address and per network address. Those who handle
   requests are notified.
 
+### Retention rules
+
+Data requests → **Retention rules** sets, per kind of data, how long it is kept and what
+happens after; each rule is off until turned on, and shows how many records are past it now.
+
+| Rule | After | Shortest |
+|---|---|---|
+| Lost leads (from closing) | to the CRM recycle bin | 30 days |
+| Inactive contacts (no activity, no open deal) | anonymised, as for an erasure request | 365 days |
+| CRM emails, with attachments | deleted | 90 days |
+| Live chats (from closing) | deleted | 30 days |
+| Help desk tickets (from closing) | deleted or anonymised | 90 days |
+| Site visits | deleted | 30 days |
+| Web form submissions | deleted | 30 days |
+| Marketing email recipients (opt-outs stay) | deleted | 90 days |
+| Bookings (from their end) | anonymised or deleted | 30 days |
+| Shop order contact details | anonymised | 90 days |
+| Video call recordings, with files | deleted | 7 days |
+| Answered personal data requests | deleted | 365 days |
+
+The `retention.run` job applies the rules every night, 5 000 records per rule per run, and
+logs each run (shown on the page, and in the audit log when it changed anything); *Apply
+now* runs them at once. Always kept: the audit trail, the books and signed documents. Files
+attached to removed emails and recordings are removed unless something else still uses them.
+
 ## Health and self-test
 
 System → **Health** (system managers) says whether the installation is in good shape, every
