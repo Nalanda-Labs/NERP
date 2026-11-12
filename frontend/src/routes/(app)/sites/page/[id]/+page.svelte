@@ -30,6 +30,7 @@
 	let dirty = $state(false);
 	let busy = $state(false);
 	let forms = $state<{ key: string; name: string }[]>([]);
+	let bookingForms = $state<{ slug: string; name: string }[]>([]);
 	// Preview images: the editor's files as blob addresses.
 	let urls = $state<Record<string, string>>({});
 	function want(id: string | undefined) {
@@ -67,6 +68,10 @@
 		api
 			.get<{ items: { key: string; name: string }[] }>('/crm/webforms')
 			.then((r) => (forms = r.items))
+			.catch(() => {});
+		api
+			.get<{ items: { slug: string; name: string }[] }>('/booking/forms')
+			.then((r) => (bookingForms = r.items))
 			.catch(() => {});
 	});
 
@@ -120,7 +125,8 @@
 		contact: { kind: 'contact', heading: 'Contact', address: '', phone: '', email: '' },
 		form: { kind: 'form', heading: 'Write to us', form_key: '' },
 		html: { kind: 'html', html: '<p>Your HTML here</p>', height: 300 },
-		products: { kind: 'products', heading: 'Our products', limit: 8 }
+		products: { kind: 'products', heading: 'Our products', limit: 8 },
+		booking: { kind: 'booking', heading: 'Book online', booking_slug: '' }
 	};
 	const NAMES: Record<Block['kind'], string> = {
 		hero: 'Banner',
@@ -132,7 +138,8 @@
 		contact: 'Contact details',
 		form: 'Web form',
 		html: 'HTML or code',
-		products: 'Products from the shop'
+		products: 'Products from the shop',
+		booking: 'Online booking'
 	};
 
 	// Reusable groups of blocks.
@@ -480,6 +487,12 @@
 							bind:value={b.hours}
 							oninput={changed}
 						/>
+					{:else if b.kind === 'booking'}
+						<input class="input" placeholder="Heading" bind:value={b.heading} oninput={changed} />
+						<select class="input" aria-label="Booking form" bind:value={b.booking_slug} onchange={changed} data-booking-form
+							><option value="">Choose a booking form…</option>{#each bookingForms as f (f.slug)}<option value={f.slug}>{f.name}</option>{/each}</select
+						>
+						{#if !bookingForms.length}<p class="text-xs text-slate-500">Make one in Booking → Settings → Forms.</p>{/if}
 					{:else if b.kind === 'form'}
 						<input class="input" placeholder="Heading" bind:value={b.heading} oninput={changed} />
 						{#if forms.length}<select

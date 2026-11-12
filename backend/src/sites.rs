@@ -51,7 +51,7 @@ pub(crate) fn require(auth: &AuthUser) -> AppResult<()> {
 // Blocks
 // ---------------------------------------------------------------------------
 
-const KINDS: &[&str] = &["hero", "text", "features", "image", "gallery", "cta", "contact", "form", "html", "products"];
+const KINDS: &[&str] = &["hero", "text", "features", "image", "gallery", "cta", "contact", "form", "html", "products", "booking"];
 
 fn text_field(b: &Map<String, Value>, k: &str, max: usize) -> AppResult<Option<String>> {
     match b.get(k) {
@@ -172,6 +172,15 @@ pub(crate) fn clean_blocks(v: &Value) -> AppResult<(Value, Vec<Uuid>)> {
                 put(&mut o, "phone", text_field(b, "phone", 50)?);
                 put(&mut o, "email", text_field(b, "email", 254)?);
                 put(&mut o, "hours", text_field(b, "hours", 300)?);
+            }
+            // A self-booking form (Booking → forms), by its address.
+            "booking" => {
+                put(&mut o, "heading", text_field(b, "heading", 200)?);
+                let slug = text_field(b, "booking_slug", 80)?;
+                if slug.as_deref().is_some_and(|s| !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+                    return Err(AppError::bad("choose a booking form"));
+                }
+                put(&mut o, "booking_slug", slug);
             }
             _ => {
                 put(&mut o, "heading", text_field(b, "heading", 200)?);

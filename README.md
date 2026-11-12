@@ -1605,10 +1605,22 @@ its services and the self-booking forms (Booking → Settings).
 - **Self-booking forms** at `/book/<slug>`: the client picks a service (and extras), a day and a
   free time (with who is free), and leaves their name, email and, if the form requires it,
   phone. Bots that fill the hidden field are refused. The client gets a confirmation email
-  with a private link to see, confirm or cancel the booking, and a reminder email the set
-  number of hours before (0–168). Switching a form off takes it offline.
+  with a private link to see, confirm or cancel the booking, and reminders (below).
+  Switching a form off takes it offline.
 - **CRM:** with "make a contact" on, each client becomes a contact; with a deal pipeline
   chosen, each booking also gets a deal with the client, the price and the person booked.
+  - A **Bookings** card on contacts, companies (their contacts' and deals' bookings) and deals.
+    "Book" there offers the free times of a resource and service and books for the record's
+    client; booked from a deal, the booking is linked to that deal (no new deal is made).
+  - Booking events go on the contact's and deal's timelines and are **automation triggers**
+    ("A booking of the client changes": made, confirmed by the client, came, didn't come,
+    cancelled, or any), so a deal can move on when the client came.
+- **Messages to clients:** the confirmation, a reminder the set hours before plus up to five
+  more (e.g. 72 and 2 hours) — when several fall due at once only the nearest is sent — a
+  follow-up the set hours after a visit marked "came", and a message to clients marked as not
+  having come. Each is sent once.
+- **Elsewhere:** an **Online booking** block for websites (it embeds a booking form and grows
+  with it), and a "Booking link…" picker in live chat that puts a form's address in the reply.
 
 ## Live chat (contact centre)
 

@@ -9,6 +9,16 @@
 	type Slot = { start: string; resource_ids: string[] };
 
 	const slug = $derived(page.params.slug!);
+	// Embedded in a website's booking block: tell the host page how tall the form is.
+	const embed = page.url.searchParams.get('embed') === '1';
+	$effect(() => {
+		if (!embed || typeof ResizeObserver === 'undefined') return;
+		const post = () => parent.postMessage({ nerpForm: `book:${slug}`, height: document.body.scrollHeight + 8 }, '*');
+		const ro = new ResizeObserver(post);
+		ro.observe(document.body);
+		post();
+		return () => ro.disconnect();
+	});
 	let form = $state<Form | null>(null);
 	let missing = $state(false);
 	let service = $state('');

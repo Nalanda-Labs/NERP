@@ -13,7 +13,9 @@
 	let resources = $state<Resource[]>([]);
 	let services = $state<Service[]>([]);
 	let forms = $state<BookingForm[]>([]);
-	let settings = $state({ confirm_email: true, remind_hours: 24, make_contact: true, deal_category_id: null as string | null, currency: 'USD' });
+	let settings = $state({ confirm_email: true, remind_hours: 24, make_contact: true, deal_category_id: null as string | null, currency: 'USD', extra_reminders: [] as number[], follow_up_hours: 0, follow_up_text: null as string | null, no_show_text: null as string | null });
+	// More reminders, as text: "2, 1" (hours before).
+	let extraText = $state('');
 	let pipelines = $state<{ id: string; name: string }[]>([]);
 
 	async function load() {
@@ -27,6 +29,7 @@
 		services = s.items;
 		forms = f.items;
 		settings = st;
+		extraText = (st.extra_reminders ?? []).join(', ');
 	}
 	onMount(async () => {
 		await load();
@@ -120,7 +123,15 @@
 	async function saveSettings(e: SubmitEvent) {
 		e.preventDefault();
 		try {
-			settings = await api.put('/booking/settings', { ...settings, remind_hours: Number(settings.remind_hours) });
+			settings = await api.put('/booking/settings', {
+				...settings,
+				remind_hours: Number(settings.remind_hours),
+				extra_reminders: extraText.split(/[\s,;]+/).filter(Boolean).map(Number),
+				follow_up_hours: Number(settings.follow_up_hours),
+				follow_up_text: settings.follow_up_text ?? '',
+				no_show_text: settings.no_show_text ?? ''
+			});
+			extraText = (settings.extra_reminders ?? []).join(', ');
 			toasts.success('Saved');
 		} catch (err) {
 			toasts.error(err);
@@ -174,6 +185,12 @@
 		<form class="card max-w-2xl space-y-4 p-5" onsubmit={saveSettings}>
 			<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={settings.confirm_email} /> Email clients a confirmation with a link to confirm or cancel</label>
 			<div><label class="label" for="bs-rem">Remind clients by email (hours before; 0 for no reminder)</label><input id="bs-rem" type="number" min="0" max="168" class="input w-32" bind:value={settings.remind_hours} /></div>
+			<div><label class="label" for="bs-more">More reminders (hours before, e.g. "2" or "72, 2")</label><input id="bs-more" class="input w-48" placeholder="None" bind:value={extraText} data-extra-reminders /><p class="mt-1 text-xs text-slate-500">Only the nearest reminder is sent when several fall due at once (a booking made two hours ahead gets the two-hour one).</p></div>
+			<div class="grid gap-3 sm:grid-cols-[10rem_1fr]">
+				<div><label class="label" for="bs-fu">Follow-up after the visit (hours; 0 for none)</label><input id="bs-fu" type="number" min="0" max="720" class="input" bind:value={settings.follow_up_hours} data-follow-up-hours /></div>
+				<div><label class="label" for="bs-fut">Follow-up message</label><textarea id="bs-fut" class="input" rows="2" placeholder="Thanks for coming! Book your next visit any time." bind:value={settings.follow_up_text} data-follow-up-text></textarea></div>
+			</div>
+			<div><label class="label" for="bs-ns">Message to clients who didn't come (empty for none)</label><textarea id="bs-ns" class="input" rows="2" placeholder="Would you like to book another time?" bind:value={settings.no_show_text} data-no-show-text></textarea></div>
 			<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={settings.make_contact} /> Clients become CRM contacts (found again by email or phone)</label>
 			<div>
 				<label class="label" for="bs-cat">A deal for each booking, in</label>

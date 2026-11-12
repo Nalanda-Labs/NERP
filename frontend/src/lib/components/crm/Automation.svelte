@@ -56,7 +56,8 @@
 		['webhook', 'An external system calls a webhook'],
 		['signature_completed', 'Everyone signs a document'],
 		['signature_declined', 'Someone declines to sign'],
-		['tasks_done', 'All its tasks are done']
+		['tasks_done', 'All its tasks are done'],
+		['booking', 'A booking of the client changes']
 	];
 	const WAITS: [Wait['until'], string][] = [
 		['conditions', 'the conditions below hold'],
@@ -945,6 +946,14 @@
 						<select id="au-sgt" class="input" value={draft.params.sign_template_id ?? ''} onchange={(e) => (draft!.params.sign_template_id = e.currentTarget.value || undefined)}>
 							<option value="">Any</option>
 							{#each typeSignTemplates as t (t.id)}<option value={t.id}>{t.name}</option>{/each}
+						</select>
+					</div>
+				{:else if draft.event === 'booking'}
+					<div>
+						<label class="label" for="au-bk">When the booking is</label>
+						<select id="au-bk" class="input" value={draft.params.status ?? ''} onchange={(e) => (draft!.params.status = e.currentTarget.value || undefined)} data-booking-status>
+							<option value="">Any change</option>
+							{#each [['booked', 'Made'], ['confirmed', 'Confirmed by the client'], ['came', 'Marked as came'], ['no_show', 'Marked as didn’t come'], ['cancelled', 'Cancelled']] as [k, l] (k)}<option value={k}>{l}</option>{/each}
 						</select>
 					</div>
 				{:else if draft.event === 'webhook'}
