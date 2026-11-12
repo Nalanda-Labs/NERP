@@ -1795,6 +1795,29 @@ documents and warehouses need the "Manage inventory" permission.
     Transfers aren't posted. A movement that can't be posted (a locked period) still moves
     the stock, and is logged.
 
+## Personal data requests
+
+Administration → **Data requests** (permission *Handle personal data requests*) answers people
+who ask what the company holds on them, or ask for it to be deleted, within 30 days:
+
+- **Finding them:** by email (and phone, if given) across every module — CRM records (by
+  their emails and phones), emails, live chats, help desk tickets, bookings, shop orders,
+  marketing emails, web form submissions, calendar invitations, signatures, site visits,
+  invoices and payments in the books, the staff directory and the opt-out list.
+- **Access:** the report (JSON, every place with its rows) downloads for sending; the
+  request is then marked answered, with a note.
+- **Erasure:** each place offers delete, anonymise or keep (with its reason), suggesting the
+  usual choice: CRM records are anonymised (names, contact details, address, notes, custom
+  fields, files on notes) and leave the lists, while deals and invoices keep pointing at
+  them; orders and bookings keep amounts and times without the person; signed documents and
+  the books are kept as evidence and legal records. The person's email is typed again to
+  confirm; it all happens in one transaction, the address goes on the marketing opt-out
+  list, and the request keeps only the counts. Everything is in the audit log.
+- **Public form** at `/privacy-request`: people ask themselves; the request counts once
+  they confirm it from the email it sends (within 7 days). The answer is the same for any
+  address, and requests are limited per address and per network address. Those who handle
+  requests are notified.
+
 ## Health and self-test
 
 System → **Health** (system managers) says whether the installation is in good shape, every

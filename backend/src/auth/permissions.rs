@@ -11,6 +11,7 @@ pub const FILES_MANAGE: &str = "files.manage";
 pub const SETTINGS_MANAGE: &str = "settings.manage";
 pub const AUDIT_VIEW: &str = "audit.view";
 pub const SYSTEM_MANAGE: &str = "system.manage";
+pub const PRIVACY_MANAGE: &str = "privacy.manage";
 pub const PROJECTS_CREATE: &str = "projects.create";
 pub const TASKS_MANAGE_ALL: &str = "tasks.manage_all";
 pub const CRM_ADMIN: &str = "crm.admin";
@@ -84,6 +85,7 @@ pub const CATALOG: &[PermissionInfo] = &[
     PermissionInfo { code: SETTINGS_MANAGE, group: "Administration", name: "Manage settings", description: "Change company-wide settings" },
     PermissionInfo { code: AUDIT_VIEW, group: "Administration", name: "View audit log", description: "See the history of security-relevant actions" },
     PermissionInfo { code: SYSTEM_MANAGE, group: "Administration", name: "Manage system", description: "Monitor background jobs, test outgoing email, and add or change LaTeX document templates (they run code on the server)" },
+    PermissionInfo { code: PRIVACY_MANAGE, group: "Administration", name: "Handle personal data requests", description: "See what NERP holds on a person across every module, send them a copy and erase it on request" },
 ];
 
 pub fn is_known(code: &str) -> bool {

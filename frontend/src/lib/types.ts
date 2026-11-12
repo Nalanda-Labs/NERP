@@ -123,6 +123,7 @@ export const PERM = {
 	SETTINGS_MANAGE: 'settings.manage',
 	AUDIT_VIEW: 'audit.view',
 	SYSTEM_MANAGE: 'system.manage',
+	PRIVACY_MANAGE: 'privacy.manage',
 	PROJECTS_CREATE: 'projects.create',
 	TASKS_MANAGE_ALL: 'tasks.manage_all',
 	CRM_ADMIN: 'crm.admin',
