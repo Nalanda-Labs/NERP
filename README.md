@@ -10,6 +10,9 @@ A company management platform (CRM, tasks and projects, documents, email), writt
 | backend  | Rust 2024, Axum 0.8, SQLx 0.9, PostgreSQL 18, Redis/Valkey                    |
 | frontend | SvelteKit 3 (SPA, static adapter), Svelte 5 runes, TypeScript, Tailwind CSS 4 |
 
+**Why NERP:** [rationale.md](rationale.md) (no licence fees, your data stays yours, GNU GPL v3,
+support from Nalanda Labs, and why this stack).
+
 **Guides:** [SETUP.md](SETUP.md) (development and production setup) ·
 [BACKUP.md](BACKUP.md) (backups and restoring) · [SECURITY.md](SECURITY.md) (security review,
 penetration tests, reporting vulnerabilities)
