@@ -162,7 +162,26 @@ async fn finish(state: &AppState, job: &Claimed, result: Result<()>) {
     }
 }
 
+/// Jobs a sandbox doesn't run: everything that would reach mailboxes, calendars, directories
+/// or other systems outside. (Its emails stay as done jobs: the sandbox's outbox.)
+const SANDBOX_SKIPS: &[&str] = &[
+    crate::crm::email::POLL_JOB,
+    crate::crm::email::SYNC_JOB,
+    crate::crm::email::SEND_JOB,
+    crate::marketing::JOB,
+    crate::marketing::DUE_JOB,
+    crate::support::MAIL_SEND_JOB,
+    crate::calendar::sync::SYNC_JOB,
+    crate::directory::SYNC_JOB,
+    crate::bi::REFRESH_JOB,
+    crate::api::webhooks::JOB,
+];
+
 async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
+    if state.config.sandbox && (kind == EMAIL_SEND || SANDBOX_SKIPS.contains(&kind)) {
+        tracing::info!(kind, "sandbox: not run");
+        return Ok(());
+    }
     match kind {
         EMAIL_SEND => {
             let email: Email = serde_json::from_value(payload.clone())?;

@@ -24,6 +24,11 @@
 	let mobileNav = $state(false);
 	let menuOpen = $state(false);
 
+	// A sandbox (an anonymised copy) says so on every page.
+	let sandbox = $state<{ company?: string; copied_at?: string } | null>(null);
+	onMount(() => {
+		fetch('/api/public/instance').then((r) => r.json()).then((x) => (sandbox = x.sandbox ? (x.copy ?? {}) : null)).catch(() => {});
+	});
 	onMount(async () => {
 		const status = await api.get<{ needs_setup: boolean; company_name: string | null }>('/setup');
 		if (status.needs_setup) return goto('/setup', { replace: true });
@@ -476,6 +481,7 @@
 					{/if}
 				</div>
 			</header>
+			{#if sandbox}<div class="bg-amber-400 px-4 py-1.5 text-center text-sm font-medium text-amber-950" data-sandbox-banner>Sandbox — a copy of {sandbox.company ?? 'the company'} with made-up client details{sandbox.copied_at ? `, taken ${new Date(sandbox.copied_at).toLocaleDateString()}` : ''}. Nothing here reaches the outside world.</div>{/if}
 			<main class="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8">
 				{@render children()}
 			</main>

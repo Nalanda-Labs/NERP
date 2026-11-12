@@ -5,6 +5,9 @@ cd "$(dirname "$0")/../../../backend" || exit 1
 OUT="${NERP_E2E_OUTPUT:-${TMPDIR:-/tmp}/nerp-e2e}"
 mkdir -p "$OUT/livekit-recordings"
 pkill -f "target/debug/nerp$" && sleep 2
+# The sandbox copy goes to <test database>_sandbox_test.
+SANDBOX_DATABASE_URL="${SANDBOX_DATABASE_URL:-$(grep -m1 '^DATABASE_URL=' .env | cut -d= -f2- | sed -E 's#/([^/?]+)(\?.*)?$#/\1_sandbox_test\2#')}"
+export SANDBOX_DATABASE_URL SANDBOX_URL="${SANDBOX_URL:-http://127.0.0.1:8092}"
 STATIC_DIR=../frontend/build CRM_WEBHOOK_ALLOW_PRIVATE=true MAIL_ALLOW_PRIVATE=true LDAP_ENABLED=true PUBLIC_URL=http://localhost:8080 \
 NERP_TEST_SIGNIN_BASE=http://127.0.0.1:9479 BACKUP_DIR="$OUT/backups" BACKUP_RESTORE=true \
 FILE_ENCRYPTION_KEY="${FILE_ENCRYPTION_KEY:-nerp-test-file-key-0123456789abcdef}" \

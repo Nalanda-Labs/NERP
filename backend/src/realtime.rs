@@ -40,6 +40,12 @@ use crate::{
 };
 
 const CHANNEL: &str = "nerp:events";
+/// A sandbox instance has its own channel (Redis Pub/Sub ignores the database number).
+const SANDBOX_CHANNEL: &str = "nerp:sandbox:events";
+
+fn channel(state: &AppState) -> &'static str {
+    if state.config.sandbox { SANDBOX_CHANNEL } else { CHANNEL }
+}
 const TICKET_TTL_SECS: u64 = 30;
 
 /// An event as it travels through Redis.
@@ -128,7 +134,7 @@ pub async fn publish(state: &AppState, users: Option<Vec<Uuid>>, kind: &str, dat
 pub async fn publish_envelope(state: &AppState, env: Envelope) {
     let mut redis = state.redis.clone();
     let payload = serde_json::to_string(&env).unwrap();
-    if let Err(e) = redis.publish::<_, _, ()>(CHANNEL, payload).await {
+    if let Err(e) = redis.publish::<_, _, ()>(channel(state), payload).await {
         tracing::warn!(error = ?e, kind = env.kind, "could not publish real-time event");
     }
 }
@@ -139,7 +145,7 @@ pub fn start_subscriber(state: AppState, client: redis::Client) {
         loop {
             match client.get_async_pubsub().await {
                 Ok(mut pubsub) => {
-                    if let Err(e) = pubsub.subscribe(CHANNEL).await {
+                    if let Err(e) = pubsub.subscribe(channel(&state)).await {
                         tracing::warn!(error = ?e, "real-time subscribe failed");
                     } else {
                         tracing::info!("real-time event subscriber connected");
