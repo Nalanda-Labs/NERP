@@ -123,16 +123,39 @@ async fn person(state: &AppState, tz: chrono_tz::Tz, id: Uuid, from: NaiveDate, 
     // Meetings: the person's own timed events (single occurrences).
     let start = tz.from_local_datetime(&from.and_hms_opt(0, 0, 0).expect("midnight")).earliest().map(|t| t.with_timezone(&Utc)).unwrap_or_else(Utc::now);
     let end = tz.from_local_datetime(&(to + Duration::days(1)).and_hms_opt(0, 0, 0).expect("midnight")).earliest().map(|t| t.with_timezone(&Utc)).unwrap_or_else(Utc::now);
-    let events: Vec<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT starts_at, ends_at FROM cal_events WHERE owner_id = $1 AND NOT all_day AND starts_at < $3 AND ends_at > $2 AND parent_id IS NULL",
+    // Their meetings: events they own or were invited to (and didn't decline), each
+    // occurrence of repeating ones, overlaps counted once.
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id AND a.user_id = $1
+         WHERE (e.owner_id = $1 OR (a.user_id IS NOT NULL AND a.status <> 'declined')) AND NOT e.all_day
+           AND e.starts_at < $3 AND (e.recurrence IS NOT NULL OR e.ends_at > $2)
+         LIMIT 5000",
     )
     .bind(id)
     .bind(start)
     .bind(end)
     .fetch_all(&state.db)
     .await?;
+    let events = crate::calendar::load_events(state, &ids).await?;
+    let ex = crate::calendar::exceptions(state, &ids).await?;
+    let mut spans: Vec<(DateTime<Utc>, DateTime<Utc>)> = vec![];
+    for (e, _) in &events {
+        let excs: Vec<DateTime<Utc>> = ex.iter().filter(|(x, _)| *x == e.id).map(|(_, t)| *t).collect();
+        let len = e.ends_at - e.starts_at;
+        for s in crate::calendar::occurrences(e, &excs, start, end) {
+            spans.push((s, s + len));
+        }
+    }
+    spans.sort();
+    let mut merged: Vec<(DateTime<Utc>, DateTime<Utc>)> = vec![];
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
     let mut busy: HashMap<NaiveDate, f64> = HashMap::new();
-    for (s, e) in events {
+    for (s, e) in merged {
         let (s, e) = (s.with_timezone(&tz), e.with_timezone(&tz));
         let mut d = s.date_naive();
         while d <= e.date_naive() && d <= to {
@@ -211,6 +234,8 @@ async fn check(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     .fetch_all(&state.db)
     .await?;
 
+    // A day of work is the company's working day.
+    let workday: f64 = sqlx::query_scalar::<_, Decimal>("SELECT workday_hours FROM hr_settings LIMIT 1").fetch_optional(&state.db).await?.map(num).unwrap_or(8.0);
     let mut reasons: Vec<String> = vec![];
     let mut verdict = Verdict::Ok;
     let mut earliest: Option<NaiveDate> = Some(date);
@@ -233,7 +258,7 @@ async fn check(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
             if HOUR_UNITS.contains(&unit.as_str()) {
                 needed_hours += qty;
             } else if DAY_UNITS.contains(&unit.as_str()) {
-                needed_hours += qty * 8.0;
+                needed_hours += qty * workday;
             } else {
                 unknown_services.push(l.name.clone());
             }

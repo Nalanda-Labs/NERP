@@ -414,10 +414,12 @@ promised:
   product's own stock count), less what other open deals with a close date by then need of
   it, plus receipts drafted with a date (a draft receipt document is an expected delivery).
   Enough now: fine; enough only once a receipt arrives by the date: risky, naming it.
-- **Work:** service rows in hours (`h`, `hour`…) or days (8 hours) against the free time of
-  the people doing it (the responsible person, or whoever is picked): working days from the
-  company work week or their rota, less holidays and approved time off, less their timed
-  calendar events and what is left of the estimates of their open tasks due by then. Within
+- **Work:** service rows in hours (`h`, `hour`…) or days (the company's working day) against
+  the free time of the people doing it (the responsible person, or whoever is picked):
+  working days from the company work week or their rota, less holidays and approved time
+  off, less their meetings (their own and those they were invited to and didn't decline,
+  every occurrence of repeating ones, overlaps counted once) and what is left of the
+  estimates of their open tasks due by then. Within
   the free time with a fifth to spare: fine; just within it: risky.
 - Someone away on the day itself makes it risky; pending time off is mentioned.
 - The verdict (can be done, risky, not by then) comes with the reasons and the earliest
