@@ -584,6 +584,16 @@ least on their plate** (`mode: capacity`).
   is. *Who would get the next one?* in the robot's settings shows the pick and why each of
   the others wasn't chosen; the robot's run says the same.
 
+### Automation preview
+
+The robot and trigger editors answer **How often would this have run?** for the last 7, 30
+or 90 days or year, before the rule is saved or switched on: how many times, on how many
+records, how many the conditions left out, a bar per week and examples. Robots count every
+entry into their stage; triggers count their events (activities done, comments, documents,
+emails received, web form submissions, signatures, finished tasks, bookings) with their own
+settings. Conditions are checked on the records as they are now; webhook calls aren't recorded,
+so webhook triggers can't be previewed.
+
 ### Record cards
 
 Each record type's page shows its fields in sections (by default "About", "Contact details"

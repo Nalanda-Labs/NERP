@@ -18,6 +18,7 @@
 //! hourly budget of robot runs, so a misconfigured pipeline cannot loop forever.
 
 mod actions;
+mod preview;
 mod report;
 mod schedules;
 pub mod sla;
@@ -86,6 +87,7 @@ pub fn router() -> Router<AppState> {
         .route("/crm/automation/webhook/{token}", post(webhook))
         .merge(schedules::router())
         .merge(report::router())
+        .merge(preview::router())
 }
 
 // ---------------------------------------------------------------------------
