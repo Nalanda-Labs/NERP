@@ -15,6 +15,7 @@ const db = new pg.Client({ connectionString: dbUrl });
 await db.connect();
 const ago = (h: number) => new Date(Date.now() - h * 3600e3).toISOString();
 const made = { form: '', campaign: '', site: '', ticket: '', task: '' };
+let original: any[] | null = null, roleId = '';
 
 try {
   const co = (await admin.post('/crm/company/items', { company_name: `Everything Co ${s}` })).data;
@@ -77,7 +78,18 @@ try {
   await u.post('/auth/login', { email: `ed.${s}@acme.test`, password: 'password123' });
   r = await u.get(`/crm/items/${co.id}/everything`);
   ok('help desk and the books only for those who work there', r.status === 200 && !r.data.items.some((e: any) => e.kind === 'ticket' || e.kind === 'money') && !r.data.kinds.some((k: any) => k.kind === 'ticket'), [r.status, r.data.kinds?.map((k: any) => k.kind)]);
+  // With employees seeing only their own deals, Ed still sees the company and Ann's call,
+  // but not what happened on a deal that isn't his.
+  const empRole = (await admin.get('/roles')).data.find((x: any) => x.code === 'employee');
+  const perms = (await admin.get('/crm/permissions')).data;
+  original = Object.entries(perms.matrix[empRole.id]).flatMap(([t, acts]: [string, any]) => Object.entries(acts).map(([action, scope]) => ({ entity_type: +t, action, scope })));
+  roleId = empRole.id;
+  await admin.put(`/crm/permissions/${roleId}`, { entries: original.map((e: any) => (e.entity_type === 2 && e.action === 'read' ? { ...e, scope: 'own' } : e)) });
+  r = await u.get(`/crm/items/${co.id}/everything`);
+  const seen = JSON.stringify(r.data.items);
+  ok('a deal they may not see stays out of the history', r.status === 200 && seen.includes(`Called Ann ${s}`) && !seen.includes(`Spoke about the roof ${s}`) && !seen.includes(`Contract ${s}`) && !seen.includes(`Measure the roof ${s}`), r.data.items?.map((e: any) => e.title));
 } finally {
+  if (original) await admin.put(`/crm/permissions/${roleId}`, { entries: original }).catch(() => {});
   await db.query('DELETE FROM tasks WHERE id = $1', [made.task || null]).catch(() => {});
   await db.query('DELETE FROM support_tickets WHERE id = $1', [made.ticket || null]).catch(() => {});
   await db.query('DELETE FROM crm_emails WHERE message_id = $1', [`<e-${s}@x>`]).catch(() => {});
