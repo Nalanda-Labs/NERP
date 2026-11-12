@@ -237,6 +237,7 @@
 			items: [
 				{ href: '/inventory', label: 'Stock', icon: 'columns' },
 				{ href: '/inventory/documents', label: 'Stock documents', icon: 'file' },
+				{ href: '/inventory/value', label: 'Stock value', icon: 'columns', perm: PERM.INVENTORY, orPerm: PERM.CRM_ADMIN },
 				{ href: '/inventory/warehouses', label: 'Warehouses', icon: 'building', perm: PERM.INVENTORY, orPerm: PERM.CRM_ADMIN }
 			]
 		},

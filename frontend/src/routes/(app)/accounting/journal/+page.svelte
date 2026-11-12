@@ -10,7 +10,7 @@
 	import { PERM } from '#lib/types.ts';
 
 	type Row = { id: string; number: number | null; date: string; memo: string | null; source: string; status: string; amount: string; reverses: string | null };
-	const SOURCES: Record<string, string> = { manual: 'Manual', invoice: 'Invoice', bill: 'Bill', payment: 'Payment', bank: 'Bank', opening: 'Opening', closing: 'Year-end' };
+	const SOURCES: Record<string, string> = { manual: 'Manual', invoice: 'Invoice', bill: 'Bill', payment: 'Payment', bank: 'Bank', opening: 'Opening', closing: 'Year-end', inventory: 'Stock' };
 	let rows = $state<Row[]>([]);
 	let more = $state(false);
 	let f = $state({ from: '', to: '', source: '', status: page.url.searchParams.get('status') ?? '', q: '' });

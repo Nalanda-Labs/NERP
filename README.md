@@ -1679,6 +1679,26 @@ documents and warehouses need the "Manage inventory" permission.
   it shows what that warehouse holds, takes ordered units from it, and gets them back when an
   order is cancelled. A product's stock counted on the product form is the total over all
   warehouses.
+- **Costing** (Inventory → Stock value): every movement carries its cost in the base
+  currency, shown in the movement history.
+  - Goods coming in make a cost layer and update the warehouse's moving average: receipts at
+    their purchase price (converted from the document's currency), transfers at the cost they
+    left the other warehouse with, returns and cancelled write-offs at the cost they went out
+    with, counts and the product form at the current average.
+  - Goods going out cost, by the company's method, **FIFO** (the oldest layers first) or the
+    **average**. Layers are used up oldest-first either way, so the method can be changed any
+    time and applies from then on. Stock sold below zero is costed at the average.
+  - **Stock value**: quantity, unit cost and value per product (FIFO: what the remaining layers
+    cost; average: quantity × average), for all warehouses or one. **Cost of goods sold** for a
+    period: sold (orders, net of returns), written off and count differences.
+  - Deals' product rows (and so gross profit) cost what the stock costs for products whose
+    stock is counted: the next unit out (FIFO) or the average.
+  - **Posting to the books** (optional, once accounting is set up): each movement becomes a
+    journal entry ("Stock" in the journal) — goods sold: cost of goods sold against
+    inventory; receipts: inventory against a goods-received account (match the supplier's
+    bill against it); write-offs, counts and the product form: a stock-adjustment account.
+    Transfers aren't posted. A movement that can't be posted (a locked period) still moves
+    the stock, and is logged.
 
 ## Public API (connecting other systems)
 

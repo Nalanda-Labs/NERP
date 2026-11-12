@@ -12,6 +12,7 @@
 //! - transfer: goods move from one warehouse to another;
 //! - count: a stock count; each listed product is set to the quantity found.
 
+pub mod costing;
 mod documents;
 
 use axum::{
@@ -38,6 +39,9 @@ pub fn router() -> Router<AppState> {
         .route("/inventory/warehouses", get(list_warehouses).post(create_warehouse))
         .route("/inventory/warehouses/{id}", patch(update_warehouse).delete(delete_warehouse))
         .route("/inventory/stock", get(stock))
+        .route("/inventory/settings", get(costing::get_settings).put(costing::put_settings))
+        .route("/inventory/valuation", get(costing::valuation))
+        .route("/inventory/cogs", get(costing::cogs))
         .route("/inventory/products/{id}", get(product_stock))
         .merge(documents::router())
 }
@@ -65,6 +69,20 @@ pub struct Reason<'a> {
 /// Changes how many units of a product a warehouse holds, inside the caller's transaction.
 /// Refuses to go below zero unless `allow_negative`. Returns the movement's id.
 pub async fn adjust(tx: &mut Transaction<'_, Postgres>, product: Uuid, warehouse: Uuid, delta: Decimal, allow_negative: bool, why: Reason<'_>) -> AppResult<Uuid> {
+    Ok(adjust_costed(tx, product, warehouse, delta, allow_negative, why, None).await?.0)
+}
+
+/// The same, with the unit cost (base currency) of goods coming in when it is known (a
+/// receipt's price, a transfer's or return's cost out). Returns the movement and its cost.
+pub async fn adjust_costed(
+    tx: &mut Transaction<'_, Postgres>,
+    product: Uuid,
+    warehouse: Uuid,
+    delta: Decimal,
+    allow_negative: bool,
+    why: Reason<'_>,
+    unit_in: Option<Decimal>,
+) -> AppResult<(Uuid, Decimal)> {
     sqlx::query("INSERT INTO inv_stock (product_id, warehouse_id, quantity) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING")
         .bind(product)
         .bind(warehouse)
@@ -112,7 +130,9 @@ pub async fn adjust(tx: &mut Transaction<'_, Postgres>, product: Uuid, warehouse
         .bind(product)
         .execute(&mut **tx)
         .await?;
-    Ok(id)
+    let cost = costing::cost_movement(tx, id, product, warehouse, have, delta, unit_in).await?;
+    costing::book(tx, id, why.kind, why.document, cost, why.user).await?;
+    Ok((id, cost))
 }
 
 pub async fn default_warehouse<'e, E: sqlx::PgExecutor<'e>>(db: E) -> AppResult<Uuid> {
@@ -334,6 +354,10 @@ struct Movement {
     item_number: Option<i64>,
     item_code: Option<String>,
     user_name: Option<String>,
+    /// Per unit and in all (signed like the quantity), in the base currency.
+    unit_cost: Option<Decimal>,
+    cost: Option<Decimal>,
+    entry_id: Option<Uuid>,
     created_at: DateTime<Utc>,
 }
 
@@ -353,7 +377,7 @@ async fn product_stock(State(state): State<AppState>, _auth: AuthUser, Path(id):
     let movements: Vec<Movement> = sqlx::query_as(
         "SELECT m.id, w.name AS warehouse, m.delta, m.balance, m.reason, m.document_id, d.number AS document_number,
                 m.item_id, i.number AS item_number, t.code AS item_code,
-                trim(u.first_name || ' ' || u.last_name) AS user_name, m.created_at
+                trim(u.first_name || ' ' || u.last_name) AS user_name, round(m.unit_cost, 4) AS unit_cost, m.cost, m.entry_id, m.created_at
          FROM inv_movements m JOIN inv_warehouses w ON w.id = m.warehouse_id
          LEFT JOIN inv_documents d ON d.id = m.document_id
          LEFT JOIN crm_items i ON i.id = m.item_id LEFT JOIN crm_entity_types t ON t.id = i.entity_type
