@@ -304,6 +304,9 @@ turns red: the database server keeps the changes for it (up to `max_slot_wal_kee
 start it again soon. To give up point-in-time restores, stop the service and drop its slot
 (`SELECT pg_drop_replication_slot('nerp_wal');`), or the server keeps WAL for nobody.
 
+System → Health then shows the backup, its restore test and the change log in green; it
+emails those who manage the system when any of them (or anything else it checks) goes wrong.
+
 Copy `/var/backups/nerp` off the machine every night, encrypted, and practise a restore: both
 in [BACKUP.md](BACKUP.md), which also has the restore commands.
 

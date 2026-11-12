@@ -1764,6 +1764,25 @@ documents and warehouses need the "Manage inventory" permission.
     Transfers aren't posted. A movement that can't be posted (a locked period) still moves
     the stock, and is logged.
 
+## Health and self-test
+
+System → **Health** (system managers) says whether the installation is in good shape, every
+15 minutes (job `health.check`) and on demand:
+
+- **Database** (answer time, size, connections in use), **Redis** (answers, keeps data on
+  disk), **backups** (age of the newest; amber after 26 hours, red after 48), **restore test**
+  (`nerp-verify-backup.sh` notes its result in the backup's `manifest.txt`), **point-in-time
+  restore** (the change log is being received), **file encryption**, **disk space** where
+  files and backups live, the **HTTPS certificate** PUBLIC_URL serves (trusted, for the
+  name; amber under 21 days, red under 7), **background jobs** failed in 24 hours or
+  waiting too long, **outgoing email** failures, the **audit trail**'s last verification and,
+  with COLLABORA_URL, **office editing**.
+- **Self-test:** writes and reads back a value in the database and Redis and a file in
+  storage (encrypted when there is a key), and connects to the mail server.
+- **Alerts:** when a check turns amber or red, and once when everything is green again,
+  system managers get an email and a notification; further addresses (an outside mailbox
+  helps when NERP's own mail is the problem) can be added. Alerts can be turned off.
+
 ## Audit trail and company export
 
 - **Tamper-evident audit trail.** Every audit record is chained to the one before it by a

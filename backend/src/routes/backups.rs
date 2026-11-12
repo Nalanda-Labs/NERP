@@ -67,7 +67,7 @@ fn restore_allowed() -> bool {
     std::env::var("BACKUP_RESTORE").is_ok_and(|v| v == "true")
 }
 
-fn dir() -> PathBuf {
+pub(crate) fn dir() -> PathBuf {
     PathBuf::from(std::env::var("BACKUP_DIR").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/var/backups/nerp".into()))
 }
 
@@ -76,11 +76,11 @@ fn scripts() -> PathBuf {
 }
 
 /// Backup folders are named by their UTC time: 2026-11-10T020000Z.
-fn valid_name(n: &str) -> bool {
+pub(crate) fn valid_name(n: &str) -> bool {
     n.len() == 18 && n.starts_with("20") && n.ends_with('Z') && n.chars().all(|c| c.is_ascii_digit() || c == '-' || c == 'T' || c == 'Z')
 }
 
-fn manifest(path: &std::path::Path) -> Map<String, Value> {
+pub(crate) fn manifest(path: &std::path::Path) -> Map<String, Value> {
     std::fs::read_to_string(path.join("manifest.txt"))
         .unwrap_or_default()
         .lines()
@@ -150,7 +150,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
 }
 
 /// A backup folder's name as a time: 2026-11-10T020000Z → 2026-11-10T02:00:00Z.
-fn backup_time(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn backup_time(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::NaiveDateTime::parse_from_str(name, "%Y-%m-%dT%H%M%SZ").ok().map(|t| t.and_utc())
 }
 
