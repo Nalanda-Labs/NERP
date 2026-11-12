@@ -7,6 +7,7 @@ mod privacy;
 mod retention;
 mod commissions;
 mod portal;
+mod field;
 mod auth;
 mod bi;
 mod blob;

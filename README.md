@@ -463,6 +463,26 @@ portal off signs them out at once. Signed in, the client sees:
 
 Files download only when they belong to what the client sees. Sign-ins are audited.
 
+### Field visits
+
+CRM → **Field visits** plans a person's day of visits (server side; the mobile app will use
+the same endpoints).
+
+- A visit is an activity of kind *visit* on a client or deal, at the record's address (or its
+  company's, or its contact's), for a duration, at a fixed time or any time that day.
+- **Plan the day** keeps fixed visits where they are and puts the others in the shortest
+  route from the start point (nearest neighbour, then 2-opt), timed around the fixed ones at
+  the configured speed; each leg's distance and drive time and the day's totals are shown,
+  with a sketch of the route.
+- **Check in** records when and where (the browser's or phone's location) and how far from
+  the address — over 500 m is flagged; **check out** with notes completes the visit and logs
+  it on the record with the time on site.
+- Coordinates: given with the visit, or looked up from the address by the geocoder in
+  `GEOCODER_URL` (any Nominatim-compatible search API, e.g. a self-hosted Nominatim; results
+  are cached). Without one, visits without coordinates follow, grouped by postcode and city.
+- Start point, speed and the day's start: `/field/settings` (CRM administrators). People see
+  their own day; heads their team's; CRM administrators anyone's.
+
 ### Automation (robots and triggers)
 
 CRM settings → Automation shows each pipeline as columns of stages.

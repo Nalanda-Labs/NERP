@@ -2,6 +2,7 @@
 	// Outline icons drawn on a 24x24 grid with a 1.75 stroke.
 	const paths = {
 		home: 'M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z',
+		map: 'M12 21s-7-5.5-7-11a7 7 0 0 1 14 0c0 5.5-7 11-7 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
 		users:
 			'M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.87M16 4.13a3 3 0 0 1 0 5.74',
 		structure: 'M12 3v5M5 13v-2h14v2M12 8h0M3 13h4v5H3zM10 13h4v5h-4zM17 13h4v5h-4zM9 3h6v5H9z',
