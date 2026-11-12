@@ -130,6 +130,7 @@ struct Input {
 fn validate(b: &Input) -> AppResult<()> {
     if let Some(k) = &b.kind
         && !["todo", "call", "meeting", "email"].contains(&k.as_str()) {
+            // Visits are made through /field/visits (they need an address and a day).
             return Err(AppError::bad("kind must be todo, call, meeting or email"));
         }
     if let Some(d) = &b.direction
