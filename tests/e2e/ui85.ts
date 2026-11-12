@@ -6,6 +6,7 @@ import { cleanupRun } from './cleanup.ts';
 import { OUTPUT } from './output.ts';
 import { dbUrl } from '../db/cleanup.ts';
 import pg from 'pg';
+import { execFileSync } from 'node:child_process';
 const B = 'http://localhost:8080';
 const s = Date.now().toString(36);
 const exe = process.env.HOME + '/.cache/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-linux64/chrome-headless-shell';
@@ -20,6 +21,12 @@ const admin = new Client();
 await admin.post('/auth/login', { email: 'admin@acme.test', password: 'supersecret1' });
 const db = new pg.Client({ connectionString: dbUrl });
 await db.connect();
+// The public form's per-address limits count every local run: start from a clean slate.
+try {
+  const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+  const keys = execFileSync('redis-cli', ['-u', url, '--scan', '--pattern', 'privacy:*']).toString().split('\n').filter(Boolean);
+  if (keys.length) execFileSync('redis-cli', ['-u', url, 'DEL', ...keys]);
+} catch { /* no redis-cli: the limits pass within the hour */ }
 const email = `ezra.${s}@example.com`, pub = `pia.${s}@example.com`;
 const ezra = (await admin.post('/crm/contact/items', { first_name: 'Ezra', last_name: `U${s}`, multifields: [{ kind: 'email', value_type: 'work', value: email }] })).data;
 

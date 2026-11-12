@@ -467,23 +467,8 @@ async fn erase(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clie
     let mut files: Vec<(Uuid, String)> = vec![];
     match chosen["crm"] {
         Action::Anonymise => {
-            files = sqlx::query_as(
-                "SELECT f.id, f.storage_path FROM files f WHERE f.id IN (SELECT unnest(file_ids) FROM crm_timeline WHERE item_id = ANY($1) AND file_ids IS NOT NULL)",
-            )
-            .bind(&items)
-            .fetch_all(&mut *tx)
-            .await?;
-            run!("DELETE FROM crm_multifields WHERE item_id = ANY($3) AND $1 IS NOT NULL AND $2 IS NOT NULL");
-            run!("DELETE FROM crm_timeline WHERE item_id = ANY($3) AND kind = 'comment' AND $1 IS NOT NULL AND $2 IS NOT NULL");
-            run!("UPDATE crm_activities SET subject = 'Erased', description = NULL, result = NULL WHERE item_id = ANY($3) AND $1 IS NOT NULL AND $2 IS NOT NULL");
-            run!("DELETE FROM crm_requisites WHERE item_id = ANY($3) AND $1 IS NOT NULL AND $2 IS NOT NULL");
-            let n = run!(
-                "UPDATE crm_items SET honorific = NULL, first_name = CASE WHEN entity_type = 3 OR first_name IS NOT NULL THEN 'Erased' END, middle_name = NULL, last_name = NULL,
-                        company_name = CASE WHEN company_name IS NOT NULL THEN 'Erased' END, title = CASE WHEN entity_type IN (1, 3, 4) THEN 'Erased' ELSE title END,
-                        job_title = NULL, birthdate = NULL, address = NULL, comments = NULL, uf = '{}'::jsonb, source_details = NULL, utm = NULL, search_text = '',
-                        deleted_at = COALESCE(deleted_at, now()), updated_at = now()
-                 WHERE id = ANY($3) AND $1 IS NOT NULL AND $2 IS NOT NULL"
-            );
+            let (n, f) = anonymise_crm(&mut tx, &items).await?;
+            files = f;
             done("crm", Action::Anonymise, n);
         }
         a => done("crm", a, 0),
@@ -554,15 +539,48 @@ async fn erase(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clie
         .bind(&b.note)
         .execute(&mut *tx)
         .await?;
-    // Removed files stop pointing anywhere; their content goes after the commit.
-    let ids: Vec<Uuid> = files.iter().map(|f| f.0).collect();
-    sqlx::query("DELETE FROM files WHERE id = ANY($1)").bind(&ids).execute(&mut *tx).await?;
     tx.commit().await?;
+    // The removed files' content goes once the change is committed.
     for (_, rel) in files {
         crate::blob::discard(&state, &rel).await;
     }
     audit::record(&state.db, Some(auth.id), "privacy.erase", "privacy_request", Some(id.to_string()), json!({ "outcome": outcome }), ip.as_deref()).await;
     Ok(Json(load(&state, id).await?))
+}
+
+/// Anonymises CRM records: names, contact details, address, notes and their files, custom
+/// fields, requisites; activities keep only that they happened. The records leave the lists
+/// (deals and invoices keep pointing at them). Returns how many and the files to discard
+/// once committed (their rows are already gone).
+pub async fn anonymise_crm(tx: &mut sqlx::PgConnection, items: &[Uuid]) -> sqlx::Result<(u64, Vec<(Uuid, String)>)> {
+    let files: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT f.id, f.storage_path FROM files f WHERE f.id IN (SELECT unnest(file_ids) FROM crm_timeline WHERE item_id = ANY($1) AND kind = 'comment' AND file_ids IS NOT NULL)",
+    )
+    .bind(items)
+    .fetch_all(&mut *tx)
+    .await?;
+    for q in [
+        "DELETE FROM crm_multifields WHERE item_id = ANY($1)",
+        "DELETE FROM crm_timeline WHERE item_id = ANY($1) AND kind = 'comment'",
+        "UPDATE crm_activities SET subject = 'Erased', description = NULL, result = NULL WHERE item_id = ANY($1)",
+        "DELETE FROM crm_requisites WHERE item_id = ANY($1)",
+    ] {
+        sqlx::query(q).bind(items).execute(&mut *tx).await?;
+    }
+    let n = sqlx::query(
+        "UPDATE crm_items SET honorific = NULL, first_name = CASE WHEN entity_type = 3 OR first_name IS NOT NULL THEN 'Erased' END, middle_name = NULL, last_name = NULL,
+                company_name = CASE WHEN company_name IS NOT NULL THEN 'Erased' END, title = CASE WHEN entity_type IN (1, 3, 4) THEN 'Erased' ELSE title END,
+                job_title = NULL, birthdate = NULL, address = NULL, comments = NULL, uf = '{}'::jsonb, source_details = NULL, utm = NULL, search_text = '',
+                deleted_at = COALESCE(deleted_at, now()), updated_at = now()
+         WHERE id = ANY($1)",
+    )
+    .bind(items)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let ids: Vec<Uuid> = files.iter().map(|f| f.0).collect();
+    sqlx::query("DELETE FROM files WHERE id = ANY($1)").bind(&ids).execute(&mut *tx).await?;
+    Ok((n, files))
 }
 
 // ---- the public form ----

@@ -4,6 +4,7 @@ mod audit_chain;
 mod export;
 mod health;
 mod privacy;
+mod retention;
 mod auth;
 mod bi;
 mod blob;

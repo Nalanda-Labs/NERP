@@ -42,7 +42,7 @@
 	<div class="flex flex-wrap items-center gap-3">
 		<div>
 			<h1 class="text-2xl font-semibold text-slate-900">Personal data requests</h1>
-			<p class="text-sm text-slate-500">People asking what we hold on them, or to delete it — answered within 30 days. They can ask themselves at <a class="text-brand-700 hover:underline" href="/privacy-request" target="_blank">/privacy-request</a>.</p>
+			<p class="text-sm text-slate-500">People asking what we hold on them, or to delete it — answered within 30 days. They can ask themselves at <a class="text-brand-700 hover:underline" href="/privacy-request" target="_blank">/privacy-request</a>. <a class="text-brand-700 hover:underline" href="/privacy/retention">Retention rules →</a></p>
 		</div>
 		<button class="btn btn-primary ml-auto" onclick={() => (adding = !adding)} data-new-request>New request</button>
 	</div>
