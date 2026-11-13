@@ -255,7 +255,7 @@ pub(crate) async fn start(state: &AppState, by: Uuid, item: Uuid, template: Uuid
             .await?
             .ok_or_else(|| AppError::bad("the record has no ready document to sign; make one first"))?,
     };
-    let id = super::esign::send_document(state, by, doc, list, message, Some(template)).await?;
+    let id = super::esign::send_document(state, by, doc, list.into_iter().map(|(n, e)| (n, e, None)).collect(), message, Some(template)).await?;
     Ok(json!({ "status": "sent", "request_id": id, "document_id": doc }))
 }
 

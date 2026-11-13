@@ -18,6 +18,7 @@
 	import RecurringCard from '#lib/components/crm/RecurringCard.svelte';
 	import InvoiceBooksCard from '#lib/components/accounting/InvoiceBooksCard.svelte';
 	import EmailComposer, { type ReplyTarget } from '#lib/components/crm/EmailComposer.svelte';
+	import SmsComposer from '#lib/components/crm/SmsComposer.svelte';
 	import EmailView from '#lib/components/crm/EmailView.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 	import BookingLink from '#lib/components/crm/BookingLink.svelte';
@@ -217,7 +218,7 @@
 	}
 
 	// ----- composer -----
-	let mode = $state<'comment' | 'todo' | 'call' | 'meeting' | 'email'>('comment');
+	let mode = $state<'comment' | 'todo' | 'call' | 'meeting' | 'email' | 'sms'>('comment');
 	let replyTo = $state<ReplyTarget | null>(null);
 	let openEmails = $state<Record<string, boolean>>({});
 	let composerKey = $state(0);
@@ -400,6 +401,7 @@
 			case 'email':
 				return e.data.direction === 'in' ? 'wrote an email' : 'sent an email';
 			case 'activity':
+				if (e.data.kind === 'sms') return `${(e.body ?? '').includes('received') ? 'texted' : 'sent a text message'}: ${e.data.result ?? ''}`;
 				return `${e.data.event === 'completed' ? 'completed' : 'planned'} a ${e.data.kind}: ${e.body}${e.data.result ? ` — ${e.data.result}` : ''}`;
 			default:
 				return e.kind;
@@ -635,11 +637,15 @@
 		<div class="space-y-5">
 			<section class="card p-4">
 				<div class="mb-3 flex gap-1">
-					{#each [['comment', 'Comment', 'message'], ['email', 'Email', 'mail'], ['todo', 'To-do', 'checkSquare'], ['call', 'Call', 'phone'], ['meeting', 'Meeting', 'calendar']] as [k, label, icon] (k)}
+					{#each [['comment', 'Comment', 'message'], ['email', 'Email', 'mail'], ['sms', 'Text', 'smartphone'], ['todo', 'To-do', 'checkSquare'], ['call', 'Call', 'phone'], ['meeting', 'Meeting', 'calendar']] as [k, label, icon] (k)}
 						<button class="btn px-3 py-1.5 {mode === k ? 'bg-brand-100 text-brand-900' : 'btn-ghost'}" onclick={() => ((mode = k as typeof mode), k === 'email' && (replyTo = null), composerKey++)}><Icon name={icon as 'message'} class="size-4" /> {label}</button>
 					{/each}
 				</div>
-				{#if mode === 'email'}
+				{#if mode === 'sms'}
+					{#key composerKey}
+						<SmsComposer itemId={item.id} onsent={() => load()} oncancel={() => (mode = 'comment')} />
+					{/key}
+				{:else if mode === 'email'}
 					{#key composerKey}
 						<EmailComposer itemId={item.id} entityType={type.id} reply={replyTo} onsent={() => ((replyTo = null), (mode = 'comment'), load())} oncancel={() => ((replyTo = null), (mode = 'comment'))} />
 					{/key}

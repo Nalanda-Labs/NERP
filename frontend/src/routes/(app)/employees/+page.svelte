@@ -57,9 +57,15 @@
 		password: '',
 		position: '',
 		phone: '',
+		invite_by_text: false,
 		department_ids: [] as string[]
 	});
 	let form = $state(blank());
+	// Invitations can go by text message too when SMS is set up.
+	let canText = $state(false);
+	$effect(() => {
+		if (addOpen) api.get<{ enabled: boolean }>('/sms/available').then((r) => (canText = r.enabled)).catch(() => {});
+	});
 	let mode = $state<'invite' | 'password'>('invite');
 
 	function generatePassword() {
@@ -73,7 +79,7 @@
 		saving = true;
 		try {
 			const body =
-				mode === 'invite' ? { ...form, password: undefined, send_invite: true } : { ...form, send_invite: false };
+				mode === 'invite' ? { ...form, password: undefined, send_invite: true, invite_by_text: form.invite_by_text && !!form.phone.trim() } : { ...form, send_invite: false, invite_by_text: false };
 			const user = await api.post<User>('/users', body);
 			toasts.success(mode === 'invite' ? `Invitation sent to ${user.email}` : `${user.full_name} was added`);
 			addOpen = false;
@@ -232,9 +238,12 @@
 			</div>
 			<div>
 				<label class="label" for="ph">Phone</label>
-				<input id="ph" class="input" bind:value={form.phone} />
+				<input id="ph" class="input" type="tel" bind:value={form.phone} />
 			</div>
 		</div>
+		{#if mode === 'invite' && canText}
+			<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={form.invite_by_text} disabled={!form.phone.trim()} data-invite-by-text /> Also text the invitation to this phone</label>
+		{/if}
 		<div>
 			<label class="label" for="dept">Departments</label>
 			<select id="dept" class="input" multiple size={Math.min(6, Math.max(3, departments.length))} bind:value={form.department_ids}>

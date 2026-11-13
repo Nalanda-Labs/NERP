@@ -1032,6 +1032,9 @@ All settings are environment variables (see `backend/.env.example`):
 | `DOC_RENDER_TIMEOUT_SECS` / `DOC_RENDER_CONCURRENCY` | `60` / `2` | limits for LuaLaTeX and LibreOffice runs |
 | `CRM_WEBHOOK_ALLOW_PRIVATE` | `false` | let automation webhooks call private-network addresses (loopback, LAN) |
 | `COLLABORA_URL` | unset | Collabora Online for editing office files in the browser, e.g. `http://127.0.0.1:9980`. Run the official `collabora/code` image (see `tests/e2e/tools/collabora-up.sh`) with NERP's address in its `aliasgroup1`; without it files still get previews through LibreOffice |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | unset | Twilio account for text messages (System → Text messages). Kept only in the environment, never in the database |
+| `TWILIO_FROM` | unset | Default sender: a Twilio number (+…) or a Messaging Service SID (MG…); System → Text messages can set another |
+| `TWILIO_API_URL` | `https://api.twilio.com` | Tests only: the test suites' stand-in |
 | `MAIL_ALLOW_PRIVATE` | `false` | let mailboxes use mail servers on private networks (loopback, LAN), e.g. a company mail server |
 | `DATA_ENCRYPTION_KEY` | derived from `JWT_SECRET` | key for secrets stored in the database (mailbox passwords); 32+ characters |
 | `FILE_ENCRYPTION_KEY` | unset | encrypts uploaded files at rest (AES-256-GCM); 32+ characters. Existing files are encrypted in the background; keep the key with `.env`'s backup — without it the files can't be read. The server refuses to start when files are under a key it wasn't given |
@@ -1068,6 +1071,35 @@ All settings are environment variables (see `backend/.env.example`):
   the others wait.
 - Primary keys are UUIDs. Human-readable numbers (tasks, documents, invoices) come from counter
   rows updated in the creating transaction, so they have no gaps.
+
+## Text messages (SMS)
+
+Text messages go through [Twilio](https://www.twilio.com). Put the account in the server's
+settings (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`; they are never stored in the database),
+then in System → **Text messages** choose the sender (a Twilio number or a Messaging Service)
+and the calling code added to numbers written without one (`+91`: "098765 43210" becomes
++919876543210). In Twilio, point the number's "A message comes in" webhook at the address the
+page shows (`/api/public/twilio/sms/inbound`); delivery reports come back by themselves. NERP
+must be reachable from the internet at `PUBLIC_URL` for both. Both webhooks check Twilio's
+signature and account.
+
+- **From a CRM record:** the *Text* tab shows the conversation and sends to the client's phone
+  (the record's own, else its primary contact's, else its company's). Each message is a
+  completed *text message* activity; failed deliveries and replies notify the responsible
+  person. Replies land on the record with that number (contacts first, then companies, then
+  the newest lead or deal).
+- **Robot "Text the client"** with placeholders, like "Email the client".
+- **Bookings:** Booking → Settings → "Also text …" sends the confirmation, reminders,
+  follow-up and no-show message to the client's phone too.
+- **Signing:** a signer's mobile gets the signing link by text as well as by email (and again
+  with reminders).
+- **Campaigns:** a campaign goes out by email or by text message. Each record's first phone gets
+  it once, with "reply STOP to opt out"; STOP (and similar words) opts the number out of
+  marketing texts, START opts it back in.
+- **Invitations** can be texted to the new employee's phone as well as emailed.
+
+System → Text messages lists every message with its delivery status. Personal data requests
+include text messages; the sandbox removes them.
 
 ## Marketing
 

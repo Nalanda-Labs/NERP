@@ -28,9 +28,12 @@
 	let saving = $state(false);
 	let dirty = $state(false);
 
+	// Whether text messages are set up (offers SMS campaigns).
+	let canText = $state(false);
 	async function load() {
 		try {
 			c = await api.get<Campaign>(`/marketing/campaigns/${id}`);
+			canText = (await api.get<{ enabled: boolean }>('/sms/available').catch(() => ({ enabled: false }))).enabled;
 			dirty = false;
 			if (c.status === 'draft') segments = (await api.get<{ items: Segment[] }>('/marketing/segments')).items;
 			else {
@@ -54,7 +57,7 @@
 		if (!c) return;
 		saving = true;
 		try {
-			c = await api.patch<Campaign>(`/marketing/campaigns/${id}`, { name: c.name, segment_ids: c.segment_ids, subject: c.subject, body: c.body, design: c.design ? $state.snapshot(c.design) : null, from_name: c.from_name || null, reply_to: c.reply_to || null });
+			c = await api.patch<Campaign>(`/marketing/campaigns/${id}`, { name: c.name, channel: c.channel, segment_ids: c.segment_ids, subject: c.subject, body: c.body, design: c.design ? $state.snapshot(c.design) : null, from_name: c.from_name || null, reply_to: c.reply_to || null });
 			dirty = false;
 			toasts.success('Saved');
 		} catch (e) {
@@ -123,9 +126,15 @@
 		dirty = true;
 	}
 	let testTo = $state(session.user?.email ?? '');
+	let testPhone = $state('');
 	async function testSend() {
 		if (dirty) await save();
 		try {
+			if (c?.channel === 'sms') {
+				await api.post(`/marketing/campaigns/${id}/test`, { phone: testPhone });
+				toasts.success(`Test texted to ${testPhone}`);
+				return;
+			}
 			await api.post(`/marketing/campaigns/${id}/test`, { email: testTo });
 			toasts.success(`Test sent to ${testTo}`);
 		} catch (e) {
@@ -207,6 +216,23 @@
 		{#if c.status === 'draft'}
 			<div class="grid gap-5 {c.design ? 'xl:grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_20rem]'}">
 				<section class="card space-y-4 p-5 text-sm">
+					{#if canText || c.channel === 'sms'}
+						<div class="flex rounded-full bg-slate-100 p-0.5 text-xs w-fit" role="tablist" aria-label="Sent by">
+							{#each [['email', 'Email'], ['sms', 'Text message']] as const as [ch, l] (ch)}
+								<button type="button" role="tab" aria-selected={c.channel === ch} class="rounded-full px-3 py-1 {c.channel === ch ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-600'}" onclick={() => ((c!.channel = ch), (dirty = true))} data-channel={ch}>{l}</button>
+							{/each}
+						</div>
+					{/if}
+					{#if c.channel === 'sms'}
+						<div>
+							<label class="label" for="cp-sms">Text message</label>
+							<textarea id="cp-sms" class="input" rows="5" maxlength="1560" bind:this={bodyEl} bind:value={c.body} oninput={() => (dirty = true)} placeholder={'{{first_name}}, our sale starts tomorrow: https://yourcompany.com/sale'} data-sms-campaign-body></textarea>
+							<div class="mt-1 flex flex-wrap gap-1">
+								{#each PLACEHOLDERS as ph (ph)}<button type="button" class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600 hover:bg-brand-50 hover:text-brand-700" onclick={() => insert(ph)}>{`{{${ph}}}`}</button>{/each}
+							</div>
+							<p class="mt-1 text-xs text-slate-500">{c.body.length} characters. Each record's first phone number gets it; "Your company: reply STOP to opt out" is added, and people who reply STOP get no more marketing texts.</p>
+						</div>
+					{:else}
 					<div class="grid gap-3 sm:grid-cols-2">
 						<div><label class="label" for="cp-from">Sender name</label><input id="cp-from" class="input" maxlength="100" bind:value={c.from_name} oninput={() => (dirty = true)} placeholder="e.g. Acme team" /></div>
 						<div><label class="label" for="cp-reply">Replies go to</label><input id="cp-reply" class="input" type="email" bind:value={c.reply_to} oninput={() => (dirty = true)} placeholder="sales@yourcompany.com" /></div>
@@ -239,6 +265,7 @@
 						<p class="mt-1 text-xs text-slate-500">Links are tracked and get UTM tags (<code>utm_campaign={c.slug}</code>), so leads and deals they bring in are counted. An unsubscribe link is added at the end.</p>
 					</div>
 					{/if}
+					{/if}
 					<div class="flex gap-2"><button class="btn btn-primary" disabled={saving || !dirty} onclick={save}>{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}</button></div>
 				</section>
 				<aside class="space-y-4">
@@ -252,11 +279,19 @@
 						{:else}
 							<p class="text-slate-500">No segments yet. <a class="text-brand-700 hover:underline" href="/marketing/segments">Make one</a>.</p>
 						{/each}
+						{#if c.channel === 'sms'}
+							<p class="border-t border-slate-100 pt-2 text-xs text-slate-500">Everyone in these segments with a phone number; each number gets one text, and numbers that replied STOP are left out.</p>
+						{:else}
 						<p class="border-t border-slate-100 pt-2 text-xs text-slate-500">About <strong class="text-slate-800" data-reach>{reach}</strong> people (each address gets one email; unsubscribed ones are left out).</p>
+						{/if}
 					</section>
 					<section class="card space-y-2 p-5 text-sm" aria-labelledby="test-h">
 						<h2 id="test-h" class="font-medium text-slate-900">Send a test</h2>
-						<div class="flex gap-2"><input class="input" type="email" bind:value={testTo} aria-label="Test address" /><button class="btn btn-secondary" disabled={!testTo} onclick={testSend}>Send</button></div>
+						{#if c.channel === 'sms'}
+							<div class="flex gap-2"><input class="input" type="tel" placeholder="+44 20 7946 0000" bind:value={testPhone} aria-label="Test phone" /><button class="btn btn-secondary" disabled={!testPhone} onclick={testSend}>Send</button></div>
+						{:else}
+							<div class="flex gap-2"><input class="input" type="email" bind:value={testTo} aria-label="Test address" /><button class="btn btn-secondary" disabled={!testTo} onclick={testSend}>Send</button></div>
+						{/if}
 						<p class="text-xs text-slate-500">Filled in from the first person in the audience.</p>
 					</section>
 					<section class="card space-y-3 p-5 text-sm" aria-labelledby="send-h">
@@ -264,7 +299,7 @@
 						<label class="flex items-center gap-2"><input type="radio" class="text-brand-600" value="now" bind:group={when} /> Now</label>
 						<label class="flex items-center gap-2"><input type="radio" class="text-brand-600" value="later" bind:group={when} /> Later</label>
 						{#if when === 'later'}<input class="input" type="datetime-local" bind:value={sendAt} aria-label="Send at" />{/if}
-						<button class="btn btn-primary w-full" disabled={!c.segment_ids.length || !c.subject.trim() || !c.body.trim() || (when === 'later' && !sendAt)} onclick={send}><Icon name="send" class="size-4" /> {when === 'later' ? 'Schedule' : 'Send now'}</button>
+						<button class="btn btn-primary w-full" disabled={!c.segment_ids.length || (c.channel !== 'sms' && !c.subject.trim()) || !c.body.trim() || (when === 'later' && !sendAt)} onclick={send}><Icon name="send" class="size-4" /> {when === 'later' ? 'Schedule' : 'Send now'}</button>
 					</section>
 				</aside>
 			</div>

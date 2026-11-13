@@ -587,8 +587,22 @@ async fn reset_password(
 // Invitations
 // ---------------------------------------------------------------------------
 
-/// Creates (or replaces) the invitation link for a pending user and emails it.
+/// Creates (or replaces) the invitation link for a pending user and emails it, and texts it
+/// to their mobile (or phone) too when `by_text`.
 pub async fn send_invitation(state: &AppState, user_id: Uuid, inviter: Uuid) -> AppResult<()> {
+    send_invitation_by(state, user_id, inviter, false).await
+}
+
+pub async fn send_invitation_by(state: &AppState, user_id: Uuid, inviter: Uuid, by_text: bool) -> AppResult<()> {
+    let number: Option<String> = if by_text {
+        if !crate::sms::enabled(state).await {
+            return Err(AppError::bad("text messages are not set up (System → Text messages)"));
+        }
+        let n: Option<String> = sqlx::query_scalar!("SELECT COALESCE(NULLIF(trim(mobile), ''), NULLIF(trim(phone), '')) FROM users WHERE id = $1", user_id).fetch_one(&state.db).await?;
+        Some(n.ok_or_else(|| AppError::bad("add the employee's mobile number to send the invitation by text"))?)
+    } else {
+        None
+    };
     let (email, first_name): (String, String) =
         sqlx::query!(r#"SELECT email, first_name FROM users WHERE id = $1 AND invite_pending"#, user_id).map(|r| (r.email, r.first_name))
             .fetch_optional(&state.db)
@@ -609,6 +623,10 @@ pub async fn send_invitation(state: &AppState, user_id: Uuid, inviter: Uuid) -> 
     let link = format!("{}/accept-invite?token={token}", state.config.public_url);
     let company = company_name(state).await;
     jobs::send_email(state, mail::invitation(&email, &first_name, &company, &inviter_name, &link)).await?;
+    if let Some(n) = number {
+        let body = format!("{first_name}, {inviter_name} invites you to {company}'s NERP: {link}");
+        crate::sms::queue(state, crate::sms::NewSms { to: &n, body: &body, purpose: "invite", user_id: Some(inviter), ..Default::default() }).await?;
+    }
     Ok(())
 }
 

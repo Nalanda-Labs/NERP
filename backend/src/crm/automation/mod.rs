@@ -1035,8 +1035,8 @@ fn check_trigger_params(event: &str, p: Value) -> AppResult<Value> {
     match event {
         "activity_done" => {
             if let Some(k) = p.get("kind").and_then(Value::as_str).filter(|k| !k.is_empty()) {
-                if !["todo", "call", "meeting", "email"].contains(&k) {
-                    return Err(AppError::bad("kind must be todo, call, meeting or email"));
+                if !["todo", "call", "meeting", "email", "sms"].contains(&k) {
+                    return Err(AppError::bad("kind must be todo, call, meeting, email or sms"));
                 }
                 out.insert("kind".into(), json!(k));
             }

@@ -145,7 +145,14 @@ pub(crate) async fn render(state: &AppState, c: &Campaign, item: Option<Uuid>, t
 // ---------------------------------------------------------------------------
 
 fn ready(c: &Campaign) -> AppResult<()> {
-    if c.subject.trim().is_empty() || c.body.trim().is_empty() {
+    if c.channel == "sms" {
+        if c.body.trim().is_empty() {
+            return Err(AppError::bad("write the message first"));
+        }
+        if c.body.chars().count() > crate::sms::MAX_LEN - 40 {
+            return Err(AppError::bad(format!("a text message can be at most {} characters (with the opt-out line)", crate::sms::MAX_LEN - 40)));
+        }
+    } else if c.subject.trim().is_empty() || c.body.trim().is_empty() {
         return Err(AppError::bad("write a subject and a message first"));
     }
     if c.segment_ids.is_empty() {
@@ -154,8 +161,18 @@ fn ready(c: &Campaign) -> AppResult<()> {
     Ok(())
 }
 
+fn ready_text(c: &Campaign) -> AppResult<()> {
+    if c.body.trim().is_empty() {
+        return Err(AppError::bad("write the message first"));
+    }
+    Ok(())
+}
+
 /// Turns the segments into recipients and queues sending. Returns how many.
 async fn start(state: &AppState, c: &Campaign) -> AppResult<i64> {
+    if c.channel == "sms" {
+        return start_sms(state, c).await;
+    }
     let optouts: HashSet<String> = sqlx::query_scalar!("SELECT email FROM mkt_optouts").fetch_all(&state.db).await?.into_iter().collect();
     let segments: Vec<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query!(r#"SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1)"#, &c.segment_ids).map(|r| (r.entity_type, r.filter, r.item_ids)).fetch_all(&state.db).await?;
     let mut seen: HashSet<String> = HashSet::new();
@@ -185,6 +202,60 @@ async fn start(state: &AppState, c: &Campaign) -> AppResult<i64> {
     tx.commit().await?;
     state.job_wakeup.notify_one();
     Ok(items.len() as i64)
+}
+
+/// An SMS campaign's recipients: each record's first phone number, opted-out numbers and
+/// repeats left out.
+async fn start_sms(state: &AppState, c: &Campaign) -> AppResult<i64> {
+    let optouts: HashSet<String> = sqlx::query_scalar!("SELECT number FROM sms_optouts").fetch_all(&state.db).await?.into_iter().collect();
+    let cc = crate::sms::country_code(state).await;
+    let segments: Vec<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query!(r#"SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1)"#, &c.segment_ids).map(|r| (r.entity_type, r.filter, r.item_ids)).fetch_all(&state.db).await?;
+    let mut seen: HashSet<String> = HashSet::new();
+    let (mut items, mut phones, mut toks) = (Vec::new(), Vec::new(), Vec::new());
+    let mut considered = 0i64;
+    for (et, filter, ids) in segments {
+        let t = entity_type_by_id(state, et).await?;
+        let found = members(state, &t, &parse_filter(&filter)?, ids.as_deref(), MAX_RECIPIENTS).await?;
+        let ids: Vec<Uuid> = found.iter().map(|m| m.0).collect();
+        let firsts: Vec<(Uuid, String)> = sqlx::query!(
+            r#"SELECT DISTINCT ON (item_id) item_id, value FROM crm_multifields WHERE kind = 'phone' AND item_id = ANY($1) ORDER BY item_id, sort"#,
+            &ids
+        )
+        .map(|r| (r.item_id, r.value))
+        .fetch_all(&state.db)
+        .await?;
+        let phone_of: std::collections::HashMap<Uuid, String> = firsts.into_iter().collect();
+        for id in ids {
+            considered += 1;
+            let Some(p) = phone_of.get(&id).and_then(|p| crate::sms::normalize(p, &cc)) else { continue };
+            if optouts.contains(&p) || !seen.insert(p.clone()) || items.len() as i64 >= MAX_RECIPIENTS {
+                continue;
+            }
+            items.push(id);
+            phones.push(p);
+            toks.push(tokens::random_token(24));
+        }
+    }
+    let mut tx = state.db.begin().await?;
+    sqlx::query!("INSERT INTO mkt_recipients (campaign_id, item_id, email, phone, token) SELECT $1, x.i, '', x.p, x.t FROM unnest($2::uuid[], $3::text[], $4::text[]) AS x(i, p, t)", c.id, &items, &phones, &toks)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query!("UPDATE mkt_campaigns SET status = 'sending', started_at = now(), skipped = $2, updated_at = now() WHERE id = $1", c.id, (considered - items.len() as i64) as i32)
+        .execute(&mut *tx)
+        .await?;
+    jobs::enqueue(&mut *tx, JOB, json!({ "campaign_id": c.id }), None).await?;
+    tx.commit().await?;
+    state.job_wakeup.notify_one();
+    Ok(items.len() as i64)
+}
+
+/// An SMS campaign's text for one recipient: placeholders filled, and how to opt out.
+async fn render_sms(state: &AppState, c: &Campaign, item: Option<Uuid>, company: &str) -> AppResult<String> {
+    let ctx = match item {
+        Some(id) => automation::context(state, id).await?.value,
+        None => json!({}),
+    };
+    Ok(format!("{}\n{company}: reply STOP to opt out", automation::fill(&c.body, &ctx).trim()))
 }
 
 #[derive(Deserialize, Default)]
@@ -262,12 +333,36 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     if c.status != "sending" {
         return Ok(());
     }
-    let batch: Vec<(Uuid, Option<Uuid>, String, String)> =
-        sqlx::query!(r#"SELECT id, item_id, email, token FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending' ORDER BY email LIMIT $2"#, id, BATCH).map(|r| (r.id, r.item_id, r.email, r.token))
+    let batch: Vec<(Uuid, Option<Uuid>, String, String, Option<String>)> =
+        sqlx::query!(r#"SELECT id, item_id, email, token, phone FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending' ORDER BY email, phone LIMIT $2"#, id, BATCH).map(|r| (r.id, r.item_id, r.email, r.token, r.phone))
             .fetch_all(&state.db)
             .await?;
     let company = company_name(state).await;
-    for (rid, item, email, token) in &batch {
+    for (rid, item, email, token, phone) in &batch {
+        if c.channel == "sms" {
+            let phone = phone.clone().unwrap_or_default();
+            let out: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM sms_optouts WHERE number = $1) AS "v!""#, phone).fetch_one(&state.db).await?;
+            let result = if out {
+                Err("opted out before it was sent".to_string())
+            } else {
+                match render_sms(state, &c, *item, &company).await {
+                    Ok(text) => crate::sms::queue(state, crate::sms::NewSms { to: &phone, body: &text, purpose: "campaign", item_id: *item, campaign_id: Some(c.id), ..Default::default() }).await.map(|_| ()).map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            };
+            match result {
+                Ok(()) => {
+                    sqlx::query!("UPDATE mkt_recipients SET status = 'sent', sent_at = now(), error = NULL WHERE id = $1", rid).execute(&state.db).await?;
+                    if let Some(item) = item {
+                        let _ = timeline(&state.db, *item, "campaign", None, None, json!({ "campaign_id": c.id, "name": c.name, "event": "sent", "channel": "sms" })).await;
+                    }
+                }
+                Err(e) => {
+                    sqlx::query!("UPDATE mkt_recipients SET status = 'failed', error = $2 WHERE id = $1", rid, e.chars().take(500).collect::<String>()).execute(&state.db).await?;
+                }
+            }
+            continue;
+        }
         // An address may have opted out since sending started.
         let out: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM mkt_optouts WHERE email = $1) AS "v!""#, email).fetch_one(&state.db).await?;
         if out {
@@ -314,7 +409,11 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
 
 #[derive(Deserialize)]
 pub(crate) struct TestBody {
+    #[serde(default)]
     email: String,
+    /// For SMS campaigns: the phone to text the test to.
+    #[serde(default)]
+    phone: Option<String>,
     /// The record to fill placeholders from; default: the first in the campaign's segments.
     item_id: Option<Uuid>,
 }
@@ -323,6 +422,13 @@ pub(crate) struct TestBody {
 pub(crate) async fn test_send(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<TestBody>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let c = load_campaign(&state, id).await?;
+    if c.channel == "sms" {
+        ready_text(&c)?;
+        let item = b.item_id;
+        let text = render_sms(&state, &c, item, &company_name(&state).await).await?;
+        crate::sms::queue(&state, crate::sms::NewSms { to: b.phone.as_deref().unwrap_or(&b.email), body: &format!("[Test] {text}"), purpose: "test", user_id: Some(auth.id), ..Default::default() }).await?;
+        return Ok(Json(json!({ "ok": true, "filled_from": item })));
+    }
     if c.subject.trim().is_empty() || c.body.trim().is_empty() {
         return Err(AppError::bad("write a subject and a message first"));
     }

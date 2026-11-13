@@ -5,6 +5,7 @@ mod export;
 mod health;
 mod privacy;
 mod retention;
+mod sms;
 mod commissions;
 mod portal;
 mod field;

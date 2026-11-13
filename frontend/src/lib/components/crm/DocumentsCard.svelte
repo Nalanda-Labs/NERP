@@ -72,7 +72,9 @@
 	}
 	let signDoc = $state<Doc | null>(null);
 	let signOpen = $state(false);
-	let signers = $state<{ name: string; email: string }[]>([]);
+	let signers = $state<{ name: string; email: string; phone?: string }[]>([]);
+	// Whether signing links can also go by text message.
+	let canText = $state(false);
 	let signMessage = $state('');
 	let openRequest = $state<string | null>(null);
 	// Signing templates: who signs, by role, filled in for this record.
@@ -88,6 +90,7 @@
 		templateError = '';
 		signOpen = true;
 		signTemplates = (await api.get<{ items: SignTemplate[] }>('/crm/sign-templates').catch(() => ({ items: [] }))).items;
+		canText = (await api.get<{ enabled: boolean }>('/sms/available').catch(() => ({ enabled: false }))).enabled;
 	}
 	async function useTemplate() {
 		templateError = '';
@@ -106,7 +109,7 @@
 		busy = true;
 		try {
 			if (templateId) await api.post(`/crm/items/${itemId}/sign`, { template_id: templateId, document_id: signDoc!.id });
-			else await api.post(`/crm/documents/${signDoc!.id}/signature`, { signers, message: signMessage || null });
+			else await api.post(`/crm/documents/${signDoc!.id}/signature`, { signers: signers.map((x) => ({ ...x, phone: x.phone?.trim() || null })), message: signMessage || null });
 			signOpen = false;
 			toasts.success('Sent for signature');
 			await loadSignatures();
@@ -292,7 +295,7 @@
 
 <Modal bind:open={signOpen} title={signDoc ? `Send ${signDoc.number} for signature` : ''}>
 	<form id="sign-form" class="space-y-3" onsubmit={sendForSignature}>
-		<p class="text-sm text-slate-500">Each signer gets a personal link by email to read the PDF and sign it. When everyone has signed, they all get the signed copy with a certificate page, and it appears here.</p>
+		<p class="text-sm text-slate-500">Each signer gets a personal link by email{canText ? ' (and by text message, if you add their mobile)' : ''} to read the PDF and sign it. When everyone has signed, they all get the signed copy with a certificate page, and it appears here.</p>
 		{#if signTemplates.length}
 			<div>
 				<label class="label" for="sign-tpl">From a template</label>
@@ -307,6 +310,7 @@
 			<div class="flex gap-2">
 				<input class="input flex-1" required maxlength="200" placeholder="Name" aria-label="Signer {i + 1} name" bind:value={x.name} readonly={!!templateId} />
 				<input class="input flex-1" type="email" required placeholder="Email" aria-label="Signer {i + 1} email" bind:value={x.email} readonly={!!templateId} />
+				{#if canText && !templateId}<input class="input w-40" type="tel" placeholder="Mobile (optional)" aria-label="Signer {i + 1} mobile" bind:value={x.phone} />{/if}
 				{#if signers.length > 1}<button type="button" class="btn btn-ghost p-1.5" aria-label="Remove signer" onclick={() => signers.splice(i, 1)}><Icon name="x" class="size-4" /></button>{/if}
 			</div>
 		{/each}
