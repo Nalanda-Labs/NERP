@@ -69,7 +69,7 @@ try {
   // ---- next steps that worked: the won deals held a meeting a day into Proposal; two lost
   // deals passed through it without one ----
   const lost = pipe.stages.find((x: any) => x.semantics === 'failure');
-  const wonIds = (await db.query('SELECT id FROM crm_items WHERE title LIKE $1', [`Won % ${s}`])).rows.map((x) => x.id);
+  const wonIds = (await db.query('SELECT id FROM crm_items WHERE title LIKE $1 ORDER BY title', [`Won % ${s}`])).rows.map((x) => x.id);
   for (const [k, id] of wonIds.entries()) {
     await db.query("INSERT INTO crm_activities (item_id, kind, subject, responsible_id, created_by, is_completed, created_at) VALUES ($1, 'meeting', 'Demo', $2, $2, TRUE, $3)", [id, me.id, ago(29 + k)]);
   }

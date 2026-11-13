@@ -103,7 +103,8 @@ await step('save as template and make it recurring', async () => {
   await page.click('button[aria-label="Save as template"]');
   await page.waitForURL(/\/tasks\/templates\/[0-9a-f-]{36}$/);
   await page.selectOption('#rec-freq', 'weekly');
-  await page.click('button:text-is("Fri")');
+  // Weekly starts with today's weekday chosen; add another one (clicking today's would unselect it).
+  await page.click(`button:text-is("${new Date().getDay() === 5 ? 'Thu' : 'Fri'}")`);
   await page.fill('#rec-time', '10:30');
   await page.screenshot({ path: '06-template.png', fullPage: true });
   await page.click('button:has-text("Save template")');
