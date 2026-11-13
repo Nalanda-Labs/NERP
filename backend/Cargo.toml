@@ -64,3 +64,4 @@ ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-
 quick-xml = "0.42.0"
 samael = "0.0.22"
 openssl = "0.10"
+sha1 = "0.11.0"
