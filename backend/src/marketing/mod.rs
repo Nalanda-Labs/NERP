@@ -337,10 +337,12 @@ pub(crate) struct Campaign {
     pub updated_at: DateTime<Utc>,
     /// Designed in blocks (then `body` is its plain text).
     pub design: Option<Value>,
+    /// email | sms
+    pub channel: String,
 }
 
 pub(crate) const CAMPAIGN_COLUMNS: &str =
-    "id, name, slug, status, segment_ids, subject, body, from_name, reply_to, send_at, started_at, finished_at, skipped, created_at, updated_at, design";
+    "id, name, slug, status, segment_ids, subject, body, from_name, reply_to, send_at, started_at, finished_at, skipped, created_at, updated_at, design, channel";
 
 pub(crate) async fn load_campaign(state: &AppState, id: Uuid) -> AppResult<Campaign> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {CAMPAIGN_COLUMNS} FROM mkt_campaigns WHERE id = $1")))
@@ -402,6 +404,8 @@ async fn get_campaign(State(state): State<AppState>, auth: AuthUser, Path(id): P
 #[derive(Deserialize)]
 struct CampaignBody {
     name: Option<String>,
+    /// email (default) | sms
+    channel: Option<String>,
     segment_ids: Option<Vec<Uuid>>,
     subject: Option<String>,
     body: Option<String>,
@@ -472,6 +476,17 @@ async fn check_segments(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<Uuid>> 
     Ok(v)
 }
 
+/// A campaign's channel: email, or sms when text messages are set up.
+async fn check_channel(state: &AppState, c: Option<&str>) -> AppResult<Option<String>> {
+    match c {
+        None => Ok(None),
+        Some("email") => Ok(Some("email".into())),
+        Some("sms") if crate::sms::enabled(state).await => Ok(Some("sms".into())),
+        Some("sms") => Err(AppError::bad("text messages are not set up (System → Text messages)")),
+        Some(_) => Err(AppError::bad("a campaign goes out by email or sms")),
+    }
+}
+
 fn check_reply_to(r: Option<String>) -> AppResult<Option<String>> {
     let r = r.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     if let Some(a) = &r
@@ -500,7 +515,8 @@ async fn create_campaign(State(state): State<AppState>, auth: AuthUser, Json(b):
         Some((_, text)) => Some(text.clone()),
         None => b.body.clone(),
     };
-    let id: Uuid = sqlx::query_scalar!("INSERT INTO mkt_campaigns (name, slug, segment_ids, subject, body, from_name, reply_to, created_by, design) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", &name, unique_slug(&state, &name).await?, &(check_segments(&state, &b.segment_ids.unwrap_or_default()).await?), text(b.subject.as_deref(), "subject", 300)?, text(body.as_deref(), "message", 100_000)?, b.from_name.flatten().map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), check_reply_to(b.reply_to.flatten())?, auth.id, design.map(|d| d.0))
+    let channel = check_channel(&state, b.channel.as_deref()).await?.unwrap_or_else(|| "email".into());
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO mkt_campaigns (name, slug, segment_ids, subject, body, from_name, reply_to, created_by, design, channel) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id", &name, unique_slug(&state, &name).await?, &(check_segments(&state, &b.segment_ids.unwrap_or_default()).await?), text(b.subject.as_deref(), "subject", 300)?, text(body.as_deref(), "message", 100_000)?, b.from_name.flatten().map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), check_reply_to(b.reply_to.flatten())?, auth.id, design.map(|d| d.0), channel)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))
@@ -521,6 +537,9 @@ async fn update_campaign(State(state): State<AppState>, auth: AuthUser, Path(id)
         }
     };
     let body = designed_body.or_else(|| b.body.clone());
+    if let Some(ch) = check_channel(&state, b.channel.as_deref()).await? {
+        sqlx::query!("UPDATE mkt_campaigns SET channel = $2 WHERE id = $1", id, ch).execute(&state.db).await?;
+    }
     sqlx::query!("UPDATE mkt_campaigns SET name = $2, segment_ids = $3, subject = $4, body = $5, from_name = $6, reply_to = $7, design = $8, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 120)?, None => cur.name }, &(match &b.segment_ids { Some(s) => check_segments(&state, s).await?, None => cur.segment_ids }), match &b.subject { Some(s) => text(Some(s), "subject", 300)?, None => cur.subject }, match &body { Some(s) => text(Some(s), "message", 100_000)?, None => cur.body }, match b.from_name { Some(f) => f.map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), None => cur.from_name }, match b.reply_to { Some(r) => check_reply_to(r)?, None => cur.reply_to }, design)
         .execute(&state.db)
         .await?;

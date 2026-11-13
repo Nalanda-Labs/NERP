@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(crate::health::router())
         .merge(crate::privacy::router())
         .merge(crate::retention::router())
+        .merge(crate::sms::router())
         .merge(crate::commissions::router())
         .merge(crate::portal::router())
         .merge(crate::field::router())

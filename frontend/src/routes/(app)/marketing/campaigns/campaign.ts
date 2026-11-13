@@ -15,6 +15,8 @@ export interface Campaign {
 	name: string;
 	slug: string;
 	status: 'draft' | 'scheduled' | 'sending' | 'sent' | 'cancelled';
+	/** How it goes out. */
+	channel: 'email' | 'sms';
 	segment_ids: string[];
 	subject: string;
 	body: string;

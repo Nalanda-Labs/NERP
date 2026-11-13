@@ -13,7 +13,7 @@
 	let resources = $state<Resource[]>([]);
 	let services = $state<Service[]>([]);
 	let forms = $state<BookingForm[]>([]);
-	let settings = $state({ confirm_email: true, remind_hours: 24, make_contact: true, deal_category_id: null as string | null, currency: 'USD', extra_reminders: [] as number[], follow_up_hours: 0, follow_up_text: null as string | null, no_show_text: null as string | null });
+	let settings = $state({ sms_notices: false, sms_available: false, confirm_email: true, remind_hours: 24, make_contact: true, deal_category_id: null as string | null, currency: 'USD', extra_reminders: [] as number[], follow_up_hours: 0, follow_up_text: null as string | null, no_show_text: null as string | null });
 	// More reminders, as text: "2, 1" (hours before).
 	let extraText = $state('');
 	let pipelines = $state<{ id: string; name: string }[]>([]);
@@ -184,6 +184,9 @@
 	{:else}
 		<form class="card max-w-2xl space-y-4 p-5" onsubmit={saveSettings}>
 			<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={settings.confirm_email} /> Email clients a confirmation with a link to confirm or cancel</label>
+			{#if settings.sms_available || settings.sms_notices}
+				<label class="flex items-center gap-2 text-sm"><input type="checkbox" class="rounded border-slate-300 text-brand-600" bind:checked={settings.sms_notices} data-sms-notices /> Also text the confirmation, reminders, follow-up and no-show message to the client's phone</label>
+			{/if}
 			<div><label class="label" for="bs-rem">Remind clients by email (hours before; 0 for no reminder)</label><input id="bs-rem" type="number" min="0" max="168" class="input w-32" bind:value={settings.remind_hours} /></div>
 			<div><label class="label" for="bs-more">More reminders (hours before, e.g. "2" or "72, 2")</label><input id="bs-more" class="input w-48" placeholder="None" bind:value={extraText} data-extra-reminders /><p class="mt-1 text-xs text-slate-500">Only the nearest reminder is sent when several fall due at once (a booking made two hours ahead gets the two-hour one).</p></div>
 			<div class="grid gap-3 sm:grid-cols-[10rem_1fr]">

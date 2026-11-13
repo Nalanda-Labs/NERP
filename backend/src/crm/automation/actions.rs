@@ -24,6 +24,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("task", "Create a task"),
     ("notify", "Notify employees"),
     ("email", "Email the client"),
+    ("sms", "Text the client"),
     ("set_field", "Change a field"),
     ("assign", "Change the responsible person"),
     ("move_stage", "Move to another stage"),
@@ -226,6 +227,7 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
                 "template_id": template,
             })
         }
+        "sms" => json!({ "body": text(&p, "body", "Message", crate::sms::MAX_LEN, true)? }),
         "comment" => json!({ "text": text(&p, "text", "Comment", 20_000, true)? }),
         "set_field" => {
             let field = text(&p, "field", "Field", 100, true)?;
@@ -556,6 +558,15 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
             timeline(&state.db, item, "activity", Some(SYSTEM_USER), Some(subject.clone()), json!({ "activity_id": id, "kind": "email", "event": "completed", "result": format!("sent to {to}") })).await.map_err(err)?;
             sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", item).execute(&state.db).await.map_err(err)?;
             done(format!("emailed “{subject}”{with} to {to}"))
+        }
+        "sms" => {
+            let Some(to) = crate::sms::client_phones(state, item).await.map_err(err)?.into_iter().next() else {
+                return Err("the client has no phone number".into());
+            };
+            let body = f("body");
+            let sms = crate::sms::queue(state, crate::sms::NewSms { to: &to, body: &body, purpose: "robot", item_id: Some(item), ..Default::default() }).await.map_err(err)?;
+            crate::sms::log_activity(state, item, sms, "outgoing", &body, ctx.row.assigned_to, None).await.map_err(err)?;
+            done(format!("texted {to}"))
         }
         "comment" => {
             let text = f("text");

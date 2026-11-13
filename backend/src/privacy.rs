@@ -128,6 +128,16 @@ const SOURCES: &[Source] = &[
               ORDER BY e.sent_at",
     },
     Source {
+        key: "texts",
+        title: "Text messages to and from them",
+        actions: &[Action::Delete, Action::Keep],
+        note: "",
+        sql: "SELECT s.id, s.direction, s.to_number, s.from_number, s.body, s.status, s.created_at FROM sms_messages s
+              WHERE (s.item_id = ANY($3) OR ($2 <> '' AND (right(regexp_replace(s.to_number, '\\D', '', 'g'), 10) = $2
+                     OR right(regexp_replace(COALESCE(s.from_number, ''), '\\D', '', 'g'), 10) = $2))) AND $1 IS NOT NULL
+              ORDER BY s.created_at",
+    },
+    Source {
         key: "chats",
         title: "Live chats",
         actions: &[Action::Delete, Action::Keep],
@@ -458,6 +468,13 @@ async fn erase(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clie
                       OR EXISTS (SELECT 1 FROM jsonb_array_elements(e.to_addrs || e.cc_addrs) x WHERE lower(COALESCE(x->>'email', x #>> '{}')) = $1) AND $2 IS NOT NULL AND $3 IS NOT NULL";
     let n = if chosen["emails"] == Action::Delete { run!(emails_sql) } else { 0 };
     done("emails", chosen["emails"], n);
+    let n = if chosen["texts"] == Action::Delete {
+        run!("DELETE FROM sms_messages s WHERE (s.item_id = ANY($3) OR ($2 <> '' AND (right(regexp_replace(s.to_number, '\\D', '', 'g'), 10) = $2
+                  OR right(regexp_replace(COALESCE(s.from_number, ''), '\\D', '', 'g'), 10) = $2))) AND $1 IS NOT NULL")
+    } else {
+        0
+    };
+    done("texts", chosen["texts"], n);
     let n = if chosen["chats"] == Action::Delete { run!("DELETE FROM chat_sessions WHERE (lower(visitor_email) = $1 OR item_id = ANY($3)) AND $2 IS NOT NULL") } else { 0 };
     done("chats", chosen["chats"], n);
     let n = match chosen["tickets"] {

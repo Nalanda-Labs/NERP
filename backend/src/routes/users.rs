@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::{clean, double_option, normalize_email, required, Page, PageParams};
-use super::{auth::send_invitation, security::{disable_two_factor, sessions_for, SessionInfo}};
+use super::{security::{disable_two_factor, sessions_for, SessionInfo}};
 use crate::{
     audit,
     notify::{notify, NewNotification},
@@ -379,6 +379,9 @@ pub struct CreateUser {
     password: Option<String>,
     #[serde(default)]
     send_invite: bool,
+    /// The invitation goes to the employee's mobile by text message too.
+    #[serde(default)]
+    invite_by_text: bool,
     first_name: String,
     last_name: String,
     middle_name: Option<String>,
@@ -444,7 +447,7 @@ async fn create_user(
     let _ = crate::im::sync_audiences(&state, Some(id)).await;
 
     if invite {
-        send_invitation(&state, id, auth.id).await?;
+        super::auth::send_invitation_by(&state, id, auth.id, body.invite_by_text).await?;
     }
     notify(
         &state,
@@ -720,11 +723,19 @@ async fn reset_password(
 
 // ---------- invitations & account security (admin) ----------
 
+#[derive(Deserialize)]
+struct ResendBody {
+    /// Text the invitation to the employee's mobile too.
+    #[serde(default)]
+    by_text: bool,
+}
+
 async fn resend_invite(
     State(state): State<AppState>,
     auth: AuthUser,
     ClientIp(ip): ClientIp,
     Path(id): Path<Uuid>,
+    body: Option<Json<ResendBody>>,
 ) -> AppResult<Json<serde_json::Value>> {
     if !auth.can(perm::USERS_INVITE) {
         auth.require(perm::USERS_MANAGE)?;
@@ -733,7 +744,7 @@ async fn resend_invite(
     if !user.is_active {
         return Err(AppError::bad("reactivate this employee before inviting them"));
     }
-    send_invitation(&state, id, auth.id).await?;
+    super::auth::send_invitation_by(&state, id, auth.id, body.is_some_and(|b| b.by_text)).await?;
     audit::record(&state.db, Some(auth.id), "user.invite", "user", Some(id.to_string()), json!({ "email": user.email, "resend": true }), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))
 }

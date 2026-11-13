@@ -399,8 +399,23 @@ async fn what_and_when(state: &AppState, b: &Booking) -> (String, String) {
     (what, format!("{} ({})", b.starts_at.with_timezone(&tz).format("%A %e %B %Y, %H:%M"), tz.name()))
 }
 
+/// Whether booking messages also go to the client's phone (Booking settings).
+async fn sms_on(state: &AppState) -> bool {
+    sqlx::query_scalar!("SELECT sms_notices FROM booking_settings WHERE id").fetch_one(&state.db).await.unwrap_or(false) && crate::sms::enabled(state).await
+}
+
+/// Texts the client, when booking messages go by text and the booking has a phone number.
+async fn text_client(state: &AppState, b: &Booking, body: &str) {
+    let Some(phone) = b.client_phone.as_deref().filter(|p| !p.trim().is_empty()) else { return };
+    if !sms_on(state).await {
+        return;
+    }
+    if let Err(e) = crate::sms::queue(state, crate::sms::NewSms { to: phone, body, purpose: "booking", booking_id: Some(b.id), item_id: b.deal_id, ..Default::default() }).await {
+        tracing::warn!(error = ?e, booking = %b.id, "booking: text message not queued");
+    }
+}
+
 async fn confirm_email(state: &AppState, b: &Booking, token: &str) {
-    let Some(to) = &b.client_email else { return };
     let on: bool = sqlx::query_scalar!("SELECT confirm_email FROM booking_settings WHERE id").fetch_one(&state.db).await.unwrap_or(false);
     if !on {
         return;
@@ -408,6 +423,8 @@ async fn confirm_email(state: &AppState, b: &Booking, token: &str) {
     let (what, when) = what_and_when(state, b).await;
     let name = company(state).await;
     let link = format!("{}/book/manage/{token}", state.config.public_url);
+    text_client(state, b, &format!("{name}: you're booked for {what}, {when}. Booking #{}. Confirm or cancel: {link}", b.number)).await;
+    let Some(to) = &b.client_email else { return };
     let mail = crate::mail::customer_notice(to, &name, &format!("Your booking: {when}"), "You're booked", &[format!("Hi {},", b.client_name), format!("{what}, {when}. Booking #{}.", b.number), "You can confirm or cancel it here:".into()], Some(("See your booking", &link)));
     if let Err(e) = crate::jobs::send_email(state, mail).await {
         tracing::warn!(error = ?e, "booking: confirmation not queued");
@@ -586,12 +603,13 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
     hours.sort_unstable();
     hours.dedup();
     let name = company(state).await;
+    let sms = sms_on(state).await;
 
     // Reminders: of those due, only the nearest is sent (a booking made two hours ahead gets
     // the two-hour reminder, not also the day-before one); the others count as sent.
     if let Some(max) = hours.last().copied() {
-        let due: Vec<(Uuid, DateTime<Utc>)> = sqlx::query!(r#"SELECT id, starts_at FROM bookings WHERE status IN ('booked', 'confirmed') AND client_email IS NOT NULL
-               AND starts_at > now() AND starts_at <= now() + make_interval(hours => $1)"#, max).map(|r| (r.id, r.starts_at))
+        let due: Vec<(Uuid, DateTime<Utc>)> = sqlx::query!(r#"SELECT id, starts_at FROM bookings WHERE status IN ('booked', 'confirmed') AND (client_email IS NOT NULL OR ($2 AND client_phone IS NOT NULL))
+               AND starts_at > now() AND starts_at <= now() + make_interval(hours => $1)"#, max, sms).map(|r| (r.id, r.starts_at))
         .fetch_all(&state.db)
         .await?;
         for (id, starts) in due {
@@ -619,7 +637,9 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
             sqlx::query!("UPDATE bookings SET token_hash = $2 WHERE id = $1", id, hash(&token)).execute(&state.db).await?;
             let (what, when) = what_and_when(state, &b).await;
             let link = format!("{}/book/manage/{token}", state.config.public_url);
-            let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, &format!("Reminder: {when}"), "See you soon", &[format!("Hi {},", b.client_name), format!("A reminder of your booking: {what}, {when}."), "Can't make it? Let us know:".into()], Some(("Confirm or cancel", &link)));
+            text_client(state, &b, &format!("{name}: a reminder of your booking, {what}, {when}. Can't make it? {link}")).await;
+            let Some(to) = b.client_email.as_deref() else { continue };
+            let mail = crate::mail::customer_notice(to, &name, &format!("Reminder: {when}"), "See you soon", &[format!("Hi {},", b.client_name), format!("A reminder of your booking: {what}, {when}."), "Can't make it? Let us know:".into()], Some(("Confirm or cancel", &link)));
             crate::jobs::send_email(state, mail).await?;
         }
     }
@@ -627,16 +647,18 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
     // After the visit: the follow-up, once.
     if follow_h > 0 && let Some(text) = follow_t.as_deref() {
         let due: Vec<Uuid> = sqlx::query_scalar!("INSERT INTO booking_notices (booking_id, kind)
-             SELECT id, 'follow_up' FROM bookings WHERE status = 'came' AND client_email IS NOT NULL
+             SELECT id, 'follow_up' FROM bookings WHERE status = 'came' AND (client_email IS NOT NULL OR ($2 AND client_phone IS NOT NULL))
                AND ends_at + make_interval(hours => $1) <= now() AND ends_at > now() - interval '30 days'
-             ON CONFLICT DO NOTHING RETURNING booking_id", follow_h)
+             ON CONFLICT DO NOTHING RETURNING booking_id", follow_h, sms)
         .fetch_all(&state.db)
         .await?;
         for id in due {
             let Ok(b) = load(state, id).await else { continue };
             let mut lines = vec![format!("Hi {},", b.client_name)];
             lines.extend(text.lines().map(String::from).filter(|l| !l.trim().is_empty()));
-            let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, &format!("Thank you for your visit, {}", b.client_name), "Thank you", &lines, None);
+            text_client(state, &b, &format!("{name}: {}", lines.join(" "))).await;
+            let Some(to) = b.client_email.as_deref() else { continue };
+            let mail = crate::mail::customer_notice(to, &name, &format!("Thank you for your visit, {}", b.client_name), "Thank you", &lines, None);
             crate::jobs::send_email(state, mail).await?;
         }
     }
@@ -644,8 +666,8 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
     // Clients marked as not having come: the message, once.
     if let Some(text) = no_show.as_deref() {
         let due: Vec<Uuid> = sqlx::query_scalar!("INSERT INTO booking_notices (booking_id, kind)
-             SELECT id, 'no_show' FROM bookings WHERE status = 'no_show' AND client_email IS NOT NULL AND starts_at > now() - interval '7 days'
-             ON CONFLICT DO NOTHING RETURNING booking_id")
+             SELECT id, 'no_show' FROM bookings WHERE status = 'no_show' AND (client_email IS NOT NULL OR ($1 AND client_phone IS NOT NULL)) AND starts_at > now() - interval '7 days'
+             ON CONFLICT DO NOTHING RETURNING booking_id", sms)
         .fetch_all(&state.db)
         .await?;
         for id in due {
@@ -653,7 +675,9 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
             let (what, when) = what_and_when(state, &b).await;
             let mut lines = vec![format!("Hi {},", b.client_name), format!("We missed you at your booking: {what}, {when}.")];
             lines.extend(text.lines().map(String::from).filter(|l| !l.trim().is_empty()));
-            let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, "We missed you", "We missed you", &lines, None);
+            text_client(state, &b, &format!("{name}: {}", lines.join(" "))).await;
+            let Some(to) = b.client_email.as_deref() else { continue };
+            let mail = crate::mail::customer_notice(to, &name, "We missed you", "We missed you", &lines, None);
             crate::jobs::send_email(state, mail).await?;
         }
     }

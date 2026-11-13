@@ -35,6 +35,7 @@
 		['task', 'Create a task', 'list'],
 		['notify', 'Notify employees', 'bell'],
 		['email', 'Email the client', 'mail'],
+		['sms', 'Text the client', 'smartphone'],
 		['set_field', 'Change a field', 'edit'],
 		['assign', 'Change the responsible person', 'user'],
 		['move_stage', 'Move to another stage', 'chevronRight'],
@@ -232,6 +233,7 @@
 			case 'activity': return { kind: 'call', subject: 'Call about {{title}}', description: '', deadline_minutes: 60, responsible: 'assigned' };
 			case 'task': return { title: 'Follow up: {{title}}', description: '', deadline_minutes: 1440, responsible: 'assigned', project_id: '' };
 			case 'notify': return { to: ['assigned'], message: '{{title}} moved to {{stage}}' };
+			case 'sms': return { body: 'Hello, this is {{assigned}} about {{title}}.' };
 			case 'email': return { subject: 'About {{title}}', body: 'Hello,\n\n…\n\nBest regards,\n{{assigned}}', template_id: '' };
 			case 'set_field': return { field: settable[0]?.code ?? 'probability', value: '' };
 			case 'assign': return { users: [], mode: 'round_robin', skill_field: null, skills_required: false, checked_in: false, max_open: null, if_nobody: 'least_busy' };
@@ -449,6 +451,7 @@
 			case 'activity': return `${p.kind}: ${p.subject}`;
 			case 'task': return p.title;
 			case 'notify': return p.message;
+			case 'sms': return String(p.body ?? '').slice(0, 60);
 			case 'email': return p.template_id ? `${p.subject} + ${templates.find((t) => t.id === p.template_id)?.name ?? 'document'}` : p.subject;
 			case 'set_field': return `${fields.find((f) => f.code === p.field)?.label ?? p.field} → ${p.value}`;
 			case 'assign': return `${p.users.length} employee${p.users.length === 1 ? '' : 's'}, ${p.mode === 'random' ? 'random' : p.mode === 'least_busy' ? 'least busy' : p.mode === 'capacity' ? 'who\'s in, least busy' : 'in turn'}`;
@@ -574,6 +577,9 @@
 				</div>
 			</div>
 			<div><label class="label" for="au-msg">Message</label><input id="au-msg" class="input" bind:value={p.message} />{@render placeholders('message')}</div>
+		{:else if action === 'sms'}
+			<p class="text-xs text-slate-500">Sent to the record's phone, else its primary contact's, else its company's. Logged as a text message activity. Needs text messages set up in System → Text messages.</p>
+			<div><label class="label" for="au-sms">Message</label><textarea id="au-sms" class="input" rows="4" maxlength="1600" bind:value={p.body}></textarea>{@render placeholders('body')}</div>
 		{:else if action === 'email'}
 			<p class="text-xs text-slate-500">Sent to the record's email, else its primary contact's, else its company's. Logged as an email activity.</p>
 			<div><label class="label" for="au-subj">Subject</label><input id="au-subj" class="input" bind:value={p.subject} />{@render placeholders('subject')}</div>

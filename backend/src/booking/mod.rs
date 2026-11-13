@@ -71,7 +71,9 @@ async fn settings_json(state: &AppState) -> AppResult<Value> {
     )
     .fetch_one(&state.db)
     .await?;
+    let sms: bool = sqlx::query_scalar!("SELECT sms_notices FROM booking_settings WHERE id").fetch_one(&state.db).await?;
     Ok(json!({
+        "sms_notices": sms, "sms_available": crate::sms::enabled(state).await,
         "confirm_email": confirm, "remind_hours": remind, "make_contact": contact, "deal_category_id": cat, "currency": cur,
         "extra_reminders": extra, "follow_up_hours": follow_h, "follow_up_text": follow_t, "no_show_text": no_show,
     }))
@@ -84,6 +86,8 @@ async fn get_settings(State(state): State<AppState>, _auth: AuthUser) -> AppResu
 #[derive(Deserialize)]
 struct SettingsInput {
     confirm_email: Option<bool>,
+    /// Booking messages to the client by text too (needs text messages set up).
+    sms_notices: Option<bool>,
     remind_hours: Option<i32>,
     make_contact: Option<bool>,
     #[serde(default, deserialize_with = "crate::routes::double_option")]
@@ -114,6 +118,12 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     }
     let clip = |t: Option<Option<String>>| t.map(|t| t.map(|s| s.trim().chars().take(2000).collect::<String>()).filter(|s| !s.is_empty()));
     let (follow_text, no_show) = (clip(b.follow_up_text), clip(b.no_show_text));
+    if let Some(on) = b.sms_notices {
+        if on && !crate::sms::enabled(&state).await {
+            return Err(AppError::bad("text messages are not set up (System → Text messages)"));
+        }
+        sqlx::query!("UPDATE booking_settings SET sms_notices = $1 WHERE id", on).execute(&state.db).await?;
+    }
     if let Some(x) = &b.extra_reminders {
         let mut x = x.clone();
         x.sort_unstable_by(|a, b| b.cmp(a));

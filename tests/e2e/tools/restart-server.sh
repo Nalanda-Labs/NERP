@@ -8,6 +8,9 @@ pkill -f "target/debug/nerp$" && sleep 2
 # The sandbox copy goes to <test database>_sandbox_test.
 SANDBOX_DATABASE_URL="${SANDBOX_DATABASE_URL:-$(grep -m1 '^DATABASE_URL=' .env | cut -d= -f2- | sed -E 's#/([^/?]+)(\?.*)?$#/\1_sandbox_test\2#')}"
 export SANDBOX_DATABASE_URL SANDBOX_URL="${SANDBOX_URL:-http://127.0.0.1:8092}"
+# Text messages go to the test suites' Twilio stand-in (mock-twilio.ts), never to Twilio:
+# these replace any real account in .env.
+export TWILIO_API_URL=http://127.0.0.1:9466 TWILIO_ACCOUNT_SID=ACnerptest0000000000000000000000 TWILIO_AUTH_TOKEN=nerp-test-twilio-token TWILIO_FROM=+15005550006
 STATIC_DIR=../frontend/build CRM_WEBHOOK_ALLOW_PRIVATE=true MAIL_ALLOW_PRIVATE=true LDAP_ENABLED=true PUBLIC_URL=http://localhost:8080 \
 NERP_TEST_SIGNIN_BASE=http://127.0.0.1:9479 BACKUP_DIR="$OUT/backups" BACKUP_RESTORE=true \
 FILE_ENCRYPTION_KEY="${FILE_ENCRYPTION_KEY:-nerp-test-file-key-0123456789abcdef}" \

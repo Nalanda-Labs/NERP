@@ -223,6 +223,7 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
         crate::export::PURGE_JOB => crate::export::run_purge(state).await,
         crate::health::JOB => crate::health::run_job(state).await,
         crate::retention::JOB => crate::retention::run_job(state).await,
+        crate::sms::SEND_JOB => crate::sms::run_job(state, payload).await,
         crate::crm::attention::JOB => crate::crm::attention::run(state).await,
         crate::blob::CONVERT_JOB => crate::blob::convert(state).await,
         crate::directory::SYNC_JOB => crate::directory::ldap::run_sync(state).await,

@@ -60,6 +60,9 @@ pub(crate) async fn company(state: &AppState) -> String {
 struct SignerInput {
     name: String,
     email: String,
+    /// Optional: the link goes to this phone by text message too.
+    #[serde(default)]
+    phone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -83,13 +86,16 @@ async fn send(State(state): State<AppState>, auth: AuthUser, Path(doc): Path<Uui
     let item: Uuid = sqlx::query_scalar!("SELECT item_id FROM crm_documents WHERE id = $1", doc).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("document"))?;
     let row = load_row(&state, item, false).await?;
     require(&state, &auth, row.entity_type, "write", row.assigned_to).await?;
-    let signers = b.signers.into_iter().map(|s| (s.name, s.email)).collect();
+    let signers = b.signers.into_iter().map(|s| (s.name, s.email, s.phone.filter(|p| !p.trim().is_empty()))).collect();
     let id = send_document(&state, auth.id, doc, signers, b.message, None).await?;
     request_view(&state, id).await.map(Json)
 }
 
 /// Sends a ready document for signature (the caller checked the rights). Returns the request.
-pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers_in: Vec<(String, String)>, message: Option<String>, template: Option<Uuid>) -> AppResult<Uuid> {
+/// A signer as given: name, email and (optionally) a phone for the link by text message.
+pub(crate) type SignerIn = (String, String, Option<String>);
+
+pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers_in: Vec<SignerIn>, message: Option<String>, template: Option<Uuid>) -> AppResult<Uuid> {
     let (item, number, status, pdf): (Uuid, String, String, Option<Uuid>) =
         sqlx::query!(r#"SELECT item_id, number, status, pdf_file_id FROM crm_documents WHERE id = $1"#, doc).map(|r| (r.item_id, r.number, r.status, r.pdf_file_id))
             .fetch_optional(&state.db)
@@ -101,16 +107,25 @@ pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers
         return Err(AppError::bad("add one to ten signers"));
     }
     let mut signers = Vec::new();
-    for (sname, semail) in &signers_in {
+    let texting = signers_in.iter().any(|s| s.2.is_some());
+    if texting && !crate::sms::enabled(state).await {
+        return Err(AppError::bad("text messages are not set up (System → Text messages); leave the phone numbers empty"));
+    }
+    let cc = crate::sms::country_code(state).await;
+    for (sname, semail, sphone) in &signers_in {
         let name = crate::routes::required("signer's name", sname, 200)?;
         let email = semail.trim().to_lowercase();
         if !email.contains('@') || email.contains(char::is_whitespace) || email.len() > 254 {
             return Err(AppError::bad(format!("“{semail}” is not a valid email address")));
         }
-        if signers.iter().any(|(_, e): &(String, String)| *e == email) {
+        if signers.iter().any(|(_, e, _): &(String, String, Option<String>)| *e == email) {
             return Err(AppError::bad("each signer once"));
         }
-        signers.push((name, email));
+        let phone = match sphone {
+            Some(p) => Some(crate::sms::normalize(p, &cc).ok_or_else(|| AppError::bad(format!("“{p}” is not a phone number with its country code")))?),
+            None => None,
+        };
+        signers.push((name, email, phone));
     }
     let open: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM sign_requests WHERE document_id = $1 AND status = 'sent') AS "v!""#, doc).fetch_one(&state.db).await?;
     let state = state.clone();
@@ -126,27 +141,33 @@ pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers
     .fetch_one(&mut *tx)
     .await?;
     let mut links = Vec::new();
-    for (i, (name, email)) in signers.iter().enumerate() {
+    for (i, (name, email, phone)) in signers.iter().enumerate() {
         let token = random_token(24);
-        sqlx::query!("INSERT INTO sign_signers (request_id, name, email, sort, token_hash) VALUES ($1, $2, $3, $4, $5)", id, name, email, i as i32, hash(token.as_bytes()))
+        sqlx::query!("INSERT INTO sign_signers (request_id, name, email, sort, token_hash, phone) VALUES ($1, $2, $3, $4, $5, $6)", id, name, email, i as i32, hash(token.as_bytes()), phone.as_deref())
             .execute(&mut *tx)
             .await?;
-        links.push((name.clone(), email.clone(), token));
+        links.push((name.clone(), email.clone(), phone.clone(), token));
     }
     tx.commit().await?;
     let sender: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, by).fetch_one(&state.db).await?;
     let company = company(&state).await;
-    for (name, email, token) in &links {
-        invite(&state, &company, &sender, &number, message.as_deref(), name, email, token).await;
+    for (name, email, phone, token) in &links {
+        invite(&state, &company, &sender, &number, message.as_deref(), name, email, phone.as_deref(), Some(item), token).await;
     }
-    timeline(&state.db, item, "signature", Some(by), None, json!({ "event": "sent", "request_id": id, "number": number, "signers": signers.iter().map(|(n, _)| n).collect::<Vec<_>>() })).await?;
+    timeline(&state.db, item, "signature", Some(by), None, json!({ "event": "sent", "request_id": id, "number": number, "signers": signers.iter().map(|(n, _, _)| n).collect::<Vec<_>>() })).await?;
     broadcast(&state, row.entity_type, item, false).await;
     Ok(id)
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn invite(state: &AppState, company: &str, sender: &str, number: &str, message: Option<&str>, name: &str, email: &str, token: &str) {
+async fn invite(state: &AppState, company: &str, sender: &str, number: &str, message: Option<&str>, name: &str, email: &str, phone: Option<&str>, item: Option<Uuid>, token: &str) {
     let link = format!("{}/sign/{token}", state.config.public_url);
+    if let Some(p) = phone {
+        let body = format!("{name}, {sender} from {company} asks you to sign {number}: {link}");
+        if let Err(e) = crate::sms::queue(state, crate::sms::NewSms { to: p, body: &body, purpose: "esign", item_id: item, ..Default::default() }).await {
+            tracing::warn!(error = ?e, "could not text a signature request");
+        }
+    }
     let mut lines = vec![format!("Hi {name},"), format!("{sender} from {company} asks you to sign {number}.")];
     if let Some(m) = message {
         lines.push(m.to_string());
@@ -163,6 +184,7 @@ struct SignerView {
     id: Uuid,
     name: String,
     email: String,
+    phone: Option<String>,
     status: String,
     viewed_at: Option<DateTime<Utc>>,
     signed_at: Option<DateTime<Utc>>,
@@ -194,7 +216,7 @@ const REQUEST_SELECT: &str = "SELECT r.id, r.document_id, r.item_id, r.title, r.
     FROM sign_requests r LEFT JOIN users u ON u.id = r.created_by";
 
 async fn signers_of(state: &AppState, id: Uuid) -> AppResult<Vec<SignerView>> {
-    Ok(sqlx::query_as!(SignerView, r#"SELECT id, name, email, status, viewed_at AS "viewed_at?", signed_at AS "signed_at?", decline_reason AS "decline_reason?" FROM sign_signers WHERE request_id = $1 ORDER BY sort"#, id)
+    Ok(sqlx::query_as!(SignerView, r#"SELECT id, name, email, phone, status, viewed_at AS "viewed_at?", signed_at AS "signed_at?", decline_reason AS "decline_reason?" FROM sign_signers WHERE request_id = $1 ORDER BY sort"#, id)
         .fetch_all(&state.db)
         .await?)
 }
@@ -250,13 +272,14 @@ async fn remind(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         return Err(AppError::bad("this request is no longer waiting for signatures"));
     }
     let message: Option<String> = sqlx::query_scalar!(r#"SELECT message AS "message?" FROM sign_requests WHERE id = $1"#, id).fetch_one(&state.db).await?;
-    let waiting: Vec<(Uuid, String, String)> = sqlx::query!(r#"SELECT id, name, email FROM sign_signers WHERE request_id = $1 AND status IN ('pending', 'viewed')"#, id).map(|r| (r.id, r.name, r.email)).fetch_all(&state.db).await?;
+    let waiting: Vec<(Uuid, String, String, Option<String>)> = sqlx::query!(r#"SELECT id, name, email, phone FROM sign_signers WHERE request_id = $1 AND status IN ('pending', 'viewed')"#, id).map(|r| (r.id, r.name, r.email, r.phone)).fetch_all(&state.db).await?;
+    let item: Uuid = sqlx::query_scalar!("SELECT item_id FROM sign_requests WHERE id = $1", id).fetch_one(&state.db).await?;
     let sender: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     let company = company(&state).await;
-    for (sid, name, email) in &waiting {
+    for (sid, name, email, phone) in &waiting {
         let token = random_token(24);
         sqlx::query!("UPDATE sign_signers SET token_hash = $2 WHERE id = $1", sid, hash(token.as_bytes())).execute(&state.db).await?;
-        invite(&state, &company, &sender, &title, message.as_deref(), name, email, &token).await;
+        invite(&state, &company, &sender, &title, message.as_deref(), name, email, phone.as_deref(), Some(item), &token).await;
     }
     let mut v = request_view(&state, id).await?;
     v["reminded"] = json!(waiting.len());
