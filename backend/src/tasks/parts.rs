@@ -62,17 +62,17 @@ struct NewItem {
 /// it, and are told.
 async fn assign_item(state: &AppState, auth: &AuthUser, task: Uuid, item: Uuid, title: &str, user: Option<Uuid>) -> AppResult<()> {
     if let Some(u) = user {
-        let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active)").bind(u).fetch_one(&state.db).await?;
+        let active: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active) AS "v!""#, u).fetch_one(&state.db).await?;
         if !active {
             return Err(AppError::bad("choose an active employee"));
         }
     }
-    sqlx::query("UPDATE task_checklist_items SET assignee_id = $2 WHERE id = $1").bind(item).bind(user).execute(&state.db).await?;
+    sqlx::query!("UPDATE task_checklist_items SET assignee_id = $2 WHERE id = $1", item, user).execute(&state.db).await?;
     if let Some(u) = user {
         if !super::participants(state, task).await.contains(&u) {
-            sqlx::query("INSERT INTO task_members (task_id, user_id, role) VALUES ($1, $2, 'assistant') ON CONFLICT DO NOTHING").bind(task).bind(u).execute(&state.db).await?;
+            sqlx::query!("INSERT INTO task_members (task_id, user_id, role) VALUES ($1, $2, 'assistant') ON CONFLICT DO NOTHING", task, u).execute(&state.db).await?;
         }
-        let t: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+        let t: String = sqlx::query_scalar!("SELECT title FROM tasks WHERE id = $1", task).fetch_one(&state.db).await?;
         notify_task(state, &[u], "task.checklist_assigned", format!("A checklist point is yours: {title}"), Some(t), task, auth.id).await;
     }
     Ok(())
@@ -82,12 +82,8 @@ async fn add_item(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
     let (core, a) = load_task(&state, &auth, id).await?;
     require(a.participate)?;
     let title = required("checklist item", &body.title, 1000)?;
-    let item: Uuid = sqlx::query_scalar(
-        "INSERT INTO task_checklist_items (task_id, title, sort)
-         VALUES ($1, $2, COALESCE((SELECT MAX(sort) FROM task_checklist_items WHERE task_id = $1), 0) + 1) RETURNING id",
-    )
-    .bind(id)
-    .bind(&title)
+    let item: Uuid = sqlx::query_scalar!("INSERT INTO task_checklist_items (task_id, title, sort)
+         VALUES ($1, $2, COALESCE((SELECT MAX(sort) FROM task_checklist_items WHERE task_id = $1), 0) + 1) RETURNING id", id, &title)
     .fetch_one(&state.db)
     .await?;
     if body.assignee_id.is_some() {
@@ -115,16 +111,12 @@ async fn update_item(
 ) -> AppResult<Json<Value>> {
     let (core, a) = load_task(&state, &auth, id).await?;
     require(a.participate)?;
-    let current: (String, bool) = sqlx::query_as("SELECT title, is_done FROM task_checklist_items WHERE id = $1 AND task_id = $2")
-        .bind(item)
-        .bind(id)
+    let current: (String, bool) = sqlx::query!(r#"SELECT title, is_done FROM task_checklist_items WHERE id = $1 AND task_id = $2"#, item, id).map(|r| (r.title, r.is_done))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("checklist item"))?;
     if let Some(t) = &body.title {
-        sqlx::query("UPDATE task_checklist_items SET title = $1 WHERE id = $2")
-            .bind(required("checklist item", t, 1000)?)
-            .bind(item)
+        sqlx::query!("UPDATE task_checklist_items SET title = $1 WHERE id = $2", required("checklist item", t, 1000)?, item)
             .execute(&state.db)
             .await?;
     }
@@ -140,13 +132,13 @@ async fn update_item(
         .execute(&state.db)
         .await?;
         record_history(&state.db, id, auth.id, if done { "checklist_done" } else { "checklist_undone" }, None, Some(current.0.clone())).await?;
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FILTER (WHERE NOT is_done) FROM task_checklist_items WHERE task_id = $1").bind(id).fetch_one(&state.db).await?;
+        let left: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) FILTER (WHERE NOT is_done) AS "v!" FROM task_checklist_items WHERE task_id = $1"#, id).fetch_one(&state.db).await?;
         if done && left == 0 {
             super::automation::fire(&state, id, "checklist_done", auth.id).await;
         }
     }
     if let Some(s) = body.sort {
-        sqlx::query("UPDATE task_checklist_items SET sort = $1 WHERE id = $2").bind(s).bind(item).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_checklist_items SET sort = $1 WHERE id = $2", s, item).execute(&state.db).await?;
     }
     if let Some(a) = body.assignee_id {
         assign_item(&state, &auth, id, item, &current.0, a).await?;
@@ -159,9 +151,7 @@ async fn update_item(
 async fn delete_item(State(state): State<AppState>, auth: AuthUser, Path((id, item)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
     let (core, a) = load_task(&state, &auth, id).await?;
     require(a.participate)?;
-    sqlx::query("DELETE FROM task_checklist_items WHERE id = $1 AND task_id = $2")
-        .bind(item)
-        .bind(id)
+    sqlx::query!("DELETE FROM task_checklist_items WHERE id = $1 AND task_id = $2", item, id)
         .execute(&state.db)
         .await?;
     broadcast_changed(&state, id, core.project_id, false).await;
@@ -264,12 +254,8 @@ async fn add_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     for user in &mentioned {
         let already: bool = participants(&state, id).await.contains(user);
         if !already {
-            let added = sqlx::query(
-                "INSERT INTO task_members (task_id, user_id, role)
-                 SELECT $1, id, 'watcher' FROM users WHERE id = $2 AND is_active ON CONFLICT DO NOTHING",
-            )
-            .bind(id)
-            .bind(user)
+            let added = sqlx::query!("INSERT INTO task_members (task_id, user_id, role)
+                 SELECT $1, id, 'watcher' FROM users WHERE id = $2 AND is_active ON CONFLICT DO NOTHING", id, user)
             .execute(&state.db)
             .await?
             .rows_affected();
@@ -279,10 +265,7 @@ async fn add_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         }
     }
 
-    let cid: Uuid = sqlx::query_scalar("INSERT INTO task_comments (task_id, author_id, body) VALUES ($1, $2, $3) RETURNING id")
-        .bind(id)
-        .bind(auth.id)
-        .bind(&text)
+    let cid: Uuid = sqlx::query_scalar!("INSERT INTO task_comments (task_id, author_id, body) VALUES ($1, $2, $3) RETURNING id", id, auth.id, &text)
         .fetch_one(&state.db)
         .await?;
     touch(&state, id).await;
@@ -297,8 +280,7 @@ async fn add_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
     let mut audience = participants(&state, id).await;
     if let Some(p) = core.project_id {
-        let members: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM project_members WHERE project_id = $1")
-            .bind(p)
+        let members: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM project_members WHERE project_id = $1", p)
             .fetch_all(&state.db)
             .await?;
         audience.extend(members);
@@ -326,9 +308,7 @@ async fn edit_comment(
     if existing.author_id != Some(auth.id) {
         return Err(AppError::bad("you can only edit your own comments"));
     }
-    sqlx::query("UPDATE task_comments SET body = $1, edited_at = now() WHERE id = $2")
-        .bind(required("comment", &body.body, 20_000)?)
-        .bind(cid)
+    sqlx::query!("UPDATE task_comments SET body = $1, edited_at = now() WHERE id = $2", required("comment", &body.body, 20_000)?, cid)
         .execute(&state.db)
         .await?;
     let comment = load_comment(&state, cid).await?;
@@ -346,7 +326,7 @@ async fn delete_comment(State(state): State<AppState>, auth: AuthUser, Path((id,
     if existing.author_id != Some(auth.id) && !a.edit {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("DELETE FROM task_comments WHERE id = $1").bind(cid).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_comments WHERE id = $1", cid).execute(&state.db).await?;
     realtime::publish(
         &state,
         Some(participants(&state, id).await),
@@ -371,7 +351,7 @@ async fn attach_file(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     require(a.participate)?;
     let mut tx = state.db.begin().await?;
     attach_owned_file(&mut tx, id, body.file_id, auth.id).await?;
-    let name: String = sqlx::query_scalar("SELECT original_name FROM files WHERE id = $1").bind(body.file_id).fetch_one(&mut *tx).await?;
+    let name: String = sqlx::query_scalar!("SELECT original_name FROM files WHERE id = $1", body.file_id).fetch_one(&mut *tx).await?;
     record_history(&mut *tx, id, auth.id, "file_added", None, Some(name)).await?;
     tx.commit().await?;
     touch(&state, id).await;
@@ -381,15 +361,13 @@ async fn attach_file(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 async fn detach_file(State(state): State<AppState>, auth: AuthUser, Path((id, file)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
     let (core, a) = load_task(&state, &auth, id).await?;
-    let added_by: Option<Option<Uuid>> = sqlx::query_scalar("SELECT added_by FROM task_files WHERE task_id = $1 AND file_id = $2")
-        .bind(id)
-        .bind(file)
+    let added_by: Option<Option<Uuid>> = sqlx::query_scalar!(r#"SELECT added_by AS "added_by?" FROM task_files WHERE task_id = $1 AND file_id = $2"#, id, file)
         .fetch_optional(&state.db)
         .await?;
     let Some(added_by) = added_by else { return Err(AppError::NotFound("attachment")) };
     require(a.edit || added_by == Some(auth.id))?;
-    sqlx::query("DELETE FROM task_files WHERE task_id = $1 AND file_id = $2").bind(id).bind(file).execute(&state.db).await?;
-    let name: Option<String> = sqlx::query_scalar("SELECT original_name FROM files WHERE id = $1").bind(file).fetch_optional(&state.db).await?;
+    sqlx::query!("DELETE FROM task_files WHERE task_id = $1 AND file_id = $2", id, file).execute(&state.db).await?;
+    let name: Option<String> = sqlx::query_scalar!("SELECT original_name FROM files WHERE id = $1", file).fetch_optional(&state.db).await?;
     record_history(&state.db, id, auth.id, "file_removed", None, name).await?;
     broadcast_changed(&state, id, core.project_id, false).await;
     Ok(Json(json!({ "ok": true })))
@@ -409,9 +387,7 @@ async fn task_chat(State(state): State<AppState>, auth: AuthUser, Path(id): Path
 async fn watch(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let (core, a) = load_task(&state, &auth, id).await?;
     if !(a.is_creator || a.is_responsible || a.is_assistant) {
-        sqlx::query("INSERT INTO task_members (task_id, user_id, role) VALUES ($1, $2, 'watcher') ON CONFLICT DO NOTHING")
-            .bind(id)
-            .bind(auth.id)
+        sqlx::query!("INSERT INTO task_members (task_id, user_id, role) VALUES ($1, $2, 'watcher') ON CONFLICT DO NOTHING", id, auth.id)
             .execute(&state.db)
             .await?;
         broadcast_changed(&state, id, core.project_id, false).await;
@@ -421,9 +397,7 @@ async fn watch(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 
 async fn unwatch(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let (core, _) = load_task(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM task_members WHERE task_id = $1 AND user_id = $2 AND role = 'watcher'")
-        .bind(id)
-        .bind(auth.id)
+    sqlx::query!("DELETE FROM task_members WHERE task_id = $1 AND user_id = $2 AND role = 'watcher'", id, auth.id)
         .execute(&state.db)
         .await?;
     broadcast_changed(&state, id, core.project_id, false).await;
@@ -465,24 +439,18 @@ async fn list_time(State(state): State<AppState>, auth: AuthUser, Path(id): Path
 
 /// Stops the user's running timer wherever it is.
 async fn stop_running(state: &AppState, user: Uuid) -> AppResult<Option<Uuid>> {
-    Ok(sqlx::query_scalar(
-        "UPDATE task_time_entries
+    Ok(sqlx::query_scalar!("UPDATE task_time_entries
          SET stopped_at = now(), seconds = GREATEST(1, EXTRACT(EPOCH FROM (now() - started_at))::int)
-         WHERE user_id = $1 AND stopped_at IS NULL RETURNING task_id",
-    )
-    .bind(user)
+         WHERE user_id = $1 AND stopped_at IS NULL RETURNING task_id", user)
     .fetch_optional(&state.db)
     .await?)
 }
 
 /// Called when a task is finished: everyone's timers on it stop.
 pub async fn stop_all_timers_on(state: &AppState, task: Uuid) -> AppResult<()> {
-    sqlx::query(
-        "UPDATE task_time_entries
+    sqlx::query!("UPDATE task_time_entries
          SET stopped_at = now(), seconds = GREATEST(1, EXTRACT(EPOCH FROM (now() - started_at))::int)
-         WHERE task_id = $1 AND stopped_at IS NULL",
-    )
-    .bind(task)
+         WHERE task_id = $1 AND stopped_at IS NULL", task)
     .execute(&state.db)
     .await?;
     Ok(())
@@ -497,15 +465,12 @@ async fn start_timer(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if let Some(prev) = stop_running(&state, auth.id).await? {
         realtime::publish(&state, Some(vec![auth.id]), "timer.changed", json!({ "task_id": prev, "running": false })).await;
     }
-    sqlx::query("INSERT INTO task_time_entries (task_id, user_id, started_at) VALUES ($1, $2, now())")
-        .bind(id)
-        .bind(auth.id)
+    sqlx::query!("INSERT INTO task_time_entries (task_id, user_id, started_at) VALUES ($1, $2, now())", id, auth.id)
         .execute(&state.db)
         .await?;
     // Starting the clock on a new task means work has started.
     if core.status == "new" && a.participate {
-        sqlx::query("UPDATE tasks SET status = 'in_progress', updated_at = now() WHERE id = $1 AND status = 'new'")
-            .bind(id)
+        sqlx::query!("UPDATE tasks SET status = 'in_progress', updated_at = now() WHERE id = $1 AND status = 'new'", id)
             .execute(&state.db)
             .await?;
         record_history(&state.db, id, auth.id, "status", Some("new".into()), Some("in_progress".into())).await?;
@@ -518,13 +483,9 @@ async fn start_timer(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 async fn stop_timer(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let (core, _) = load_task(&state, &auth, id).await?;
-    let stopped = sqlx::query(
-        "UPDATE task_time_entries
+    let stopped = sqlx::query!("UPDATE task_time_entries
          SET stopped_at = now(), seconds = GREATEST(1, EXTRACT(EPOCH FROM (now() - started_at))::int)
-         WHERE user_id = $1 AND task_id = $2 AND stopped_at IS NULL",
-    )
-    .bind(auth.id)
-    .bind(id)
+         WHERE user_id = $1 AND task_id = $2 AND stopped_at IS NULL", auth.id, id)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -538,11 +499,8 @@ async fn stop_timer(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 
 /// The caller's running timer, for the header indicator.
 async fn my_timer(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let row: Option<(Uuid, i64, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT t.id, t.number, t.title, e.started_at FROM task_time_entries e JOIN tasks t ON t.id = e.task_id
-         WHERE e.user_id = $1 AND e.stopped_at IS NULL",
-    )
-    .bind(auth.id)
+    let row: Option<(Uuid, i64, String, DateTime<Utc>)> = sqlx::query!(r#"SELECT t.id, t.number, t.title, e.started_at FROM task_time_entries e JOIN tasks t ON t.id = e.task_id
+         WHERE e.user_id = $1 AND e.stopped_at IS NULL"#, auth.id).map(|r| (r.id, r.number, r.title, r.started_at))
     .fetch_optional(&state.db)
     .await?;
     Ok(Json(match row {
@@ -590,14 +548,12 @@ async fn add_time(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 
 async fn delete_time(State(state): State<AppState>, auth: AuthUser, Path((id, entry)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
     let (core, a) = load_task(&state, &auth, id).await?;
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM task_time_entries WHERE id = $1 AND task_id = $2")
-        .bind(entry)
-        .bind(id)
+    let owner: Option<Uuid> = sqlx::query_scalar!("SELECT user_id FROM task_time_entries WHERE id = $1 AND task_id = $2", entry, id)
         .fetch_optional(&state.db)
         .await?;
     let Some(owner) = owner else { return Err(AppError::NotFound("time entry")) };
     require(owner == auth.id || a.edit)?;
-    sqlx::query("DELETE FROM task_time_entries WHERE id = $1").bind(entry).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_time_entries WHERE id = $1", entry).execute(&state.db).await?;
     broadcast_changed(&state, id, core.project_id, false).await;
     Ok(Json(json!({ "ok": true })))
 }

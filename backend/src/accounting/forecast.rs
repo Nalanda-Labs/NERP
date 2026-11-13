@@ -68,15 +68,13 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
     let base: String = super::base_currency(&state).await?;
 
     // How each client pays: days late after the due date, and days from invoice to payment.
-    let habits: Vec<(Option<Uuid>, Option<f64>, Option<f64>)> = sqlx::query_as(
-        "WITH paid AS (
+    let habits: Vec<(Option<Uuid>, Option<f64>, Option<f64>)> = sqlx::query!(r#"WITH paid AS (
             SELECT a.party_id, a.date, a.due_date,
                    (SELECT MAX(p.date) FROM acc_allocations al JOIN acc_payments p ON p.id = al.payment_id
                      WHERE al.doc_kind = 'invoice' AND al.doc_id = a.item_id AND p.status = 'posted') AS paid_on
             FROM acc_invoices a WHERE a.status = 'paid')
-         SELECT party_id, AVG(GREATEST(paid_on - COALESCE(due_date, date), 0))::float8, AVG(GREATEST(paid_on - date, 0))::float8
-         FROM paid WHERE paid_on IS NOT NULL GROUP BY ROLLUP (party_id)",
-    )
+         SELECT party_id, AVG(GREATEST(paid_on - COALESCE(due_date, date), 0))::float8 AS "c1", AVG(GREATEST(paid_on - date, 0))::float8 AS "c2"
+         FROM paid WHERE paid_on IS NOT NULL GROUP BY ROLLUP (party_id)"#).map(|r| (r.party_id, r.c1, r.c2))
     .fetch_all(&state.db)
     .await?;
     let mut late: HashMap<Uuid, i64> = HashMap::new();
@@ -96,7 +94,7 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
         }
     }
     // A grand-total row also comes back for an empty set: keep the defaults then.
-    let has_history: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_invoices WHERE status = 'paid')").fetch_one(&state.db).await?;
+    let has_history: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_invoices WHERE status = 'paid') AS "v!""#).fetch_one(&state.db).await?;
     if !has_history {
         all_late = 0;
         all_term = 30;
@@ -107,14 +105,12 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
     let mut flows: Vec<Flow> = Vec::new();
 
     // Open invoices in the books: what is still owed.
-    let open: Vec<(Uuid, NaiveDate, Option<NaiveDate>, Option<Uuid>, Option<String>, Decimal, Option<String>)> = sqlx::query_as(
-        "SELECT a.item_id, a.date, a.due_date, a.party_id, p.title,
+    let open: Vec<(Uuid, NaiveDate, Option<NaiveDate>, Option<Uuid>, Option<String>, Decimal, Option<String>)> = sqlx::query!(r#"SELECT a.item_id AS "item_id!", a.date AS "date!", a.due_date AS "due_date?", a.party_id AS "party_id?", p.title AS "title?",
                 (a.total - a.credited - COALESCE((SELECT SUM(al.amount) FROM acc_allocations al JOIN acc_payments pm ON pm.id = al.payment_id
-                                     WHERE al.doc_kind = 'invoice' AND al.doc_id = a.item_id AND pm.status = 'posted'), 0)) * a.fx_rate,
-                i.title
+                                     WHERE al.doc_kind = 'invoice' AND al.doc_id = a.item_id AND pm.status = 'posted'), 0)) * a.fx_rate AS "c5!",
+                i.title AS "c6?"
          FROM acc_invoices a JOIN crm_items i ON i.id = a.item_id LEFT JOIN crm_items p ON p.id = a.party_id
-         WHERE a.status = 'open'",
-    )
+         WHERE a.status = 'open'"#).map(|r| (r.item_id, r.date, r.due_date, r.party_id, r.title, r.c5, r.c6))
     .fetch_all(&state.db)
     .await?;
     for (id, date, due, party, pname, owed, title) in open {
@@ -126,13 +122,11 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
     }
 
     // CRM invoices not in the books yet (not paid, not lost).
-    let unposted: Vec<(Uuid, String, chrono::DateTime<Utc>, Option<NaiveDate>, Option<Uuid>, Option<String>, Decimal)> = sqlx::query_as(
-        "SELECT i.id, i.title, i.created_at, i.close_date, i.company_id, c.title, i.opportunity_base
+    let unposted: Vec<(Uuid, String, chrono::DateTime<Utc>, Option<NaiveDate>, Option<Uuid>, Option<String>, Decimal)> = sqlx::query!(r#"SELECT i.id AS "id!", i.title AS "title!", i.created_at AS "created_at!", i.close_date AS "close_date?", i.company_id AS "company_id?", c.title AS "c5?", i.opportunity_base AS "opportunity_base!"
          FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
          LEFT JOIN crm_stages s ON s.id = i.stage_id LEFT JOIN crm_items c ON c.id = i.company_id
          WHERE t.kind = 'invoice' AND i.deleted_at IS NULL AND COALESCE(s.semantics, 'process') = 'process'
-           AND NOT EXISTS (SELECT 1 FROM acc_invoices a WHERE a.item_id = i.id AND a.status <> 'void') AND i.opportunity_base > 0",
-    )
+           AND NOT EXISTS (SELECT 1 FROM acc_invoices a WHERE a.item_id = i.id AND a.status <> 'void') AND i.opportunity_base > 0"#).map(|r| (r.id, r.title, r.created_at, r.close_date, r.company_id, r.c5, r.opportunity_base))
     .fetch_all(&state.db)
     .await?;
     for (id, title, created, due, party, pname, amount) in unposted {
@@ -141,24 +135,20 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
     }
 
     // Open deals: what isn't invoiced yet, by the chance of winning.
-    let win_rates: HashMap<Uuid, Decimal> = sqlx::query_as::<_, (Uuid, Decimal)>(
-        "SELECT i.category_id, (COUNT(*) FILTER (WHERE s.semantics = 'success'))::numeric / COUNT(*)
+    let win_rates: HashMap<Uuid, Decimal> = sqlx::query!(r#"SELECT i.category_id AS "category_id!", (COUNT(*) FILTER (WHERE s.semantics = 'success'))::numeric / COUNT(*) AS "c1!"
          FROM crm_items i JOIN crm_stages s ON s.id = i.stage_id
          WHERE i.entity_type = 2 AND i.deleted_at IS NULL AND s.semantics IN ('success', 'failure') AND i.updated_at > now() - interval '1 year'
-         GROUP BY i.category_id",
-    )
+         GROUP BY i.category_id"#).map(|r| (r.category_id, r.c1))
     .fetch_all(&state.db)
     .await?
     .into_iter()
     .collect();
-    let deals: Vec<(Uuid, String, Option<NaiveDate>, Option<Uuid>, Option<String>, Decimal, Option<i16>, Option<Uuid>, Decimal)> = sqlx::query_as(
-        "SELECT i.id, i.title, i.close_date, i.company_id, c.title, i.opportunity_base, i.probability, i.category_id,
+    let deals: Vec<(Uuid, String, Option<NaiveDate>, Option<Uuid>, Option<String>, Decimal, Option<i16>, Option<Uuid>, Decimal)> = sqlx::query!(r#"SELECT i.id AS "id!", i.title AS "title!", i.close_date AS "close_date?", i.company_id AS "company_id?", c.title AS "c4?", i.opportunity_base AS "opportunity_base!", i.probability AS "probability?", i.category_id AS "category_id?",
                 COALESCE((SELECT SUM(x.opportunity_base) FROM crm_items x JOIN crm_entity_types xt ON xt.id = x.entity_type
                           WHERE xt.kind = 'invoice' AND x.deleted_at IS NULL
-                            AND (x.source_item_id = i.id OR x.source_item_id IN (SELECT q.id FROM crm_items q WHERE q.source_item_id = i.id))), 0)
+                            AND (x.source_item_id = i.id OR x.source_item_id IN (SELECT q.id FROM crm_items q WHERE q.source_item_id = i.id))), 0) AS "c8!"
          FROM crm_items i JOIN crm_stages s ON s.id = i.stage_id LEFT JOIN crm_items c ON c.id = i.company_id
-         WHERE i.entity_type = 2 AND i.deleted_at IS NULL AND s.semantics = 'process' AND i.opportunity_base > 0",
-    )
+         WHERE i.entity_type = 2 AND i.deleted_at IS NULL AND s.semantics = 'process' AND i.opportunity_base > 0"#).map(|r| (r.id, r.title, r.close_date, r.company_id, r.c4, r.opportunity_base, r.probability, r.category_id, r.c8))
     .fetch_all(&state.db)
     .await?;
     let mut undated: Vec<Value> = Vec::new();
@@ -180,12 +170,10 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
     }
 
     // Open bills: what is still owed.
-    let bills: Vec<(Uuid, NaiveDate, Option<NaiveDate>, Option<String>, Option<String>, Decimal)> = sqlx::query_as(
-        "SELECT b.id, b.date, b.due_date, p.title, b.reference,
+    let bills: Vec<(Uuid, NaiveDate, Option<NaiveDate>, Option<String>, Option<String>, Decimal)> = sqlx::query!(r#"SELECT b.id AS "id!", b.date AS "date!", b.due_date AS "due_date?", p.title AS "title?", b.reference AS "reference?",
                 (b.total - COALESCE((SELECT SUM(al.amount) FROM acc_allocations al JOIN acc_payments pm ON pm.id = al.payment_id
-                                     WHERE al.doc_kind = 'bill' AND al.doc_id = b.id AND pm.status = 'posted'), 0)) * b.fx_rate
-         FROM acc_bills b LEFT JOIN crm_items p ON p.id = b.party_id WHERE b.status = 'open'",
-    )
+                                     WHERE al.doc_kind = 'bill' AND al.doc_id = b.id AND pm.status = 'posted'), 0)) * b.fx_rate AS "c5!"
+         FROM acc_bills b LEFT JOIN crm_items p ON p.id = b.party_id WHERE b.status = 'open'"#).map(|r| (r.id, r.date, r.due_date, r.title, r.reference, r.c5))
     .fetch_all(&state.db)
     .await?;
     for (id, date, due, pname, reference, owed) in bills {
@@ -207,10 +195,8 @@ async fn forecast(State(state): State<AppState>, auth: AuthUser, Query(q): Query
     }
 
     // Where the bank and cash accounts stand today.
-    let opening: Decimal = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM acc_lines l JOIN acc_accounts a ON a.id = l.account_id
-         JOIN acc_entries e ON e.id = l.entry_id WHERE a.subtype IN ('bank', 'cash') AND e.status <> 'draft' AND l.date <= CURRENT_DATE",
-    )
+    let opening: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(l.debit - l.credit), 0) AS "v!" FROM acc_lines l JOIN acc_accounts a ON a.id = l.account_id
+         JOIN acc_entries e ON e.id = l.entry_id WHERE a.subtype IN ('bank', 'cash') AND e.status <> 'draft' AND l.date <= CURRENT_DATE"#)
     .fetch_one(&state.db)
     .await?;
 

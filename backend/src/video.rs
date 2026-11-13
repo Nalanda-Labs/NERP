@@ -49,7 +49,7 @@ fn max_bytes() -> i64 {
 /// Queues a video's web copy.
 pub async fn queue(state: &AppState, file: Uuid) {
     let r = async {
-        sqlx::query("INSERT INTO file_renditions (file_id, status) VALUES ($1, 'pending') ON CONFLICT (file_id) DO NOTHING").bind(file).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO file_renditions (file_id, status) VALUES ($1, 'pending') ON CONFLICT (file_id) DO NOTHING", file).execute(&state.db).await?;
         crate::jobs::enqueue(&state.db, JOB, json!({ "file_id": file }), None).await?;
         state.job_wakeup.notify_one();
         Ok::<_, AppError>(())
@@ -61,7 +61,7 @@ pub async fn queue(state: &AppState, file: Uuid) {
 }
 
 async fn set(state: &AppState, file: Uuid, status: &str, error: Option<String>) -> anyhow::Result<()> {
-    sqlx::query("UPDATE file_renditions SET status = $2, error = $3, updated_at = now() WHERE file_id = $1").bind(file).bind(status).bind(error).execute(&state.db).await?;
+    sqlx::query!("UPDATE file_renditions SET status = $2, error = $3, updated_at = now() WHERE file_id = $1", file, status, error).execute(&state.db).await?;
     Ok(())
 }
 
@@ -101,7 +101,7 @@ static CONVERTING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1)
 /// Background job: starts a video's conversion (if nobody else has).
 pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     let id: Uuid = serde_json::from_value(payload["file_id"].clone())?;
-    let claimed = sqlx::query("UPDATE file_renditions SET status = 'converting', updated_at = now() WHERE file_id = $1 AND status = 'pending'").bind(id).execute(&state.db).await?.rows_affected();
+    let claimed = sqlx::query!("UPDATE file_renditions SET status = 'converting', updated_at = now() WHERE file_id = $1 AND status = 'pending'", id).execute(&state.db).await?.rows_affected();
     if claimed == 1 {
         let state = state.clone();
         tokio::spawn(async move {
@@ -117,7 +117,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
 
 /// At start-up: conversions cut off by a restart start again.
 pub async fn resume(state: &AppState) {
-    let ids: Vec<Uuid> = sqlx::query_scalar("UPDATE file_renditions SET status = 'pending' WHERE status = 'converting' RETURNING file_id").fetch_all(&state.db).await.unwrap_or_default();
+    let ids: Vec<Uuid> = sqlx::query_scalar!("UPDATE file_renditions SET status = 'pending' WHERE status = 'converting' RETURNING file_id").fetch_all(&state.db).await.unwrap_or_default();
     for id in ids {
         let _ = crate::jobs::enqueue(&state.db, JOB, json!({ "file_id": id }), None).await;
     }
@@ -158,7 +158,7 @@ async fn convert(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         let _ = tokio::fs::remove_dir_all(&tmp).await;
         return set(state, id, "too_big", Some("longer than four hours".into())).await;
     }
-    sqlx::query("UPDATE file_renditions SET duration_secs = $2, width = $3, height = $4 WHERE file_id = $1").bind(id).bind(duration as f32).bind(width as i32).bind(height as i32).execute(&state.db).await?;
+    sqlx::query!("UPDATE file_renditions SET duration_secs = $2, width = $3, height = $4 WHERE file_id = $1", id, duration as f32, width as i32, height as i32).execute(&state.db).await?;
     tokio::fs::create_dir_all(&tmp).await?;
     let result: anyhow::Result<()> = async {
         // Poster: a frame a second in (or from the middle of a short clip).
@@ -167,7 +167,7 @@ async fn convert(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         let src_s = src.to_string_lossy().to_string();
         if ffmpeg(&["-ss", &at, "-i", &src_s, "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2", "-q:v", "4", &poster.to_string_lossy()], 120).await.is_ok() {
             let p = crate::routes::files::store_path(state, f.owner_id, &format!("{}.jpg", stem(&f.original_name)), "image/jpeg", &poster).await?;
-            sqlx::query("UPDATE file_renditions SET poster_file_id = $2 WHERE file_id = $1").bind(id).bind(p).execute(&state.db).await?;
+            sqlx::query!("UPDATE file_renditions SET poster_file_id = $2 WHERE file_id = $1", id, p).execute(&state.db).await?;
         }
         // Already playable everywhere: H.264 (+AAC or no sound) in MP4, at most 1080p.
         let playable = vcodec == "h264" && acodec.as_deref().is_none_or(|a| a == "aac") && container.contains("mp4") && height <= 1080 && width <= 1920;
@@ -188,7 +188,7 @@ async fn convert(state: &AppState, id: Uuid) -> anyhow::Result<()> {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         ffmpeg(&refs, timeout).await?;
         let web = crate::routes::files::store_path(state, f.owner_id, &format!("{}.mp4", stem(&f.original_name)), "video/mp4", &out).await?;
-        sqlx::query("UPDATE file_renditions SET web_file_id = $2, status = 'ready', error = NULL, updated_at = now() WHERE file_id = $1").bind(id).bind(web).execute(&state.db).await?;
+        sqlx::query!("UPDATE file_renditions SET web_file_id = $2, status = 'ready', error = NULL, updated_at = now() WHERE file_id = $1", id, web).execute(&state.db).await?;
         Ok(())
     }
     .await;
@@ -218,7 +218,7 @@ async fn readable(state: &AppState, auth: &Option<crate::auth::AuthUser>, id: Uu
 }
 
 async fn rendition(state: &AppState, id: Uuid) -> AppResult<Option<(String, Option<Uuid>, Option<Uuid>, Option<f32>, Option<i32>, Option<i32>)>> {
-    Ok(sqlx::query_as("SELECT status, web_file_id, poster_file_id, duration_secs, width, height FROM file_renditions WHERE file_id = $1").bind(id).fetch_optional(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT status, web_file_id, poster_file_id, duration_secs, width, height FROM file_renditions WHERE file_id = $1"#, id).map(|r| (r.status, r.web_file_id, r.poster_file_id, r.duration_secs, r.width, r.height)).fetch_optional(&state.db).await?)
 }
 
 /// The video to play: the web copy once made, else the original.

@@ -30,8 +30,7 @@ const PIXEL: &[u8] = &[
 ];
 
 async fn open(State(state): State<AppState>, Path(token): Path<String>) -> Response {
-    let _ = sqlx::query("UPDATE mkt_recipients SET open_count = open_count + 1, opened_at = COALESCE(opened_at, now()) WHERE token = $1 AND status = 'sent'")
-        .bind(&token)
+    let _ = sqlx::query!("UPDATE mkt_recipients SET open_count = open_count + 1, opened_at = COALESCE(opened_at, now()) WHERE token = $1 AND status = 'sent'", &token)
         .execute(&state.db)
         .await;
     ([(header::CONTENT_TYPE, "image/gif"), (header::CACHE_CONTROL, "no-store, max-age=0")], PIXEL).into_response()
@@ -48,26 +47,20 @@ async fn click(State(state): State<AppState>, Path(token): Path<String>, Query(q
     if link_sig(&state, &token, &q.u) != q.s || crate::outbound::check_url(&q.u).is_err() {
         return (StatusCode::BAD_REQUEST, "This link is not valid.").into_response();
     }
-    let rid: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE mkt_recipients SET click_count = click_count + 1, clicked_at = COALESCE(clicked_at, now()), opened_at = COALESCE(opened_at, now()), open_count = GREATEST(open_count, 1)
-         WHERE token = $1 AND status = 'sent' RETURNING id",
-    )
-    .bind(&token)
+    let rid: Option<Uuid> = sqlx::query_scalar!("UPDATE mkt_recipients SET click_count = click_count + 1, clicked_at = COALESCE(clicked_at, now()), opened_at = COALESCE(opened_at, now()), open_count = GREATEST(open_count, 1)
+         WHERE token = $1 AND status = 'sent' RETURNING id", &token)
     .fetch_optional(&state.db)
     .await
     .ok()
     .flatten();
     if let Some(rid) = rid {
-        let _ = sqlx::query("INSERT INTO mkt_clicks (recipient_id, url) VALUES ($1, $2)").bind(rid).bind(&q.u).execute(&state.db).await;
+        let _ = sqlx::query!("INSERT INTO mkt_clicks (recipient_id, url) VALUES ($1, $2)", rid, &q.u).execute(&state.db).await;
     }
     Redirect::to(&q.u).into_response()
 }
 
 async fn recipient(state: &AppState, token: &str) -> AppResult<(Uuid, Option<Uuid>, String, Uuid, String, Option<chrono::DateTime<chrono::Utc>>)> {
-    sqlx::query_as(
-        "SELECT r.id, r.item_id, r.email, c.id, c.name, r.unsubscribed_at FROM mkt_recipients r JOIN mkt_campaigns c ON c.id = r.campaign_id WHERE r.token = $1",
-    )
-    .bind(token)
+    sqlx::query!(r#"SELECT r.id, r.item_id, r.email, c.id AS "c3", c.name, r.unsubscribed_at FROM mkt_recipients r JOIN mkt_campaigns c ON c.id = r.campaign_id WHERE r.token = $1"#, token).map(|r| (r.id, r.item_id, r.email, r.c3, r.name, r.unsubscribed_at))
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("link"))
@@ -83,8 +76,8 @@ fn mask(email: &str) -> String {
 
 async fn unsubscribe_info(State(state): State<AppState>, Path(token): Path<String>) -> AppResult<Json<Value>> {
     let (_, _, email, _, _, at) = recipient(&state, &token).await?;
-    let out: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mkt_optouts WHERE email = $1)").bind(&email).fetch_one(&state.db).await?;
-    let company: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await?;
+    let out: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM mkt_optouts WHERE email = $1) AS "v!""#, &email).fetch_one(&state.db).await?;
+    let company: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await?;
     Ok(Json(json!({ "email": mask(&email), "company": company, "unsubscribed": out || at.is_some() })))
 }
 
@@ -92,13 +85,11 @@ async fn unsubscribe_info(State(state): State<AppState>, Path(token): Path<Strin
 /// clients' one-click POST (any body).
 async fn unsubscribe(State(state): State<AppState>, Path(token): Path<String>) -> AppResult<Json<Value>> {
     let (rid, item, email, campaign, name, at) = recipient(&state, &token).await?;
-    sqlx::query("INSERT INTO mkt_optouts (email, campaign_id, source) VALUES ($1, $2, 'unsubscribed') ON CONFLICT DO NOTHING")
-        .bind(&email)
-        .bind(campaign)
+    sqlx::query!("INSERT INTO mkt_optouts (email, campaign_id, source) VALUES ($1, $2, 'unsubscribed') ON CONFLICT DO NOTHING", &email, campaign)
         .execute(&state.db)
         .await?;
     if at.is_none() {
-        sqlx::query("UPDATE mkt_recipients SET unsubscribed_at = now() WHERE id = $1").bind(rid).execute(&state.db).await?;
+        sqlx::query!("UPDATE mkt_recipients SET unsubscribed_at = now() WHERE id = $1", rid).execute(&state.db).await?;
         if let Some(item) = item {
             let _ = timeline(&state.db, item, "campaign", None, None, json!({ "campaign_id": campaign, "name": name, "event": "unsubscribed" })).await;
         }

@@ -49,11 +49,8 @@ struct Channel {
 }
 
 async fn active(state: &AppState, key: &str) -> AppResult<Channel> {
-    sqlx::query_as(
-        "SELECT id, name, title, greeting, color, ask_details, operators, hours, timezone, offline_message, auto_reply, consent_text, ask_rating
-         FROM chat_channels WHERE key = $1 AND is_active",
-    )
-        .bind(key)
+    sqlx::query_as!(Channel, r#"SELECT id, name, title, greeting, color, ask_details, operators, hours AS "hours?", timezone, offline_message AS "offline_message?", auto_reply AS "auto_reply?", consent_text AS "consent_text?", ask_rating
+         FROM chat_channels WHERE key = $1 AND is_active"#, key)
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("chat"))
@@ -120,21 +117,11 @@ async fn start(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(key):
     }
     let token = random_token(24);
     // Chats nobody wrote in are not kept.
-    sqlx::query("DELETE FROM chat_sessions s WHERE s.started_at < now() - interval '1 day' AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.author = 'visitor')")
+    sqlx::query!("DELETE FROM chat_sessions s WHERE s.started_at < now() - interval '1 day' AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.author = 'visitor')")
         .execute(&state.db)
         .await?;
-    sqlx::query(
-        "INSERT INTO chat_sessions (channel_id, token_hash, visitor_name, visitor_email, page_url, consent_at, offline, visitor_id)
-         VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, $7, $8)",
-    )
-        .bind(c.id)
-        .bind(hash(&token))
-        .bind(name)
-        .bind(email)
-        .bind(b.page_url.and_then(|p| opt(&p, 2000)).filter(|p| p.starts_with("http")))
-        .bind(c.consent_text.is_some())
-        .bind(!super::ops::online(&c.hours, &c.timezone, Utc::now()))
-        .bind(b.visitor_id.as_deref().and_then(|v| Uuid::parse_str(v.trim()).ok()))
+    sqlx::query!("INSERT INTO chat_sessions (channel_id, token_hash, visitor_name, visitor_email, page_url, consent_at, offline, visitor_id)
+         VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, $7, $8)", c.id, hash(&token), name, email, b.page_url.and_then(|p| opt(&p, 2000)).filter(|p| p.starts_with("http")), c.consent_text.is_some(), !super::ops::online(&c.hours, &c.timezone, Utc::now()), b.visitor_id.as_deref().and_then(|v| Uuid::parse_str(v.trim()).ok()))
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "token": token })))
@@ -154,9 +141,7 @@ struct Session {
 }
 
 async fn find(state: &AppState, channel: Uuid, token: &str) -> AppResult<Session> {
-    sqlx::query_as("SELECT id, status, item_id, assigned_to, visitor_name, visitor_email, page_url, offline, rating FROM chat_sessions WHERE channel_id = $1 AND token_hash = $2")
-        .bind(channel)
-        .bind(hash(token))
+    sqlx::query_as!(Session, r#"SELECT id, status, item_id AS "item_id?", assigned_to AS "assigned_to?", visitor_name AS "visitor_name?", visitor_email AS "visitor_email?", page_url AS "page_url?", offline, rating AS "rating?" FROM chat_sessions WHERE channel_id = $1 AND token_hash = $2"#, channel, hash(token))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("chat"))
@@ -174,7 +159,7 @@ async fn poll(State(state): State<AppState>, Path(key): Path<String>, Query(q): 
     let s = find(&state, c.id, &q.token).await?;
     let m = messages(&state, s.id, q.after).await?;
     let operator: Option<String> = match s.assigned_to {
-        Some(u) => sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(u).fetch_optional(&state.db).await?,
+        Some(u) => sqlx::query_scalar!("SELECT first_name FROM users WHERE id = $1", u).fetch_optional(&state.db).await?,
         None => None,
     };
     let list: Vec<Value> = m
@@ -212,13 +197,11 @@ async fn send(State(state): State<AppState>, Path(key): Path<String>, Json(b): J
     if limited(&state, format!("chat:msg:{}", s.id), 30, 60).await? {
         return Err(AppError::TooManyRequests("you are sending messages too fast".into()));
     }
-    let first: bool = !sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM chat_messages WHERE session_id = $1 AND author = 'visitor')")
-        .bind(s.id)
+    let first: bool = !sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM chat_messages WHERE session_id = $1 AND author = 'visitor') AS "v!""#, s.id)
         .fetch_one(&state.db)
         .await?;
-    sqlx::query("INSERT INTO chat_messages (session_id, author, body) VALUES ($1, 'visitor', $2)").bind(s.id).bind(body).execute(&state.db).await?;
-    let unread: i32 = sqlx::query_scalar("UPDATE chat_sessions SET unread = unread + 1, last_message_at = now() WHERE id = $1 RETURNING unread")
-        .bind(s.id)
+    sqlx::query!("INSERT INTO chat_messages (session_id, author, body) VALUES ($1, 'visitor', $2)", s.id, body).execute(&state.db).await?;
+    let unread: i32 = sqlx::query_scalar!("UPDATE chat_sessions SET unread = unread + 1, last_message_at = now() WHERE id = $1 RETURNING unread", s.id)
         .fetch_one(&state.db)
         .await?;
     if first {
@@ -247,8 +230,7 @@ async fn send(State(state): State<AppState>, Path(key): Path<String>, Json(b): J
 
 /// The first message: links the chat to the CRM and gives it to the next operator.
 async fn welcome(state: &AppState, c: &Channel, s: &Session, body: &str) -> AppResult<()> {
-    let active_ops: Vec<Uuid> = sqlx::query_scalar("SELECT h FROM unnest($1::uuid[]) WITH ORDINALITY u(h, n) JOIN users ON users.id = h AND users.is_active ORDER BY n")
-        .bind(&c.operators)
+    let active_ops: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT h AS "h!" FROM unnest($1::uuid[]) WITH ORDINALITY u(h, n) JOIN users ON users.id = h AND users.is_active ORDER BY n"#, &c.operators)
         .fetch_all(&state.db)
         .await?;
     // In turn (skipping those with their fill of chats), or offered to everyone.
@@ -257,14 +239,9 @@ async fn welcome(state: &AppState, c: &Channel, s: &Session, body: &str) -> AppR
     let mut item = s.item_id;
     if item.is_none()
         && let Some(email) = &s.visitor_email {
-            item = sqlx::query_scalar(
-                "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+            item = sqlx::query_scalar!("SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
                  WHERE m.kind = 'email' AND m.normalized = $1 AND i.entity_type IN ($2, $3) AND i.deleted_at IS NULL
-                 ORDER BY (i.entity_type = $2) DESC, i.updated_at DESC LIMIT 1",
-            )
-            .bind(normalize("email", email))
-            .bind(CONTACT)
-            .bind(LEAD)
+                 ORDER BY (i.entity_type = $2) DESC, i.updated_at DESC LIMIT 1", normalize("email", email), CONTACT, LEAD)
             .fetch_optional(&state.db)
             .await?;
         }
@@ -296,15 +273,12 @@ async fn welcome(state: &AppState, c: &Channel, s: &Session, body: &str) -> AppR
         broadcast(state, LEAD, id, false).await;
         item = Some(id);
     }
-    sqlx::query("UPDATE chat_sessions SET item_id = $2, assigned_to = COALESCE(assigned_to, $3), offered_at = CASE WHEN $3 IS NULL THEN offered_at ELSE now() END WHERE id = $1")
-        .bind(s.id)
-        .bind(item)
-        .bind(operator)
+    sqlx::query!("UPDATE chat_sessions SET item_id = $2, assigned_to = COALESCE(assigned_to, $3), offered_at = CASE WHEN $3 IS NULL THEN offered_at ELSE now() END WHERE id = $1", s.id, item, operator)
         .execute(&state.db)
         .await?;
     // The visitor's journey on the website leads to this record.
     if let Some(i) = item {
-        let vid: Option<Uuid> = sqlx::query_scalar("SELECT visitor_id FROM chat_sessions WHERE id = $1").bind(s.id).fetch_one(&state.db).await?;
+        let vid: Option<Uuid> = sqlx::query_scalar!(r#"SELECT visitor_id AS "visitor_id?" FROM chat_sessions WHERE id = $1"#, s.id).fetch_one(&state.db).await?;
         crate::tracking::link_visitor(state, vid.map(|v| v.to_string()).as_deref(), i).await;
     }
     let who = s.visitor_name.clone().unwrap_or_else(|| "A website visitor".into());
@@ -350,10 +324,7 @@ async fn rate(State(state): State<AppState>, Path(key): Path<String>, Json(b): J
     if !(1..=5).contains(&b.rating) {
         return Err(AppError::bad("rate 1 to 5"));
     }
-    sqlx::query("UPDATE chat_sessions SET rating = $2, rating_comment = $3 WHERE id = $1")
-        .bind(s.id)
-        .bind(b.rating)
-        .bind(b.comment.and_then(|x| opt(&x, 2000)))
+    sqlx::query!("UPDATE chat_sessions SET rating = $2, rating_comment = $3 WHERE id = $1", s.id, b.rating, b.comment.and_then(|x| opt(&x, 2000)))
         .execute(&state.db)
         .await?;
     announce(&state, s.id, "chat.changed").await;

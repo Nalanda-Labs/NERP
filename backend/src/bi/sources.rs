@@ -125,9 +125,7 @@ impl Conn {
     }
 
     pub async fn tables(&mut self) -> Result<Vec<String>, String> {
-        sqlx::query_scalar(
-            "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY 1 LIMIT 1000",
-        )
+        sqlx::query_scalar!(r#"SELECT table_schema || '.' || table_name AS "v!" FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY 1 LIMIT 1000"#)
         .fetch_all(&mut self.0)
         .await
         .map_err(short)
@@ -371,19 +369,13 @@ pub fn typed(t: Table) -> (Vec<Column>, Vec<Value>) {
 /// Replaces an imported dataset's rows and columns.
 pub async fn store(state: &AppState, id: Uuid, cols: &[Column], rows: Vec<Value>) -> anyhow::Result<()> {
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM bi_rows WHERE dataset_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM bi_rows WHERE dataset_id = $1", id).execute(&mut *tx).await?;
     for (i, chunk) in rows.chunks(2000).enumerate() {
-        sqlx::query("INSERT INTO bi_rows (dataset_id, n, data) SELECT $1, ($3 + o)::int, e FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS x(e, o)")
-            .bind(id)
-            .bind(Value::Array(chunk.to_vec()))
-            .bind((i * 2000) as i64)
+        sqlx::query!("INSERT INTO bi_rows (dataset_id, n, data) SELECT $1, ($3 + o)::int, e FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS x(e, o)", id, Value::Array(chunk.to_vec()), (i * 2000) as i64)
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query("UPDATE bi_datasets SET columns = $2, row_count = $3, refreshed_at = now(), last_error = NULL WHERE id = $1")
-        .bind(id)
-        .bind(serde_json::to_value(cols)?)
-        .bind(rows.len() as i32)
+    sqlx::query!("UPDATE bi_datasets SET columns = $2, row_count = $3, refreshed_at = now(), last_error = NULL WHERE id = $1", id, serde_json::to_value(cols)?, rows.len() as i32)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

@@ -72,12 +72,7 @@ pub async fn enqueue<'e, E: sqlx::PgExecutor<'e>>(
     payload: Value,
     run_at: Option<DateTime<Utc>>,
 ) -> sqlx::Result<Uuid> {
-    sqlx::query_scalar(
-        "INSERT INTO jobs (kind, payload, run_at) VALUES ($1, $2, COALESCE($3, now())) RETURNING id",
-    )
-    .bind(kind)
-    .bind(payload)
-    .bind(run_at)
+    sqlx::query_scalar!("INSERT INTO jobs (kind, payload, run_at) VALUES ($1, $2, COALESCE($3, now())) RETURNING id", kind, payload, run_at)
     .fetch_one(executor)
     .await
 }
@@ -99,24 +94,16 @@ struct Claimed {
 }
 
 async fn claim(state: &AppState, limit: i64) -> Result<Vec<Claimed>> {
-    let candidates: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM jobs WHERE status = 'pending' AND run_at <= now() ORDER BY run_at LIMIT $1",
-    )
-    .bind(limit)
+    let candidates: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM jobs WHERE status = 'pending' AND run_at <= now() ORDER BY run_at LIMIT $1", limit)
     .fetch_all(&state.db)
     .await?;
 
     let mut claimed = Vec::new();
     for id in candidates {
-        let job: Option<Claimed> = sqlx::query_as(
-            "UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_by = $2,
+        let job: Option<Claimed> = sqlx::query_as!(Claimed, "UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_by = $2,
                  locked_until = now() + make_interval(secs => $3), updated_at = now()
              WHERE id = $1 AND status = 'pending'
-             RETURNING id, kind, payload, attempts, max_attempts",
-        )
-        .bind(id)
-        .bind(&state.instance_id)
-        .bind(LEASE_SECS as f64)
+             RETURNING id, kind, payload, attempts, max_attempts", id, &state.instance_id, LEASE_SECS as f64)
         .fetch_optional(&state.db)
         .await?;
         claimed.extend(job);
@@ -127,11 +114,8 @@ async fn claim(state: &AppState, limit: i64) -> Result<Vec<Claimed>> {
 async fn finish(state: &AppState, job: &Claimed, result: Result<()>) {
     let outcome = match result {
         Ok(()) => {
-            sqlx::query(
-                "UPDATE jobs SET status = 'done', locked_by = NULL, locked_until = NULL, last_error = NULL,
-                     updated_at = now() WHERE id = $1",
-            )
-            .bind(job.id)
+            sqlx::query!("UPDATE jobs SET status = 'done', locked_by = NULL, locked_until = NULL, last_error = NULL,
+                     updated_at = now() WHERE id = $1", job.id)
             .execute(&state.db)
             .await
         }
@@ -145,15 +129,9 @@ async fn finish(state: &AppState, job: &Claimed, result: Result<()>) {
             } else {
                 tracing::warn!(job = %job.id, kind = job.kind, attempt = job.attempts, error, "job failed; will retry");
             }
-            sqlx::query(
-                "UPDATE jobs SET status = $2, last_error = $3, locked_by = NULL, locked_until = NULL,
+            sqlx::query!("UPDATE jobs SET status = $2, last_error = $3, locked_by = NULL, locked_until = NULL,
                      run_at = now() + make_interval(secs => $4), updated_at = now()
-                 WHERE id = $1",
-            )
-            .bind(job.id)
-            .bind(if give_up { "failed" } else { "pending" })
-            .bind(error)
-            .bind(backoff as f64)
+                 WHERE id = $1", job.id, if give_up { "failed" } else { "pending" }, error, backoff as f64)
             .execute(&state.db)
             .await
         }
@@ -194,11 +172,9 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
             state.mailer.send(&email, files).await
         }
         CLEANUP_NOTIFICATIONS => {
-            let deleted = sqlx::query(
-                "DELETE FROM notifications
+            let deleted = sqlx::query!("DELETE FROM notifications
                  WHERE (read_at IS NOT NULL AND created_at < now() - interval '90 days')
-                    OR created_at < now() - interval '365 days'",
-            )
+                    OR created_at < now() - interval '365 days'")
             .execute(&state.db)
             .await?
             .rows_affected();
@@ -206,15 +182,13 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
             Ok(())
         }
         CLEANUP_JOBS => {
-            let deleted = sqlx::query(
-                "DELETE FROM jobs
+            let deleted = sqlx::query!("DELETE FROM jobs
                  WHERE (status = 'done' AND updated_at < now() - interval '7 days')
-                    OR (status = 'failed' AND updated_at < now() - interval '30 days')",
-            )
+                    OR (status = 'failed' AND updated_at < now() - interval '30 days')")
             .execute(&state.db)
             .await?
             .rows_affected();
-            sqlx::query("DELETE FROM webhook_deliveries WHERE status <> 'pending' AND created_at < now() - interval '30 days'").execute(&state.db).await?;
+            sqlx::query!("DELETE FROM webhook_deliveries WHERE status <> 'pending' AND created_at < now() - interval '30 days'").execute(&state.db).await?;
             tracing::info!(deleted, "cleaned up old jobs");
             Ok(())
         }
@@ -273,10 +247,8 @@ async fn run(state: &AppState, kind: &str, payload: &Value) -> Result<()> {
 
 /// Returns jobs whose worker vanished to the queue.
 async fn reap(state: &AppState) -> Result<()> {
-    let n = sqlx::query(
-        "UPDATE jobs SET status = 'pending', locked_by = NULL, locked_until = NULL, updated_at = now()
-         WHERE status = 'running' AND locked_until < now()",
-    )
+    let n = sqlx::query!("UPDATE jobs SET status = 'pending', locked_by = NULL, locked_until = NULL, updated_at = now()
+         WHERE status = 'running' AND locked_until < now()")
     .execute(&state.db)
     .await?
     .rows_affected();

@@ -109,7 +109,7 @@ struct Prefs {
 }
 
 async fn settings(state: &AppState) -> AppResult<(bool, bool)> {
-    Ok(sqlx::query_as("SELECT enabled, geo_enabled FROM checkin_settings WHERE id").fetch_one(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT enabled, geo_enabled FROM checkin_settings WHERE id"#).map(|r| (r.enabled, r.geo_enabled)).fetch_one(&state.db).await?)
 }
 
 async fn today_of(state: &AppState, user: Uuid) -> AppResult<NaiveDate> {
@@ -128,9 +128,7 @@ async fn working_day(state: &AppState, user: Uuid, day: NaiveDate) -> AppResult<
     if !s.work_weekdays.contains(&(day.weekday().number_from_monday() as i32)) || !super::holidays(state, day, day).await?.is_empty() {
         return Ok(false);
     }
-    let away: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM hr_absences WHERE user_id = $1 AND status = 'approved' AND $2 BETWEEN starts_on AND ends_on)")
-        .bind(user)
-        .bind(day)
+    let away: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM hr_absences WHERE user_id = $1 AND status = 'approved' AND $2 BETWEEN starts_on AND ends_on) AS "v!""#, user, day)
         .fetch_one(&state.db)
         .await?;
     Ok(!away)
@@ -140,10 +138,7 @@ async fn today_view(state: &AppState, auth: &AuthUser) -> AppResult<Value> {
     let (enabled, geo) = settings(state).await?;
     let day = today_of(state, auth.id).await?;
     let mine: Option<CheckIn> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT} WHERE k.user_id = $1 AND k.day = $2"))).bind(auth.id).bind(day).fetch_optional(&state.db).await?;
-    let prefs: Option<Prefs> = sqlx::query_as(
-        "SELECT location, location_text, message, send_message, send_geo, chat_id, start_workday, department_id, muted_forever, muted_until FROM checkin_prefs WHERE user_id = $1",
-    )
-    .bind(auth.id)
+    let prefs: Option<Prefs> = sqlx::query_as!(Prefs, r#"SELECT location, location_text AS "location_text?", message AS "message?", send_message, send_geo, chat_id AS "chat_id?", start_workday, department_id AS "department_id?", muted_forever, muted_until AS "muted_until?" FROM checkin_prefs WHERE user_id = $1"#, auth.id)
     .fetch_optional(&state.db)
     .await?;
     let muted = prefs.as_ref().is_some_and(|p| p.muted_forever || p.muted_until.is_some_and(|t| t > Utc::now()));
@@ -184,7 +179,7 @@ async fn postable(state: &AppState, auth: &AuthUser, chat: Uuid) -> AppResult<Ve
 /// After a check-in is posted to a chat, its members get the reminder too (as in a team that
 /// checks in together).
 async fn spread(state: &AppState, members: &[Uuid]) -> AppResult<()> {
-    sqlx::query("INSERT INTO checkin_prefs (user_id) SELECT u FROM unnest($1::uuid[]) AS u ON CONFLICT DO NOTHING").bind(members).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO checkin_prefs (user_id) SELECT u FROM unnest($1::uuid[]) AS u ON CONFLICT DO NOTHING", members).execute(&state.db).await?;
     Ok(())
 }
 
@@ -270,29 +265,14 @@ async fn check_in(State(state): State<AppState>, auth: AuthUser, Json(b): Json<C
         None => vec![],
     };
 
-    let id: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO checkins (user_id, day, status, location, location_text, message, chat_id, latitude, longitude, address, reason, reason_text)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (user_id, day) DO NOTHING RETURNING id",
-    )
-    .bind(auth.id)
-    .bind(day)
-    .bind(&b.status)
-    .bind(&location)
-    .bind(&location_text)
-    .bind(&message)
-    .bind(chat)
-    .bind(lat)
-    .bind(lng)
-    .bind(&address)
-    .bind(&reason)
-    .bind(&reason_text)
+    let id: Option<Uuid> = sqlx::query_scalar!("INSERT INTO checkins (user_id, day, status, location, location_text, message, chat_id, latitude, longitude, address, reason, reason_text)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (user_id, day) DO NOTHING RETURNING id", auth.id, day, &b.status, location.as_deref(), location_text.as_deref(), message.as_deref(), chat, lat, lng, address.as_deref(), reason.as_deref(), reason_text.as_deref())
     .fetch_optional(&state.db)
     .await?;
     let Some(id) = id else { return Err(AppError::Conflict("you have already checked in today".into())) };
 
     // Remember the choices for next time.
-    sqlx::query(
-        "INSERT INTO checkin_prefs (user_id, location, location_text, message, send_message, send_geo, chat_id, start_workday)
+    sqlx::query!("INSERT INTO checkin_prefs (user_id, location, location_text, message, send_message, send_geo, chat_id, start_workday)
          VALUES ($1, COALESCE($2, 'office'), $3, $4, $5, $6, $7, COALESCE($8, FALSE))
          ON CONFLICT (user_id) DO UPDATE SET
             location = COALESCE($2, checkin_prefs.location),
@@ -300,17 +280,7 @@ async fn check_in(State(state): State<AppState>, auth: AuthUser, Json(b): Json<C
             message = CASE WHEN $9 THEN $4 ELSE checkin_prefs.message END,
             send_message = $5, send_geo = CASE WHEN $9 THEN $6 ELSE checkin_prefs.send_geo END,
             chat_id = COALESCE($7, checkin_prefs.chat_id),
-            start_workday = COALESCE($8, checkin_prefs.start_workday), updated_at = now()",
-    )
-    .bind(auth.id)
-    .bind(&location)
-    .bind(&location_text)
-    .bind(&message)
-    .bind(b.send_message)
-    .bind(lat.is_some())
-    .bind(b.chat_id.filter(|_| b.send_message))
-    .bind(b.start_workday)
-    .bind(working)
+            start_workday = COALESCE($8, checkin_prefs.start_workday), updated_at = now()", auth.id, location.as_deref(), location_text.as_deref(), message.as_deref(), b.send_message, lat.is_some(), b.chat_id.filter(|_| b.send_message), b.start_workday, working)
     .execute(&state.db)
     .await?;
 
@@ -369,10 +339,7 @@ async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if b.reason != "custom" {
         text = Some(reason_words(&b.reason, None));
     }
-    sqlx::query("UPDATE checkins SET status = 'cancelled', reason = $2, reason_text = $3, cancelled_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(&b.reason)
-        .bind(&text)
+    sqlx::query!("UPDATE checkins SET status = 'cancelled', reason = $2, reason_text = $3, cancelled_at = now() WHERE id = $1", id, &b.reason, text.as_deref())
         .execute(&state.db)
         .await?;
     if let Some(c) = k.chat_id {
@@ -392,7 +359,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if !own_today && !hr_manager(&auth) {
         return Err(if k.user_id == auth.id { AppError::bad("only today's check-in can be undone") } else { AppError::NotFound("check-in") });
     }
-    sqlx::query("DELETE FROM checkins WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM checkins WHERE id = $1", id).execute(&state.db).await?;
     if k.user_id != auth.id {
         crate::audit::record(&state.db, Some(auth.id), "checkin.delete", "user", Some(k.user_id.to_string()), json!({ "day": k.day }), None).await;
     }
@@ -476,9 +443,8 @@ async fn update_prefs(State(state): State<AppState>, auth: AuthUser, Json(b): Js
         Some("forever") => (Some(true), Some(None)),
         Some(_) => return Err(AppError::bad("mute must be off, day, week or forever")),
     };
-    sqlx::query("INSERT INTO checkin_prefs (user_id) VALUES ($1) ON CONFLICT DO NOTHING").bind(auth.id).execute(&state.db).await?;
-    sqlx::query(
-        "UPDATE checkin_prefs SET
+    sqlx::query!("INSERT INTO checkin_prefs (user_id) VALUES ($1) ON CONFLICT DO NOTHING", auth.id).execute(&state.db).await?;
+    sqlx::query!("UPDATE checkin_prefs SET
             location = COALESCE($2, location),
             location_text = CASE WHEN $3 THEN $4 ELSE location_text END,
             message = CASE WHEN $5 THEN $6 ELSE message END,
@@ -489,24 +455,7 @@ async fn update_prefs(State(state): State<AppState>, auth: AuthUser, Json(b): Js
             muted_forever = COALESCE($14, muted_forever),
             muted_until = CASE WHEN $15 THEN $16 ELSE muted_until END,
             updated_at = now()
-         WHERE user_id = $1",
-    )
-    .bind(auth.id)
-    .bind(&b.location)
-    .bind(location_text.is_some())
-    .bind(location_text.flatten())
-    .bind(message.is_some())
-    .bind(message.flatten())
-    .bind(b.send_message)
-    .bind(b.send_geo)
-    .bind(b.chat_id.is_some())
-    .bind(b.chat_id.flatten())
-    .bind(b.start_workday)
-    .bind(b.department_id.is_some())
-    .bind(b.department_id.flatten())
-    .bind(forever)
-    .bind(until.is_some())
-    .bind(until.flatten())
+         WHERE user_id = $1", auth.id, b.location.as_deref(), location_text.is_some(), location_text.flatten(), message.is_some(), message.flatten(), b.send_message, b.send_geo, b.chat_id.is_some(), b.chat_id.flatten(), b.start_workday, b.department_id.is_some(), b.department_id.flatten(), forever, until.is_some(), until.flatten())
     .execute(&state.db)
     .await?;
     today_view(&state, &auth).await.map(Json)
@@ -525,9 +474,7 @@ struct SettingsInput {
 
 async fn update_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Json<SettingsInput>) -> AppResult<Json<Value>> {
     auth.require(crate::auth::permissions::HR)?;
-    sqlx::query("UPDATE checkin_settings SET enabled = COALESCE($1, enabled), geo_enabled = COALESCE($2, geo_enabled), updated_at = now() WHERE id")
-        .bind(b.enabled)
-        .bind(b.geo_enabled)
+    sqlx::query!("UPDATE checkin_settings SET enabled = COALESCE($1, enabled), geo_enabled = COALESCE($2, geo_enabled), updated_at = now() WHERE id", b.enabled, b.geo_enabled)
         .execute(&state.db)
         .await?;
     crate::audit::record(&state.db, Some(auth.id), "checkin.settings", "settings", None, json!({ "enabled": b.enabled, "geo_enabled": b.geo_enabled }), None).await;
@@ -592,9 +539,7 @@ async fn department_day(State(state): State<AppState>, auth: AuthUser, Path(id):
     };
     let ids: Vec<Uuid> = people.iter().map(|p| p.0).collect();
     let items: Vec<CheckIn> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT} WHERE k.user_id = ANY($1) AND k.day = $2"))).bind(&ids).bind(day).fetch_all(&state.db).await?;
-    let away: Vec<(Uuid, String)> = sqlx::query_as("SELECT user_id, kind FROM hr_absences WHERE user_id = ANY($1) AND status = 'approved' AND $2 BETWEEN starts_on AND ends_on")
-        .bind(&ids)
-        .bind(day)
+    let away: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT user_id, kind FROM hr_absences WHERE user_id = ANY($1) AND status = 'approved' AND $2 BETWEEN starts_on AND ends_on"#, &ids, day).map(|r| (r.user_id, r.kind))
         .fetch_all(&state.db)
         .await?;
     // The location is shown to the department; the exact place only to the person and managers.
@@ -630,10 +575,7 @@ async fn department_month(State(state): State<AppState>, auth: AuthUser, Path(id
     let (name, people) = department_people(&state, &auth, id).await?;
     let (from, to) = month_range(&q.month)?;
     let ids: Vec<Uuid> = people.iter().map(|p| p.0).collect();
-    let rows: Vec<(Uuid, NaiveDate, String, Option<String>)> = sqlx::query_as("SELECT user_id, day, status, location FROM checkins WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3 ORDER BY day")
-        .bind(&ids)
-        .bind(from)
-        .bind(to)
+    let rows: Vec<(Uuid, NaiveDate, String, Option<String>)> = sqlx::query!(r#"SELECT user_id, day, status, location FROM checkins WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3 ORDER BY day"#, &ids, from, to).map(|r| (r.user_id, r.day, r.status, r.location))
         .fetch_all(&state.db)
         .await?;
     let s = super::settings(&state).await?;

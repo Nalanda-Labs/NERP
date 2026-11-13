@@ -90,7 +90,7 @@ pub(crate) fn manifest(path: &std::path::Path) -> Map<String, Value> {
 }
 
 async fn last(state: &AppState, key: &str) -> AppResult<Value> {
-    Ok(sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = $1").bind(key).fetch_optional(&state.db).await?.unwrap_or(Value::Null))
+    Ok(sqlx::query_scalar!("SELECT value FROM settings WHERE key = $1", key).fetch_optional(&state.db).await?.unwrap_or(Value::Null))
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
@@ -119,11 +119,8 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
     let slot_name = std::env::var("WAL_SLOT").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "nerp_wal".into());
     // The slot: whether something reads it now, when it last answered, and how much WAL the
     // server keeps for it (grows without bound while nothing reads it).
-    let slot: Option<(bool, Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query_as(
-        "SELECT s.active, r.reply_time, pg_wal_lsn_diff(pg_current_wal_lsn(), s.restart_lsn)::bigint
-         FROM pg_replication_slots s LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid WHERE s.slot_name = $1",
-    )
-    .bind(&slot_name)
+    let slot: Option<(bool, Option<chrono::DateTime<chrono::Utc>>, Option<i64>)> = sqlx::query!(r#"SELECT s.active AS "active!", r.reply_time AS "reply_time?", pg_wal_lsn_diff(pg_current_wal_lsn(), s.restart_lsn)::bigint AS "c2?"
+         FROM pg_replication_slots s LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid WHERE s.slot_name = $1"#, &slot_name).map(|r| (r.active, r.reply_time, r.c2))
     .fetch_optional(&state.db)
     .await?;
     Ok(Json(json!({
@@ -186,7 +183,7 @@ async fn run(state: &AppState, auth: &AuthUser, ip: Option<&str>, script: &str, 
         };
         let tail: String = text.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
         let v = json!({ "started_at": started, "finished_at": chrono::Utc::now(), "ok": ok, "output": tail });
-        let _ = sqlx::query("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()").bind(key).bind(v).execute(&state.db).await;
+        let _ = sqlx::query!("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key, v).execute(&state.db).await;
         let mut redis = state.redis.clone();
         let _: Result<(), _> = redis.del("backup:running").await;
         if !ok {
@@ -314,7 +311,7 @@ async fn restore_with(state: &AppState, auth: &AuthUser, ip: Option<&str>, scrip
         };
         let tail: String = text.chars().rev().take(4000).collect::<Vec<_>>().into_iter().rev().collect();
         let v = json!({ "started_at": started, "finished_at": chrono::Utc::now(), "ok": ok, "backup": name, "output": tail });
-        let _ = sqlx::query("INSERT INTO settings (key, value) VALUES ('backup_restore_last', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()").bind(v).execute(&state.db).await;
+        let _ = sqlx::query!("INSERT INTO settings (key, value) VALUES ('backup_restore_last', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", v).execute(&state.db).await;
         let mut redis = state.redis.clone();
         let _: Result<(), _> = redis.del("backup:running").await;
         RESTORING.store(false, std::sync::atomic::Ordering::SeqCst);

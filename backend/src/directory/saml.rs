@@ -97,7 +97,7 @@ pub fn acs_url(state: &AppState) -> String {
 }
 
 async fn load(state: &AppState) -> AppResult<(SamlConfig, Option<PKey<Private>>)> {
-    let row: Option<(Value, Option<Vec<u8>>)> = sqlx::query_as("SELECT saml, saml_key FROM directory_config WHERE id = 1").fetch_optional(&state.db).await?;
+    let row: Option<(Value, Option<Vec<u8>>)> = sqlx::query!(r#"SELECT saml, saml_key FROM directory_config WHERE id = 1"#).map(|r| (r.saml, r.saml_key)).fetch_optional(&state.db).await?;
     let (cfg, key) = row.unwrap_or((json!({}), None));
     let key = key
         .and_then(|k| crypto::open(&state.config.data_key, &k))
@@ -136,12 +136,8 @@ async fn own_keys(state: &AppState) -> AppResult<(PKey<Private>, X509)> {
     let key_pem = String::from_utf8(made.0.private_key_to_pem_pkcs8().map_err(|e| AppError::Internal(e.into()))?).map_err(|e| AppError::Internal(e.into()))?;
     let cert_pem = String::from_utf8(made.1.to_pem().map_err(|e| AppError::Internal(e.into()))?).map_err(|e| AppError::Internal(e.into()))?;
     // Only if no other request made them meanwhile.
-    let saved = sqlx::query(
-        "UPDATE directory_config SET saml = jsonb_set(COALESCE(saml, '{}'), '{sp_certificate}', to_jsonb($1::text)), saml_key = $2
-         WHERE id = 1 AND saml_key IS NULL",
-    )
-    .bind(&cert_pem)
-    .bind(crypto::seal(&state.config.data_key, &key_pem))
+    let saved = sqlx::query!("UPDATE directory_config SET saml = jsonb_set(COALESCE(saml, '{}'), '{sp_certificate}', to_jsonb($1::text)), saml_key = $2
+         WHERE id = 1 AND saml_key IS NULL", &cert_pem, crypto::seal(&state.config.data_key, &key_pem))
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -359,19 +355,15 @@ async fn finish(state: &AppState, meta: &ClientMeta, f: AcsForm) -> Result<Uuid,
     if !cfg.allowed_domains.is_empty() && !cfg.allowed_domains.iter().any(|d| d.eq_ignore_ascii_case(&domain)) {
         return Err(format!("accounts from {domain} cannot sign in here"));
     }
-    let found: Option<(Uuid, bool)> = sqlx::query_as(
-        "SELECT id, is_active FROM users WHERE (auth_source = 'saml' AND external_id = $1) OR email = $2
-         ORDER BY (auth_source = 'saml' AND external_id = $1) DESC LIMIT 1",
-    )
-    .bind(&subject)
-    .bind(&email)
+    let found: Option<(Uuid, bool)> = sqlx::query!(r#"SELECT id, is_active FROM users WHERE (auth_source = 'saml' AND external_id = $1) OR email = $2
+         ORDER BY (auth_source = 'saml' AND external_id = $1) DESC LIMIT 1"#, &subject, &email).map(|r| (r.id, r.is_active))
     .fetch_optional(&state.db)
     .await
     .map_err(|e| e.to_string())?;
     let user = match found {
         Some((_, false)) => return Err("this account has been deactivated".into()),
         Some((id, true)) => {
-            sqlx::query("UPDATE users SET invite_pending = FALSE, last_login_at = now() WHERE id = $1").bind(id).execute(&state.db).await.map_err(|e| e.to_string())?;
+            sqlx::query!("UPDATE users SET invite_pending = FALSE, last_login_at = now() WHERE id = $1", id).execute(&state.db).await.map_err(|e| e.to_string())?;
             id
         }
         None if cfg.auto_create => {
@@ -379,11 +371,7 @@ async fn finish(state: &AppState, meta: &ClientMeta, f: AcsForm) -> Result<Uuid,
             let last = attribute(&assertion, LAST).unwrap_or_else(|| "-".into());
             match create(state, &subject, &email, &first, &last).await {
                 Ok(id) => id,
-                Err(AppError::Database(e)) if crate::error::is_unique_violation(&e) => sqlx::query_scalar(
-                    "SELECT id FROM users WHERE (auth_source = 'saml' AND external_id = $1) OR email = $2 LIMIT 1",
-                )
-                .bind(&subject)
-                .bind(&email)
+                Err(AppError::Database(e)) if crate::error::is_unique_violation(&e) => sqlx::query_scalar!("SELECT id FROM users WHERE (auth_source = 'saml' AND external_id = $1) OR email = $2 LIMIT 1", &subject, &email)
                 .fetch_one(&state.db)
                 .await
                 .map_err(|e| e.to_string())?,
@@ -399,17 +387,11 @@ async fn finish(state: &AppState, meta: &ClientMeta, f: AcsForm) -> Result<Uuid,
 async fn create(state: &AppState, subject: &str, email: &str, first: &str, last: &str) -> AppResult<Uuid> {
     let clip = |s: &str| s.trim().chars().take(100).collect::<String>();
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (email, password_hash, first_name, last_name, auth_source, external_id, last_login_at)
-         VALUES ($1, '!sso', $2, $3, 'saml', $4, now()) RETURNING id",
-    )
-    .bind(email)
-    .bind(clip(first))
-    .bind(clip(last))
-    .bind(subject)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO users (email, password_hash, first_name, last_name, auth_source, external_id, last_login_at)
+         VALUES ($1, '!sso', $2, $3, 'saml', $4, now()) RETURNING id", email, clip(first), clip(last), subject)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'", id).execute(&mut *tx).await?;
     audit::record(&mut *tx, None, "user.create", "user", Some(id.to_string()), json!({ "email": email, "source": "saml" }), None).await;
     tx.commit().await?;
     Ok(id)
@@ -500,7 +482,7 @@ pub async fn put_config(State(state): State<AppState>, auth: AuthUser, Json(b): 
     own_keys(&state).await?;
     let (stored, _) = load(&state).await?;
     cfg.sp_certificate = stored.sp_certificate;
-    sqlx::query("UPDATE directory_config SET saml = $1 WHERE id = 1").bind(serde_json::to_value(&cfg).map_err(anyhow::Error::from)?).execute(&state.db).await?;
+    sqlx::query!("UPDATE directory_config SET saml = $1 WHERE id = 1", serde_json::to_value(&cfg).map_err(anyhow::Error::from)?).execute(&state.db).await?;
     audit::record(&state.db, Some(auth.id), "directory.saml_update", "settings", None, json!({ "enabled": cfg.enabled }), None).await;
     Ok(Json(settings(&state).await?))
 }
@@ -515,6 +497,6 @@ pub async fn refresh(State(state): State<AppState>, auth: AuthUser) -> AppResult
     let xml = fetch_metadata(&cfg.metadata_url).await.map_err(bad)?;
     parse_idp(&xml).map_err(bad)?;
     cfg.metadata_xml = xml;
-    sqlx::query("UPDATE directory_config SET saml = $1 WHERE id = 1").bind(serde_json::to_value(&cfg).map_err(anyhow::Error::from)?).execute(&state.db).await?;
+    sqlx::query!("UPDATE directory_config SET saml = $1 WHERE id = 1", serde_json::to_value(&cfg).map_err(anyhow::Error::from)?).execute(&state.db).await?;
     Ok(Json(settings(&state).await?))
 }

@@ -208,7 +208,7 @@ struct TokenResponse {
 }
 
 async fn second_step(state: &AppState, user: Uuid) -> AppResult<Option<Value>> {
-    let has_2fa: bool = sqlx::query_scalar("SELECT totp_secret IS NOT NULL FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await?;
+    let has_2fa: bool = sqlx::query_scalar!(r#"SELECT totp_secret IS NOT NULL AS "v!" FROM users WHERE id = $1"#, user).fetch_one(&state.db).await?;
     crate::routes::auth::second_step(state, user, has_2fa).await
 }
 
@@ -294,12 +294,8 @@ async fn finish(state: &AppState, meta: &ClientMeta, code: String, flow: String)
         return Err(format!("accounts from {domain} cannot sign in here"));
     }
 
-    let found: Option<(Uuid, bool)> = sqlx::query_as(
-        "SELECT id, is_active FROM users WHERE (auth_source = 'sso' AND external_id = $1) OR email = $2
-         ORDER BY (auth_source = 'sso' AND external_id = $1) DESC LIMIT 1",
-    )
-    .bind(&sub)
-    .bind(&email)
+    let found: Option<(Uuid, bool)> = sqlx::query!(r#"SELECT id, is_active FROM users WHERE (auth_source = 'sso' AND external_id = $1) OR email = $2
+         ORDER BY (auth_source = 'sso' AND external_id = $1) DESC LIMIT 1"#, &sub, &email).map(|r| (r.id, r.is_active))
     .fetch_optional(&state.db)
     .await
     .map_err(|e| e.to_string())?;
@@ -307,17 +303,13 @@ async fn finish(state: &AppState, meta: &ClientMeta, code: String, flow: String)
         Some((_, false)) => return Err("this account has been deactivated".into()),
         Some((id, true)) => {
             // Signing in through the provider accepts a pending invitation.
-            sqlx::query("UPDATE users SET invite_pending = FALSE, last_login_at = now() WHERE id = $1").bind(id).execute(&state.db).await.map_err(|e| e.to_string())?;
+            sqlx::query!("UPDATE users SET invite_pending = FALSE, last_login_at = now() WHERE id = $1", id).execute(&state.db).await.map_err(|e| e.to_string())?;
             id
         }
         None if s.sso.auto_create => match create(state, &sub, &email, &info).await {
             Ok(id) => id,
             // Made by another sign-in at the same moment.
-            Err(crate::error::AppError::Database(e)) if crate::error::is_unique_violation(&e) => sqlx::query_scalar(
-                "SELECT id FROM users WHERE (auth_source = 'sso' AND external_id = $1) OR email = $2 LIMIT 1",
-            )
-            .bind(&sub)
-            .bind(&email)
+            Err(crate::error::AppError::Database(e)) if crate::error::is_unique_violation(&e) => sqlx::query_scalar!("SELECT id FROM users WHERE (auth_source = 'sso' AND external_id = $1) OR email = $2 LIMIT 1", &sub, &email)
             .fetch_one(&state.db)
             .await
             .map_err(|e| e.to_string())?,
@@ -339,17 +331,11 @@ async fn create(state: &AppState, sub: &str, email: &str, info: &Value) -> AppRe
         .or_else(|| name.as_ref().map(|n| n.split_whitespace().skip(1).collect::<Vec<_>>().join(" ")).filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "-".into());
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (email, password_hash, first_name, last_name, auth_source, external_id, last_login_at)
-         VALUES ($1, '!sso', $2, $3, 'sso', $4, now()) RETURNING id",
-    )
-    .bind(email)
-    .bind(first)
-    .bind(last)
-    .bind(sub)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO users (email, password_hash, first_name, last_name, auth_source, external_id, last_login_at)
+         VALUES ($1, '!sso', $2, $3, 'sso', $4, now()) RETURNING id", email, first, last, sub)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'", id).execute(&mut *tx).await?;
     audit::record(&mut *tx, None, "user.create", "user", Some(id.to_string()), json!({ "email": email, "source": "sso" }), None).await;
     tx.commit().await?;
     Ok(id)
@@ -399,10 +385,7 @@ pub async fn put_config(State(state): State<AppState>, auth: AuthUser, Json(mut 
     if c.enabled && (c.issuer.is_empty() || c.client_id.is_empty() || !has_secret) {
         return Err(bad("set the issuer, client ID and client secret before turning sign-on on"));
     }
-    sqlx::query("UPDATE directory_config SET sso = $1, sso_secret = CASE WHEN $2 THEN $3 ELSE sso_secret END WHERE id = 1")
-        .bind(serde_json::to_value(&b.cfg).map_err(anyhow::Error::from)?)
-        .bind(secret.is_some())
-        .bind(secret.flatten())
+    sqlx::query!("UPDATE directory_config SET sso = $1, sso_secret = CASE WHEN $2 THEN $3 ELSE sso_secret END WHERE id = 1", serde_json::to_value(&b.cfg).map_err(anyhow::Error::from)?, secret.is_some(), secret.flatten())
         .execute(&state.db)
         .await?;
     audit::record(&state.db, Some(auth.id), "directory.sso_update", "settings", None, json!({ "enabled": b.cfg.enabled, "issuer": b.cfg.issuer }), None).await;

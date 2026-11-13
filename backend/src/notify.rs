@@ -97,33 +97,22 @@ async fn list(
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Page<Notification>>> {
     let unread_only = q.unread.as_deref() == Some("true");
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND (NOT $2 OR read_at IS NULL)",
-    )
-    .bind(auth.id)
-    .bind(unread_only)
+    let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM notifications WHERE user_id = $1 AND (NOT $2 OR read_at IS NULL)"#, auth.id, unread_only)
     .fetch_one(&state.db)
     .await?;
-    let items: Vec<Notification> = sqlx::query_as(
-        "SELECT n.id, n.kind, n.title, n.body, n.link, n.actor_id,
-                CASE WHEN a.id IS NULL THEN NULL ELSE a.first_name || ' ' || a.last_name END AS actor_name,
-                a.avatar_file_id AS actor_avatar_file_id, n.read_at, n.created_at
+    let items: Vec<Notification> = sqlx::query_as!(Notification, r#"SELECT n.id, n.kind, n.title, n.body AS "body?", n.link AS "link?", n.actor_id AS "actor_id?",
+                CASE WHEN a.id IS NULL THEN NULL ELSE a.first_name || ' ' || a.last_name END AS "actor_name?",
+                a.avatar_file_id AS "actor_avatar_file_id?", n.read_at AS "read_at?", n.created_at
          FROM notifications n LEFT JOIN users a ON a.id = n.actor_id
          WHERE n.user_id = $1 AND (NOT $2 OR n.read_at IS NULL)
-         ORDER BY n.created_at DESC LIMIT $3 OFFSET $4",
-    )
-    .bind(auth.id)
-    .bind(unread_only)
-    .bind(q.page.limit())
-    .bind(q.page.offset())
+         ORDER BY n.created_at DESC LIMIT $3 OFFSET $4"#, auth.id, unread_only, q.page.limit(), q.page.offset())
     .fetch_all(&state.db)
     .await?;
     Ok(Json(Page { items, total, limit: q.page.limit(), offset: q.page.offset() }))
 }
 
 async fn count_unread(state: &AppState, user: Uuid) -> AppResult<i64> {
-    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL")
-        .bind(user)
+    Ok(sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM notifications WHERE user_id = $1 AND read_at IS NULL"#, user)
         .fetch_one(&state.db)
         .await?)
 }
@@ -145,11 +134,7 @@ async fn read_one(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
-    let n = sqlx::query(
-        "UPDATE notifications SET read_at = COALESCE(read_at, now()) WHERE id = $1 AND user_id = $2",
-    )
-    .bind(id)
-    .bind(auth.id)
+    let n = sqlx::query!("UPDATE notifications SET read_at = COALESCE(read_at, now()) WHERE id = $1 AND user_id = $2", id, auth.id)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -160,8 +145,7 @@ async fn read_one(
 }
 
 async fn read_all(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    sqlx::query("UPDATE notifications SET read_at = now() WHERE user_id = $1 AND read_at IS NULL")
-        .bind(auth.id)
+    sqlx::query!("UPDATE notifications SET read_at = now() WHERE user_id = $1 AND read_at IS NULL", auth.id)
         .execute(&state.db)
         .await?;
     Ok(Json(broadcast_read(&state, auth.id, None).await?))

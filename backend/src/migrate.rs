@@ -7,7 +7,9 @@
 //! `_sqlx_migrations` table, with sqlx's checksums.
 
 use anyhow::{bail, Context, Result};
-use sqlx::{Acquire, PgPool};
+use sqlx::postgres::PgConnectOptions;
+use sqlx::{Acquire, ConnectOptions, PgPool};
+use std::str::FromStr;
 use std::time::Instant;
 
 /// Splits SQL into statements on `;`, ignoring semicolons inside quotes, comments and
@@ -82,6 +84,35 @@ fn push(out: &mut Vec<String>, stmt: &str) {
     if meaningful {
         out.push(stmt.trim().to_string());
     }
+}
+
+/// Creates the database named in `url` if it doesn't exist yet.
+pub async fn ensure_database(url: &str) -> Result<()> {
+    let opts = PgConnectOptions::from_str(url).context("parsing DATABASE_URL")?;
+    let Some(name) = opts.get_database().map(str::to_owned) else {
+        return Ok(());
+    };
+    // Connect to the default "postgres" database to check for / create ours.
+    let mut conn = opts
+        .clone()
+        .database("postgres")
+        .connect()
+        .await
+        .context("connecting to PostgreSQL")?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+        .bind(&name)
+        .fetch_one(&mut conn)
+        .await?;
+    if !exists {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            anyhow::bail!("database name must be alphanumeric/underscore: {name}");
+        }
+        // `name` was validated as alphanumeric/underscore above.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}"))).execute(&mut conn).await?;
+        tracing::info!("created database {name}");
+    }
+    sqlx::Connection::close(conn).await?;
+    Ok(())
 }
 
 /// Any fixed number: the advisory lock that lets only one instance migrate at a time.

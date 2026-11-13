@@ -38,24 +38,20 @@ pub fn router() -> Router<AppState> {
 
 /// Whether the CRM invoice is in the books (and so can't change its amounts).
 pub async fn locked(state: &AppState, item: Uuid) -> AppResult<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_invoices WHERE item_id = $1 AND status <> 'void')").bind(item).fetch_one(&state.db).await?)
+    Ok(sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_invoices WHERE item_id = $1 AND status <> 'void') AS "v!""#, item).fetch_one(&state.db).await?)
 }
 
 /// What a document still owes: total minus what posted payments allocated to it.
 pub async fn paid(db: impl sqlx::PgExecutor<'_>, kind: &str, doc: Uuid) -> AppResult<Decimal> {
-    Ok(sqlx::query_scalar(
-        "SELECT COALESCE(SUM(a.amount), 0) FROM acc_allocations a JOIN acc_payments p ON p.id = a.payment_id
-         WHERE a.doc_kind = $1 AND a.doc_id = $2 AND p.status = 'posted'",
-    )
-    .bind(kind)
-    .bind(doc)
+    Ok(sqlx::query_scalar!(r#"SELECT COALESCE(SUM(a.amount), 0) AS "v!" FROM acc_allocations a JOIN acc_payments p ON p.id = a.payment_id
+         WHERE a.doc_kind = $1 AND a.doc_id = $2 AND p.status = 'posted'"#, kind, doc)
     .fetch_one(db)
     .await?)
 }
 
 /// Open or paid, from what has been paid. Returns true when it just became paid.
 pub async fn refresh(tx: &mut ledger::Tx<'_>, item: Uuid) -> AppResult<bool> {
-    let row: Option<(Decimal, Decimal, String)> = sqlx::query_as("SELECT total, credited, status FROM acc_invoices WHERE item_id = $1 FOR UPDATE").bind(item).fetch_optional(&mut **tx).await?;
+    let row: Option<(Decimal, Decimal, String)> = sqlx::query!(r#"SELECT total, credited, status FROM acc_invoices WHERE item_id = $1 FOR UPDATE"#, item).map(|r| (r.total, r.credited, r.status)).fetch_optional(&mut **tx).await?;
     let Some((total, credited, status)) = row else { return Ok(false) };
     if status == "void" {
         return Ok(false);
@@ -63,7 +59,7 @@ pub async fn refresh(tx: &mut ledger::Tx<'_>, item: Uuid) -> AppResult<bool> {
     let p = paid(&mut **tx, "invoice", item).await?;
     // Settled by payments, or by credit notes (with or without payments).
     let new = if p + credited < total { "open" } else if credited.is_zero() || p >= total { "paid" } else { "credited" };
-    sqlx::query("UPDATE acc_invoices SET status = $2 WHERE item_id = $1").bind(item).bind(new).execute(&mut **tx).await?;
+    sqlx::query!("UPDATE acc_invoices SET status = $2 WHERE item_id = $1", item, new).execute(&mut **tx).await?;
     Ok(new == "paid" && status != "paid")
 }
 
@@ -74,11 +70,8 @@ pub async fn mark_paid_in_crm(state: &AppState, item: Uuid) {
     if !s.mark_invoices_paid {
         return;
     }
-    let stage: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT s.id, i.stage_semantics FROM crm_items i JOIN crm_stages s ON s.category_id = i.category_id AND s.semantics = 'success'
-         WHERE i.id = $1 AND i.deleted_at IS NULL ORDER BY s.sort LIMIT 1",
-    )
-    .bind(item)
+    let stage: Option<(Uuid, String)> = sqlx::query!(r#"SELECT s.id, i.stage_semantics FROM crm_items i JOIN crm_stages s ON s.category_id = i.category_id AND s.semantics = 'success'
+         WHERE i.id = $1 AND i.deleted_at IS NULL ORDER BY s.sort LIMIT 1"#, item).map(|r| (r.id, r.stage_semantics))
     .fetch_optional(&state.db)
     .await
     .ok()
@@ -173,25 +166,16 @@ async fn detail(State(state): State<AppState>, auth: AuthUser, Path(item): Path<
 
 pub async fn invoice_json(state: &AppState, item: Uuid) -> AppResult<Value> {
     type A = (Uuid, NaiveDate, Option<NaiveDate>, Option<Uuid>, Option<String>, String, Decimal, Decimal, String, Option<i64>, Decimal);
-    let a: Option<A> = sqlx::query_as(
-        "SELECT a.entry_id, a.date, a.due_date, a.party_id, p.title, a.currency, a.fx_rate, a.total, a.status, e.number, a.credited
-         FROM acc_invoices a LEFT JOIN crm_items p ON p.id = a.party_id LEFT JOIN acc_entries e ON e.id = a.entry_id WHERE a.item_id = $1",
-    )
-    .bind(item)
+    let a: Option<A> = sqlx::query!(r#"SELECT a.entry_id AS "entry_id!", a.date AS "date!", a.due_date AS "due_date?", a.party_id AS "party_id?", p.title AS "title?", a.currency AS "currency!", a.fx_rate AS "fx_rate!", a.total AS "total!", a.status AS "status!", e.number AS "number?", a.credited AS "credited!"
+         FROM acc_invoices a LEFT JOIN crm_items p ON p.id = a.party_id LEFT JOIN acc_entries e ON e.id = a.entry_id WHERE a.item_id = $1"#, item).map(|r| (r.entry_id, r.date, r.due_date, r.party_id, r.title, r.currency, r.fx_rate, r.total, r.status, r.number, r.credited))
     .fetch_optional(&state.db)
     .await?;
-    let payments: Vec<(Uuid, i64, NaiveDate, Decimal, String, String)> = sqlx::query_as(
-        "SELECT p.id, p.number, p.date, al.amount, p.status, ac.name FROM acc_allocations al JOIN acc_payments p ON p.id = al.payment_id
-         JOIN acc_accounts ac ON ac.id = p.account_id WHERE al.doc_kind = 'invoice' AND al.doc_id = $1 ORDER BY p.date, p.number",
-    )
-    .bind(item)
+    let payments: Vec<(Uuid, i64, NaiveDate, Decimal, String, String)> = sqlx::query!(r#"SELECT p.id, p.number, p.date, al.amount, p.status, ac.name FROM acc_allocations al JOIN acc_payments p ON p.id = al.payment_id
+         JOIN acc_accounts ac ON ac.id = p.account_id WHERE al.doc_kind = 'invoice' AND al.doc_id = $1 ORDER BY p.date, p.number"#, item).map(|r| (r.id, r.number, r.date, r.amount, r.status, r.name))
     .fetch_all(&state.db)
     .await?;
     let paid = paid(&state.db, "invoice", item).await?;
-    let credits: Vec<(Uuid, i64, NaiveDate, Decimal, Option<String>, String)> = sqlx::query_as(
-        "SELECT id, number, date, amount, reason, status FROM acc_credit_notes WHERE invoice_id = $1 ORDER BY number",
-    )
-    .bind(item)
+    let credits: Vec<(Uuid, i64, NaiveDate, Decimal, Option<String>, String)> = sqlx::query!(r#"SELECT id, number, date, amount, reason, status FROM acc_credit_notes WHERE invoice_id = $1 ORDER BY number"#, item).map(|r| (r.id, r.number, r.date, r.amount, r.reason, r.status))
     .fetch_all(&state.db)
     .await?;
     Ok(match a {
@@ -234,7 +218,7 @@ pub async fn post_one(state: &AppState, auth: &AuthUser, item: Uuid, date: Naive
     }
     let party: Option<Uuid> = match row.company_id {
         Some(c) => Some(c),
-        None => sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort LIMIT 1").bind(item).fetch_optional(&state.db).await?,
+        None => sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort LIMIT 1", item).fetch_optional(&state.db).await?,
     };
     let party = party.ok_or_else(|| AppError::bad("give the invoice a client (company or contact) first"))?;
     let base = super::base_currency(state).await?;
@@ -254,7 +238,7 @@ pub async fn post_one(state: &AppState, auth: &AuthUser, item: Uuid, date: Naive
         for r in &rows {
             let l = crate::crm::money::line(r);
             let account: Option<Uuid> = match r.product_id {
-                Some(p) => sqlx::query_scalar("SELECT income_account_id FROM acc_product_accounts WHERE product_id = $1").bind(p).fetch_optional(&state.db).await?.flatten(),
+                Some(p) => sqlx::query_scalar!("SELECT income_account_id FROM acc_product_accounts WHERE product_id = $1", p).fetch_optional(&state.db).await?.flatten(),
                 None => None,
             };
             *income.entry(account.unwrap_or(sales)).or_default() += l.net;
@@ -297,27 +281,16 @@ pub async fn post_one(state: &AppState, auth: &AuthUser, item: Uuid, date: Naive
     }
 
     let mut tx = state.db.begin().await?;
-    let existing: Option<String> = sqlx::query_scalar("SELECT status FROM acc_invoices WHERE item_id = $1 FOR UPDATE").bind(item).fetch_optional(&mut *tx).await?;
+    let existing: Option<String> = sqlx::query_scalar!("SELECT status FROM acc_invoices WHERE item_id = $1 FOR UPDATE", item).fetch_optional(&mut *tx).await?;
     if existing.as_deref().is_some_and(|s| s != "void") {
         return Err(AppError::Conflict("this invoice is already in the books".into()));
     }
     let memo = format!("Invoice {} · {}", row.number, row.title);
     let entry = ledger::post(&mut tx, date, Some(&memo), "invoice", Some(item), &lines, Some(auth.id)).await?;
-    sqlx::query(
-        "INSERT INTO acc_invoices (item_id, entry_id, date, due_date, party_id, currency, fx_rate, total, status, posted_by, posted_at)
+    sqlx::query!("INSERT INTO acc_invoices (item_id, entry_id, date, due_date, party_id, currency, fx_rate, total, status, posted_by, posted_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9, now())
          ON CONFLICT (item_id) DO UPDATE SET entry_id = EXCLUDED.entry_id, date = EXCLUDED.date, due_date = EXCLUDED.due_date, party_id = EXCLUDED.party_id,
-             currency = EXCLUDED.currency, fx_rate = EXCLUDED.fx_rate, total = EXCLUDED.total, status = 'open', posted_by = EXCLUDED.posted_by, posted_at = now()",
-    )
-    .bind(item)
-    .bind(entry)
-    .bind(date)
-    .bind(row.close_date)
-    .bind(party)
-    .bind(&currency)
-    .bind(fx)
-    .bind(total)
-    .bind(auth.id)
+             currency = EXCLUDED.currency, fx_rate = EXCLUDED.fx_rate, total = EXCLUDED.total, status = 'open', posted_by = EXCLUDED.posted_by, posted_at = now()", item, entry, date, row.close_date, party, &currency, fx, total, auth.id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -334,7 +307,7 @@ struct VoidBody {
 async fn void_invoice(State(state): State<AppState>, auth: AuthUser, Path(item): Path<Uuid>, body: Option<Json<VoidBody>>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
     let mut tx = state.db.begin().await?;
-    let row: Option<(Uuid, String, NaiveDate)> = sqlx::query_as("SELECT entry_id, status, date FROM acc_invoices WHERE item_id = $1 FOR UPDATE").bind(item).fetch_optional(&mut *tx).await?;
+    let row: Option<(Uuid, String, NaiveDate)> = sqlx::query!(r#"SELECT entry_id, status, date FROM acc_invoices WHERE item_id = $1 FOR UPDATE"#, item).map(|r| (r.entry_id, r.status, r.date)).fetch_optional(&mut *tx).await?;
     let (entry, status, date) = row.ok_or(AppError::NotFound("invoice"))?;
     if status == "void" {
         return Err(AppError::bad("this invoice is already void"));
@@ -342,7 +315,7 @@ async fn void_invoice(State(state): State<AppState>, auth: AuthUser, Path(item):
     if !paid(&mut *tx, "invoice", item).await?.is_zero() {
         return Err(AppError::bad("payments are allocated to this invoice; void those payments first"));
     }
-    let credited: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_credit_notes WHERE invoice_id = $1 AND status = 'posted')").bind(item).fetch_one(&mut *tx).await?;
+    let credited: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_credit_notes WHERE invoice_id = $1 AND status = 'posted') AS "v!""#, item).fetch_one(&mut *tx).await?;
     if credited {
         return Err(AppError::bad("credit notes are posted against this invoice; void them first"));
     }
@@ -351,7 +324,7 @@ async fn void_invoice(State(state): State<AppState>, auth: AuthUser, Path(item):
         None => void_date(&state, date).await?,
     };
     ledger::reverse(&mut tx, entry, when, Some(auth.id)).await?;
-    sqlx::query("UPDATE acc_invoices SET status = 'void' WHERE item_id = $1").bind(item).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_invoices SET status = 'void' WHERE item_id = $1", item).execute(&mut *tx).await?;
     tx.commit().await?;
     let _ = crate::crm::timeline(&state.db, item, "accounting", Some(auth.id), None, json!({ "event": "voided" })).await;
     audit::record(&state.db, Some(auth.id), "accounting.invoice_void", "crm_item", Some(item.to_string()), json!({}), None).await;

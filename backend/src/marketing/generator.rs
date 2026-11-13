@@ -67,11 +67,7 @@ async fn load(state: &AppState, id: Uuid) -> AppResult<Generator> {
 }
 
 async fn describe(state: &AppState, g: &Generator) -> AppResult<Value> {
-    let (made, segment): (i64, Option<String>) = sqlx::query_as(
-        "SELECT (SELECT COUNT(*) FROM mkt_generator_items WHERE generator_id = $1), (SELECT name FROM mkt_segments WHERE id = $2)",
-    )
-    .bind(g.id)
-    .bind(g.segment_id)
+    let (made, segment): (i64, Option<String>) = sqlx::query!(r#"SELECT (SELECT COUNT(*) FROM mkt_generator_items WHERE generator_id = $1) AS "c0!", (SELECT name FROM mkt_segments WHERE id = $2) AS "c1?""#, g.id, g.segment_id).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
     let mut v = serde_json::to_value(g).unwrap_or_default();
@@ -95,12 +91,9 @@ async fn get_one(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
     require(&auth)?;
     let g = load(&state, id).await?;
     let mut v = describe(&state, &g).await?;
-    let recent: Vec<(Uuid, Uuid, String, i64, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT g.item_id, g.client_id, i.title, i.number, c.title, g.created_at FROM mkt_generator_items g
+    let recent: Vec<(Uuid, Uuid, String, i64, String, DateTime<Utc>)> = sqlx::query!(r#"SELECT g.item_id, g.client_id, i.title, i.number, c.title AS "c4", g.created_at FROM mkt_generator_items g
          JOIN crm_items i ON i.id = g.item_id JOIN crm_items c ON c.id = g.client_id
-         WHERE g.generator_id = $1 ORDER BY g.created_at DESC LIMIT 50",
-    )
-    .bind(id)
+         WHERE g.generator_id = $1 ORDER BY g.created_at DESC LIMIT 50"#, id).map(|r| (r.item_id, r.client_id, r.title, r.number, r.c4, r.created_at))
     .fetch_all(&state.db)
     .await?;
     v["recent"] = json!(recent.into_iter().map(|(i, c, t, n, ct, at)| json!({ "item_id": i, "client_id": c, "title": t, "number": n, "client": ct, "created_at": at })).collect::<Vec<_>>());
@@ -138,7 +131,7 @@ async fn check(state: &AppState, g: &Generator) -> AppResult<()> {
         if g.user_ids.is_empty() || g.user_ids.len() > 100 {
             return Err(AppError::bad("choose who gets the records"));
         }
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest").bind(&g.user_ids).fetch_one(&state.db).await?;
+        let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest"#, &g.user_ids).fetch_one(&state.db).await?;
         if n as usize != g.user_ids.len() {
             return Err(AppError::bad("choose active employees"));
         }
@@ -148,15 +141,13 @@ async fn check(state: &AppState, g: &Generator) -> AppResult<()> {
     }
     if g.target == DEAL || g.target == LEAD {
         if let Some(c) = g.category_id {
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2)").bind(c).bind(g.target).fetch_one(&state.db).await?;
+            let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2) AS "v!""#, c, g.target).fetch_one(&state.db).await?;
             if !ok {
                 return Err(AppError::bad("that pipeline is for another kind of record"));
             }
         }
         if let Some(s) = g.stage_id {
-            let cat: Option<Uuid> = sqlx::query_scalar("SELECT s.category_id FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1 AND c.entity_type = $2 AND s.semantics = 'process'")
-                .bind(s)
-                .bind(g.target)
+            let cat: Option<Uuid> = sqlx::query_scalar!("SELECT s.category_id FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1 AND c.entity_type = $2 AND s.semantics = 'process'", s, g.target)
                 .fetch_optional(&state.db)
                 .await?;
             match cat {
@@ -201,24 +192,8 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bod
     };
     check(&state, &g).await?;
     g.next_run_at = g.is_active.then(|| b.start_at.unwrap_or_else(Utc::now));
-    sqlx::query(
-        "INSERT INTO mkt_generators (id, name, segment_id, target, category_id, stage_id, title, assign, user_ids, skip_open, repeat, next_run_at, is_active, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
-    )
-    .bind(g.id)
-    .bind(&g.name)
-    .bind(g.segment_id)
-    .bind(g.target)
-    .bind(g.category_id)
-    .bind(g.stage_id)
-    .bind(&g.title)
-    .bind(&g.assign)
-    .bind(&g.user_ids)
-    .bind(g.skip_open)
-    .bind(&g.repeat)
-    .bind(g.next_run_at)
-    .bind(g.is_active)
-    .bind(auth.id)
+    sqlx::query!("INSERT INTO mkt_generators (id, name, segment_id, target, category_id, stage_id, title, assign, user_ids, skip_open, repeat, next_run_at, is_active, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", g.id, &g.name, g.segment_id, g.target, g.category_id, g.stage_id, &g.title, &g.assign, &g.user_ids, g.skip_open, &g.repeat, g.next_run_at, g.is_active, auth.id)
     .execute(&state.db)
     .await?;
     // Due now (e.g. "start now"): queue it at once rather than at the next minute's check.
@@ -269,23 +244,8 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         (true, Some(at)) => Some(at),
         (true, None) => g.next_run_at.or_else(|| (g.repeat != "once" && g.last_run_at.is_some()).then(|| next_after(&g.repeat, Utc::now())).flatten()),
     };
-    sqlx::query(
-        "UPDATE mkt_generators SET name = $2, segment_id = $3, target = $4, category_id = $5, stage_id = $6, title = $7, assign = $8, user_ids = $9,
-             skip_open = $10, repeat = $11, is_active = $12, next_run_at = $13, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(&g.name)
-    .bind(g.segment_id)
-    .bind(g.target)
-    .bind(g.category_id)
-    .bind(g.stage_id)
-    .bind(&g.title)
-    .bind(&g.assign)
-    .bind(&g.user_ids)
-    .bind(g.skip_open)
-    .bind(&g.repeat)
-    .bind(g.is_active)
-    .bind(next)
+    sqlx::query!("UPDATE mkt_generators SET name = $2, segment_id = $3, target = $4, category_id = $5, stage_id = $6, title = $7, assign = $8, user_ids = $9,
+             skip_open = $10, repeat = $11, is_active = $12, next_run_at = $13, updated_at = now() WHERE id = $1", id, &g.name, g.segment_id, g.target, g.category_id, g.stage_id, &g.title, &g.assign, &g.user_ids, g.skip_open, &g.repeat, g.is_active, next)
     .execute(&state.db)
     .await?;
     // Due now (e.g. "start now"): queue it at once rather than at the next minute's check.
@@ -296,7 +256,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let n = sqlx::query("DELETE FROM mkt_generators WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM mkt_generators WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("generator"));
     }
@@ -368,10 +328,8 @@ fn fill(template: &str, name: &str, now: DateTime<Utc>) -> String {
 
 /// Generators due: each is claimed (so one run happens) and queued.
 pub async fn run_due(state: &AppState) -> anyhow::Result<()> {
-    let due: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE mkt_generators SET next_run_at = NULL WHERE id IN (SELECT id FROM mkt_generators WHERE is_active AND next_run_at <= now() ORDER BY next_run_at LIMIT 10 FOR UPDATE SKIP LOCKED)
-         RETURNING id",
-    )
+    let due: Vec<Uuid> = sqlx::query_scalar!("UPDATE mkt_generators SET next_run_at = NULL WHERE id IN (SELECT id FROM mkt_generators WHERE is_active AND next_run_at <= now() ORDER BY next_run_at LIMIT 10 FOR UPDATE SKIP LOCKED)
+         RETURNING id")
     .fetch_all(&state.db)
     .await?;
     for id in due {
@@ -393,7 +351,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     let cs = match clients(state, &g).await {
         Ok(c) => c,
         Err(e) => {
-            sqlx::query("UPDATE mkt_generators SET last_run_at = now(), last_result = $2 WHERE id = $1").bind(id).bind(json!({ "error": e.to_string() })).execute(&state.db).await?;
+            sqlx::query!("UPDATE mkt_generators SET last_run_at = now(), last_result = $2 WHERE id = $1", id, json!({ "error": e.to_string() })).execute(&state.db).await?;
             return Ok(());
         }
     };
@@ -428,7 +386,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
         match create_item(state, &auth, &t, body, Some(c.id)).await {
             Ok(item) => {
                 created += 1;
-                sqlx::query("INSERT INTO mkt_generator_items (generator_id, client_id, item_id) VALUES ($1, $2, $3)").bind(id).bind(c.id).bind(item).execute(&state.db).await?;
+                sqlx::query!("INSERT INTO mkt_generator_items (generator_id, client_id, item_id) VALUES ($1, $2, $3)", id, c.id, item).execute(&state.db).await?;
                 crate::crm::broadcast(state, t.id, item, false).await;
             }
             Err(e) => {
@@ -439,15 +397,8 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     }
     // A scheduled run sets the next one; running by hand leaves the schedule as it was.
     let next = if manual { None } else { next_after(&g.repeat, now) };
-    sqlx::query(
-        "UPDATE mkt_generators SET last_run_at = now(), last_result = $2, next_user = $3,
-             next_run_at = CASE WHEN $5 THEN next_run_at ELSE $4 END WHERE id = $1",
-    )
-    .bind(id)
-    .bind(json!({ "created": created, "skipped": skipped, "failed": failed, "manual": manual }))
-    .bind((turn % g.user_ids.len().max(1)) as i32)
-    .bind(next)
-    .bind(manual)
+    sqlx::query!("UPDATE mkt_generators SET last_run_at = now(), last_result = $2, next_user = $3,
+             next_run_at = CASE WHEN $5 THEN next_run_at ELSE $4 END WHERE id = $1", id, json!({ "created": created, "skipped": skipped, "failed": failed, "manual": manual }), (turn % g.user_ids.len().max(1)) as i32, next, manual)
     .execute(&state.db)
     .await?;
     if let Some(by) = g.created_by {

@@ -165,10 +165,7 @@ pub struct Detail {
 
 async fn attach_contact_details(state: &AppState, rows: &mut [Row]) -> AppResult<()> {
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
-    let mf: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT item_id, kind, value FROM crm_multifields WHERE item_id = ANY($1) AND kind IN ('phone', 'email') ORDER BY sort",
-    )
-    .bind(&ids)
+    let mf: Vec<(Uuid, String, String)> = sqlx::query!(r#"SELECT item_id, kind, value FROM crm_multifields WHERE item_id = ANY($1) AND kind IN ('phone', 'email') ORDER BY sort"#, &ids).map(|r| (r.item_id, r.kind, r.value))
     .fetch_all(&state.db)
     .await?;
     let mut first: HashMap<(Uuid, &str), String> = HashMap::new();
@@ -210,8 +207,7 @@ pub async fn load_detail(state: &AppState, auth: &AuthUser, t: &EntityType, id: 
     if let Value::Object(m) = &mut row.uf {
         m.retain(|k, _| codes.contains(k) && !hidden.contains(k));
     }
-    let multifields: Vec<Multifield> = sqlx::query_as("SELECT id, kind, value_type, value FROM crm_multifields WHERE item_id = $1 ORDER BY kind, sort")
-        .bind(id)
+    let multifields: Vec<Multifield> = sqlx::query_as!(Multifield, "SELECT id, kind, value_type, value FROM crm_multifields WHERE item_id = $1 ORDER BY kind, sort", id)
         .fetch_all(&state.db)
         .await?;
     let contacts: Vec<Linked> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -675,9 +671,7 @@ fn parse_multifields(v: &Value) -> AppResult<Vec<(String, String, String, String
 }
 
 async fn check_link(state: &AppState, id: Uuid, want: i16, what: &str) -> AppResult<()> {
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND entity_type = $2 AND deleted_at IS NULL)")
-        .bind(id)
-        .bind(want)
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND entity_type = $2 AND deleted_at IS NULL) AS "v!""#, id, want)
         .fetch_one(&state.db)
         .await?;
     if ok { Ok(()) } else { Err(AppError::bad(format!("{what} not found"))) }
@@ -757,7 +751,7 @@ pub async fn apply(
                     Ok(s) => s,
                     Err(e) => {
                         let s = text(v, k, 60)?;
-                        let own: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_traffic_sources WHERE code = $1)").bind(&s).fetch_one(&mut **tx).await?;
+                        let own: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_traffic_sources WHERE code = $1) AS "v!""#, s.as_deref()).fetch_one(&mut **tx).await?;
                         if !own {
                             return Err(e);
                         }
@@ -821,7 +815,7 @@ pub async fn apply(
             "assigned_to" => {
                 let a = uuid(v, "responsible")?;
                 if let Some(u) = a {
-                    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active)").bind(u).fetch_one(&state.db).await?;
+                    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active) AS "v!""#, u).fetch_one(&state.db).await?;
                     if !ok {
                         return Err(AppError::bad("responsible person not found"));
                     }
@@ -851,8 +845,7 @@ pub async fn apply(
             Some(s) => stage(state, s).await?,
             None => {
                 // Pipeline changed without a stage: first open stage of the new pipeline.
-                let first: Uuid = sqlx::query_scalar("SELECT id FROM crm_stages WHERE category_id = $1 AND semantics = 'process' ORDER BY sort LIMIT 1")
-                    .bind(explicit_cat.or(cur_cat))
+                let first: Uuid = sqlx::query_scalar!("SELECT id FROM crm_stages WHERE category_id = $1 AND semantics = 'process' ORDER BY sort LIMIT 1", explicit_cat.or(cur_cat))
                     .fetch_optional(&state.db)
                     .await?
                     .ok_or_else(|| AppError::bad("that pipeline has no open stages"))?;
@@ -862,7 +855,7 @@ pub async fn apply(
         if explicit_cat.is_some_and(|c| c != new_stage.category_id) {
             return Err(AppError::bad("that stage belongs to another pipeline"));
         }
-        let cat_type: i16 = sqlx::query_scalar("SELECT entity_type FROM crm_categories WHERE id = $1").bind(new_stage.category_id).fetch_one(&state.db).await?;
+        let cat_type: i16 = sqlx::query_scalar!("SELECT entity_type FROM crm_categories WHERE id = $1", new_stage.category_id).fetch_one(&state.db).await?;
         if cat_type != t.id {
             return Err(AppError::bad("that pipeline belongs to another record type"));
         }
@@ -896,26 +889,16 @@ pub async fn apply(
     qb.build().execute(&mut **tx).await?;
     if let Some((_, to)) = ch.stage {
         // Stage history feeds the funnel report.
-        sqlx::query(
-            "INSERT INTO crm_stage_history (item_id, category_id, stage_id, semantics) SELECT $1, category_id, id, semantics FROM crm_stages WHERE id = $2",
-        )
-        .bind(id)
-        .bind(to)
+        sqlx::query!("INSERT INTO crm_stage_history (item_id, category_id, stage_id, semantics) SELECT $1, category_id, id, semantics FROM crm_stages WHERE id = $2", id, to)
         .execute(&mut **tx)
         .await?;
     }
 
     if let Some(v) = body.get("multifields") {
         let mf = parse_multifields(v)?;
-        sqlx::query("DELETE FROM crm_multifields WHERE item_id = $1").bind(id).execute(&mut **tx).await?;
+        sqlx::query!("DELETE FROM crm_multifields WHERE item_id = $1", id).execute(&mut **tx).await?;
         for (i, (kind, vt, value, norm)) in mf.iter().enumerate() {
-            sqlx::query("INSERT INTO crm_multifields (item_id, kind, value_type, value, normalized, sort) VALUES ($1, $2, $3, $4, $5, $6)")
-                .bind(id)
-                .bind(kind)
-                .bind(vt)
-                .bind(value)
-                .bind(norm)
-                .bind(i as i32)
+            sqlx::query!("INSERT INTO crm_multifields (item_id, kind, value_type, value, normalized, sort) VALUES ($1, $2, $3, $4, $5, $6)", id, kind, vt, value, norm, i as i32)
                 .execute(&mut **tx)
                 .await?;
         }
@@ -930,13 +913,9 @@ pub async fn apply(
         for c in &ids {
             check_link(state, *c, CONTACT, "contact").await?;
         }
-        sqlx::query("DELETE FROM crm_item_contacts WHERE item_id = $1").bind(id).execute(&mut **tx).await?;
+        sqlx::query!("DELETE FROM crm_item_contacts WHERE item_id = $1", id).execute(&mut **tx).await?;
         for (i, c) in ids.iter().enumerate() {
-            sqlx::query("INSERT INTO crm_item_contacts (item_id, contact_id, is_primary, sort) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING")
-                .bind(id)
-                .bind(c)
-                .bind(i == 0)
-                .bind(i as i32)
+            sqlx::query!("INSERT INTO crm_item_contacts (item_id, contact_id, is_primary, sort) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", id, c, i == 0, i as i32)
                 .execute(&mut **tx)
                 .await?;
         }
@@ -966,18 +945,15 @@ pub const REQUIRABLE: &[(&str, &str)] = &[
 ];
 
 async fn check_stage_fields(tx: &mut sqlx::Transaction<'_, Postgres>, t: &EntityType, id: Uuid, stage: Uuid) -> AppResult<()> {
-    let (required, stage_name): (Vec<String>, String) = sqlx::query_as("SELECT required_fields, name FROM crm_stages WHERE id = $1").bind(stage).fetch_one(&mut **tx).await?;
+    let (required, stage_name): (Vec<String>, String) = sqlx::query!(r#"SELECT required_fields, name FROM crm_stages WHERE id = $1"#, stage).map(|r| (r.required_fields, r.name)).fetch_one(&mut **tx).await?;
     if required.is_empty() {
         return Ok(());
     }
-    let item: Value = sqlx::query_scalar(
-        "SELECT jsonb_build_object('opportunity', NULLIF(opportunity, 0), 'company_id', company_id, 'close_date', close_date, 'probability', probability,
+    let item: Value = sqlx::query_scalar!(r#"SELECT jsonb_build_object('opportunity', NULLIF(opportunity, 0), 'company_id', company_id, 'close_date', close_date, 'probability', probability,
             'source', source, 'source_details', source_details, 'comments', comments, 'first_name', first_name, 'last_name', last_name,
             'company_name', company_name, 'job_title', job_title, 'assigned_to', assigned_to, 'uf', uf,
-            'contact_ids', CASE WHEN EXISTS (SELECT 1 FROM crm_item_contacts c WHERE c.item_id = i.id) THEN TRUE END)
-         FROM crm_items i WHERE i.id = $1",
-    )
-    .bind(id)
+            'contact_ids', CASE WHEN EXISTS (SELECT 1 FROM crm_item_contacts c WHERE c.item_id = i.id) THEN TRUE END) AS "v!"
+         FROM crm_items i WHERE i.id = $1"#, id)
     .fetch_one(&mut **tx)
     .await?;
     let empty = |v: &Value| match v {
@@ -986,7 +962,7 @@ async fn check_stage_fields(tx: &mut sqlx::Transaction<'_, Postgres>, t: &Entity
         Value::Array(a) => a.is_empty(),
         _ => false,
     };
-    let labels: Vec<(String, String)> = sqlx::query_as("SELECT code, label FROM crm_field_defs WHERE entity_type = $1").bind(t.id).fetch_all(&mut **tx).await?;
+    let labels: Vec<(String, String)> = sqlx::query!(r#"SELECT code, label FROM crm_field_defs WHERE entity_type = $1"#, t.id).map(|r| (r.code, r.label)).fetch_all(&mut **tx).await?;
     let missing: Vec<String> = required
         .iter()
         .filter(|c| match c.strip_prefix("uf.") {
@@ -1012,11 +988,8 @@ type DerivedSource = (i64, String, Option<String>, Option<String>, Option<String
 /// Recomputes derived columns: display title, search text, amount in base currency.
 pub async fn refresh_derived(state: &AppState, tx: &mut sqlx::Transaction<'_, Postgres>, t: &EntityType, id: Uuid) -> AppResult<()> {
     let r: DerivedSource =
-        sqlx::query_as(
-            "SELECT number, title, honorific, first_name, middle_name, last_name, company_name, job_title, opportunity, currency
-             FROM crm_items WHERE id = $1",
-        )
-        .bind(id)
+        sqlx::query!(r#"SELECT number, title, honorific, first_name, middle_name, last_name, company_name, job_title, opportunity, currency
+             FROM crm_items WHERE id = $1"#, id).map(|r| (r.number, r.title, r.honorific, r.first_name, r.middle_name, r.last_name, r.company_name, r.job_title, r.opportunity, r.currency))
         .fetch_one(&mut **tx)
         .await?;
     let (number, title, _hon, first, middle, last, company, job, opportunity, currency) = r;
@@ -1031,14 +1004,13 @@ pub async fn refresh_derived(state: &AppState, tx: &mut sqlx::Transaction<'_, Po
         },
         _ => title.clone(),
     };
-    let mut mf: Vec<(String, String)> = sqlx::query_as("SELECT value, normalized FROM crm_multifields WHERE item_id = $1")
-        .bind(id)
+    let mut mf: Vec<(String, String)> = sqlx::query!(r#"SELECT value, normalized FROM crm_multifields WHERE item_id = $1"#, id).map(|r| (r.value, r.normalized))
         .fetch_all(&mut **tx)
         .await?;
     // Tax and registration numbers from requisites ("DE123456789"), and legal names.
-    let ids: Vec<(String, String)> = sqlx::query_as("SELECT value, value FROM crm_requisite_ids WHERE item_id = $1").bind(id).fetch_all(&mut **tx).await?;
+    let ids: Vec<(String, String)> = sqlx::query!(r#"SELECT value, value AS "c1" FROM crm_requisite_ids WHERE item_id = $1"#, id).map(|r| (r.value, r.c1)).fetch_all(&mut **tx).await?;
     mf.extend(ids);
-    let legal: Vec<String> = sqlx::query_scalar("SELECT name FROM crm_requisites WHERE item_id = $1 LIMIT 5").bind(id).fetch_all(&mut **tx).await?;
+    let legal: Vec<String> = sqlx::query_scalar!("SELECT name FROM crm_requisites WHERE item_id = $1 LIMIT 5", id).fetch_all(&mut **tx).await?;
     let legal = legal.join(" ");
     let num_tag = format!("#{number}");
     let search = search_text(
@@ -1049,11 +1021,7 @@ pub async fn refresh_derived(state: &AppState, tx: &mut sqlx::Transaction<'_, Po
         Some(c) => rate_of(state, c).await?.unwrap_or(Decimal::ONE),
         None => Decimal::ONE,
     };
-    sqlx::query("UPDATE crm_items SET title = $1, search_text = $2, opportunity_base = $3 WHERE id = $4")
-        .bind(&display)
-        .bind(search)
-        .bind((opportunity * rate).round_dp(4))
-        .bind(id)
+    sqlx::query!("UPDATE crm_items SET title = $1, search_text = $2, opportunity_base = $3 WHERE id = $4", &display, search, (opportunity * rate).round_dp(4), id)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -1061,8 +1029,7 @@ pub async fn refresh_derived(state: &AppState, tx: &mut sqlx::Transaction<'_, Po
 
 async fn record_changes(state: &AppState, id: Uuid, t: &EntityType, title: &str, ch: &Changes, actor: Uuid) -> AppResult<()> {
     if let Some((from, to)) = ch.stage {
-        let names: Vec<(Uuid, String, String)> = sqlx::query_as("SELECT id, name, color FROM crm_stages WHERE id = ANY($1)")
-            .bind(vec![from.unwrap_or(to), to])
+        let names: Vec<(Uuid, String, String)> = sqlx::query!(r#"SELECT id, name, color FROM crm_stages WHERE id = ANY($1)"#, &(vec![from.unwrap_or(to), to])).map(|r| (r.id, r.name, r.color))
             .fetch_all(&state.db)
             .await?;
         let name = |s: Uuid| names.iter().find(|n| n.0 == s).map(|n| json!({ "id": n.0, "name": n.1, "color": n.2 }));
@@ -1071,7 +1038,7 @@ async fn record_changes(state: &AppState, id: Uuid, t: &EntityType, title: &str,
         super::collab::tell_followers(state, id, actor, false, format!("{{record}} moved to {to_name}"), None).await;
     }
     if let Some((_, Some(to))) = ch.assigned {
-        let who: String = sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1").bind(to).fetch_one(&state.db).await?;
+        let who: String = sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, to).fetch_one(&state.db).await?;
         timeline(&state.db, id, "field", Some(actor), None, json!({ "field": "assigned_to", "to": who })).await?;
         if to != actor {
             notify(
@@ -1092,8 +1059,7 @@ async fn record_changes(state: &AppState, id: Uuid, t: &EntityType, title: &str,
 }
 
 async fn next_number(tx: &mut sqlx::Transaction<'_, Postgres>, t: i16) -> AppResult<i64> {
-    Ok(sqlx::query_scalar("UPDATE crm_counters SET value = value + 1 WHERE entity_type = $1 RETURNING value")
-        .bind(t)
+    Ok(sqlx::query_scalar!("UPDATE crm_counters SET value = value + 1 WHERE entity_type = $1 RETURNING value", t)
         .fetch_one(&mut **tx)
         .await?)
 }
@@ -1115,7 +1081,7 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
     // No source given, but a utm_source that one of the company's traffic sources claims.
     if !body.contains_key("source")
         && let Some(u) = body.get("utm").and_then(|u| u.get("source")).and_then(Value::as_str) {
-            let own: Option<String> = sqlx::query_scalar("SELECT code FROM crm_traffic_sources WHERE lower($1) = ANY(utm) LIMIT 1").bind(u.trim()).fetch_optional(&state.db).await?;
+            let own: Option<String> = sqlx::query_scalar!("SELECT code FROM crm_traffic_sources WHERE lower($1) = ANY(utm) LIMIT 1", u.trim()).fetch_optional(&state.db).await?;
             if let Some(code) = own {
                 body.insert("source".into(), json!(code));
             }
@@ -1123,15 +1089,8 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
     let hidden = hidden_codes(state, auth, t.id).await?;
     let mut tx = state.db.begin().await?;
     let number = next_number(&mut tx, t.id).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_items (entity_type, number, title, category_id, created_by, source_item_id, position)
-         VALUES ($1, $2, '', $3, $4, $5, (-extract(epoch from now()))::float8) RETURNING id",
-    )
-    .bind(t.id)
-    .bind(number)
-    .bind(cat)
-    .bind(auth.id)
-    .bind(source_item)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_items (entity_type, number, title, category_id, created_by, source_item_id, position)
+         VALUES ($1, $2, '', $3, $4, $5, (-extract(epoch from now()))::float8) RETURNING id", t.id, number, cat, auth.id, source_item)
     .fetch_one(&mut *tx)
     .await?;
     let ch = apply(state, &mut tx, t, id, None, &body, auth.id, &hidden).await?;
@@ -1139,7 +1098,7 @@ pub async fn create_item(state: &AppState, auth: &AuthUser, t: &EntityType, mut 
     timeline(&mut *tx, id, "created", Some(auth.id), None, json!({})).await?;
     tx.commit().await?;
 
-    let title: String = sqlx::query_scalar("SELECT title FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let title: String = sqlx::query_scalar!("SELECT title FROM crm_items WHERE id = $1", id).fetch_one(&state.db).await?;
     let entered = ch.stage.map(|(_, to)| to);
     let ch = Changes { stage: None, ..ch }; // creation is not a stage change
     record_changes(state, id, t, &title, &ch, auth.id).await?;
@@ -1196,15 +1155,8 @@ pub async fn import_item(
     }
     let mut tx = state.db.begin().await?;
     let number = next_number(&mut tx, t.id).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_items (entity_type, number, title, category_id, created_by, position, created_at)
-         VALUES ($1, $2, '', $3, $4, (-extract(epoch from COALESCE($5, now())))::float8, COALESCE($5, now())) RETURNING id",
-    )
-    .bind(t.id)
-    .bind(number)
-    .bind(cat)
-    .bind(auth.id)
-    .bind(created_at)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_items (entity_type, number, title, category_id, created_by, position, created_at)
+         VALUES ($1, $2, '', $3, $4, (-extract(epoch from COALESCE($5, now())))::float8, COALESCE($5, now())) RETURNING id", t.id, number, cat, auth.id, created_at)
     .fetch_one(&mut *tx)
     .await?;
     apply(state, &mut tx, t, id, None, &body, auth.id, &hidden).await?;
@@ -1253,7 +1205,7 @@ async fn locked_invoice_check(state: &AppState, current: &Row, body: &Map<String
     }
     if let Some(v) = body.get("contact_ids") {
         let mut new: Vec<Uuid> = v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok())).collect()).unwrap_or_default();
-        let mut now: Vec<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1").bind(current.id).fetch_all(&state.db).await?;
+        let mut now: Vec<Uuid> = sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1", current.id).fetch_all(&state.db).await?;
         new.sort();
         now.sort();
         if new != now {
@@ -1294,7 +1246,7 @@ pub async fn update_item(state: &AppState, auth: &AuthUser, t: &EntityType, id: 
             crate::shop::order_stage_changed(state, id).await;
         }
     }
-    let title: String = sqlx::query_scalar("SELECT title FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let title: String = sqlx::query_scalar!("SELECT title FROM crm_items WHERE id = $1", id).fetch_one(&state.db).await?;
     record_changes(state, id, t, &title, &ch, auth.id).await?;
     broadcast(state, t.id, id, false).await;
     match ch.stage {
@@ -1336,9 +1288,7 @@ pub async fn soft_delete(state: &AppState, auth: &AuthUser, t: &EntityType, id: 
     }
     require(state, auth, t.id, "read", current.assigned_to).await?;
     require(state, auth, t.id, "delete", current.assigned_to).await?;
-    sqlx::query("UPDATE crm_items SET deleted_at = now(), deleted_by = $1 WHERE id = $2")
-        .bind(auth.id)
-        .bind(id)
+    sqlx::query!("UPDATE crm_items SET deleted_at = now(), deleted_by = $1 WHERE id = $2", auth.id, id)
         .execute(&state.db)
         .await?;
     broadcast(state, t.id, id, true).await;
@@ -1366,7 +1316,7 @@ async fn move_item(State(state): State<AppState>, auth: AuthUser, Path((code, id
         let db = state.db.clone();
         async move {
             match n {
-                Some(n) => sqlx::query_scalar::<_, f64>("SELECT position FROM crm_items WHERE id = $1").bind(n).fetch_optional(&db).await,
+                Some(n) => sqlx::query_scalar!("SELECT position FROM crm_items WHERE id = $1", n).fetch_optional(&db).await,
                 None => Ok(None),
             }
         }
@@ -1380,7 +1330,7 @@ async fn move_item(State(state): State<AppState>, auth: AuthUser, Path((code, id
     let mut m = Map::new();
     m.insert("stage_id".into(), json!(body.stage_id));
     update_item(&state, &auth, &t, id, m).await?;
-    sqlx::query("UPDATE crm_items SET position = $1 WHERE id = $2").bind(position).bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_items SET position = $1 WHERE id = $2", position, id).execute(&state.db).await?;
     Ok(Json(load_detail(&state, &auth, &t, id).await?))
 }
 
@@ -1529,13 +1479,9 @@ pub async fn convert_lead(state: &AppState, auth: &AuthUser, id: Uuid, body: Con
         let dt = entity_type_by_id(&state, DEAL).await?;
         let d = create_item(&state, &auth, &dt, m, Some(id)).await?;
         // Product rows travel with the deal.
-        sqlx::query(
-            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+        sqlx::query!("INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
              SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost
-             FROM crm_item_products WHERE item_id = $2",
-        )
-        .bind(d)
-        .bind(id)
+             FROM crm_item_products WHERE item_id = $2", d, id)
         .execute(&state.db)
         .await?;
         Some(d)
@@ -1544,8 +1490,7 @@ pub async fn convert_lead(state: &AppState, auth: &AuthUser, id: Uuid, body: Con
     };
 
     // Lead → its pipeline's successful stage.
-    let success: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_stages WHERE category_id = $1 AND semantics = 'success' ORDER BY sort LIMIT 1")
-        .bind(r.category_id)
+    let success: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_stages WHERE category_id = $1 AND semantics = 'success' ORDER BY sort LIMIT 1", r.category_id)
         .fetch_optional(&state.db)
         .await?;
     if let Some(s) = success {
@@ -1599,8 +1544,7 @@ async fn create_from(
     if !made_from(&t, &st) {
         return Err(AppError::bad("quotes are made from deals, and invoices from deals or quotes"));
     }
-    let contacts: Vec<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort")
-        .bind(source)
+    let contacts: Vec<Uuid> = sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort", source)
         .fetch_all(&state.db)
         .await?;
     let days = if t.kind.as_deref() == Some("quote") { 30 } else { 14 };
@@ -1617,17 +1561,13 @@ async fn create_from(
         m.insert("category_id".into(), json!(c));
     }
     let id = create_item(&state, &auth, &t, m, Some(source)).await?;
-    sqlx::query(
-        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+    sqlx::query!("INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
          SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost
-         FROM crm_item_products WHERE item_id = $2",
-    )
-    .bind(id)
-    .bind(source)
+         FROM crm_item_products WHERE item_id = $2", id, source)
     .execute(&state.db)
     .await?;
     let _ = totals(&state, id).await;
-    let number: i64 = sqlx::query_scalar("SELECT number FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let number: i64 = sqlx::query_scalar!("SELECT number FROM crm_items WHERE id = $1", id).fetch_one(&state.db).await?;
     timeline(&state.db, source, "linked", Some(auth.id), None, json!({ "item_id": id, "entity_type": t.id, "code": t.code, "number": number, "title": src.title })).await?;
     broadcast(&state, st.id, source, false).await;
     Ok(Json(load_detail(&state, &auth, &t, id).await?))

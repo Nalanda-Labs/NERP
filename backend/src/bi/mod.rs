@@ -149,8 +149,8 @@ async fn execute(state: &AppState, ds: &Ds, built: &[query::Built]) -> Result<Ve
         Target::Nerp => {
             let run = async {
                 let mut tx = state.db.begin().await?;
-                sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *tx).await?;
-                sqlx::query("SET LOCAL statement_timeout = '20s'").execute(&mut *tx).await?;
+                sqlx::query!("SET TRANSACTION READ ONLY").execute(&mut *tx).await?;
+                sqlx::query!("SET LOCAL statement_timeout = '20s'").execute(&mut *tx).await?;
                 let mut out = Vec::new();
                 for b in built {
                     out.push(bind_all!(sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(b.sql.clone())), &b.params).fetch_all(&mut *tx).await?);
@@ -223,7 +223,7 @@ fn need_bi(auth: &AuthUser) -> AppResult<()> {
 async fn datasets(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     need_bi(&auth)?;
     let own: Vec<DsRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {DS_COLS} FROM bi_datasets ORDER BY lower(name)"))).fetch_all(&state.db).await?;
-    let names: HashMap<Uuid, String> = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM bi_sources").fetch_all(&state.db).await?.into_iter().collect();
+    let names: HashMap<Uuid, String> = sqlx::query!(r#"SELECT id, name FROM bi_sources"#).map(|r| (r.id, r.name)).fetch_all(&state.db).await?.into_iter().collect();
     let mut items: Vec<Value> = builtin::ALL
         .iter()
         .map(|b| json!({ "key": format!("nerp:{}", b.key), "name": b.name, "group": b.group, "kind": "nerp",
@@ -249,11 +249,11 @@ async fn dataset_info(State(state): State<AppState>, auth: AuthUser, Path(key): 
     };
     let mut v = json!({ "key": ds.key, "name": ds.name, "columns": ds.cols, "preview": preview });
     if let Ok(id) = key.parse::<Uuid>() {
-        let names: HashMap<Uuid, String> = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM bi_sources").fetch_all(&state.db).await?.into_iter().collect();
+        let names: HashMap<Uuid, String> = sqlx::query!(r#"SELECT id, name FROM bi_sources"#).map(|r| (r.id, r.name)).fetch_all(&state.db).await?.into_iter().collect();
         let r = ds_row(&state, id).await?;
         let mut j = ds_json(&r, &names);
         j["preview"] = v["preview"].take();
-        j["used_by"] = json!(sqlx::query_scalar::<_, String>("SELECT DISTINCT d.title FROM bi_widgets w JOIN bi_dashboards d ON d.id = w.dashboard_id WHERE w.spec->>'dataset' = $1").bind(&key).fetch_all(&state.db).await?);
+        j["used_by"] = json!(sqlx::query_scalar!("SELECT DISTINCT d.title FROM bi_widgets w JOIN bi_dashboards d ON d.id = w.dashboard_id WHERE w.spec->>'dataset' = $1", &key).fetch_all(&state.db).await?);
         v = j;
     }
     Ok(Json(v))
@@ -294,7 +294,7 @@ async fn new_dataset(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
     match b.kind.as_str() {
         "csv" => {
             let t = read_upload(&state, &auth, b.file_id.ok_or_else(|| bad("upload a CSV file"))?).await?;
-            sqlx::query("INSERT INTO bi_datasets (id, name, kind, created_by) VALUES ($1, $2, 'csv', $3)").bind(id).bind(&name).bind(auth.id).execute(&state.db).await?;
+            sqlx::query!("INSERT INTO bi_datasets (id, name, kind, created_by) VALUES ($1, $2, 'csv', $3)", id, &name, auth.id).execute(&state.db).await?;
             let (cols, rows) = sources::typed(t);
             sources::store(&state, id, &cols, rows).await?;
         }
@@ -303,12 +303,7 @@ async fn new_dataset(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
             let url = b.url.as_deref().map(str::trim).filter(|u| !u.is_empty()).ok_or_else(|| bad("give the file's URL"))?;
             crate::outbound::check_url(url).map_err(bad)?;
             let t = sources::fetch(&state, url).await.map_err(bad)?;
-            sqlx::query("INSERT INTO bi_datasets (id, name, kind, url, refresh_hours, created_by) VALUES ($1, $2, 'url', $3, $4, $5)")
-                .bind(id)
-                .bind(&name)
-                .bind(url)
-                .bind(b.refresh_hours)
-                .bind(auth.id)
+            sqlx::query!("INSERT INTO bi_datasets (id, name, kind, url, refresh_hours, created_by) VALUES ($1, $2, 'url', $3, $4, $5)", id, &name, url, b.refresh_hours, auth.id)
                 .execute(&state.db)
                 .await?;
             let (cols, rows) = sources::typed(t);
@@ -322,13 +317,7 @@ async fn new_dataset(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
                 _ => return Err(bad("pick a table or write a query")),
             };
             let cols = describe(&state, &s, &q).await?;
-            sqlx::query("INSERT INTO bi_datasets (id, name, kind, source_id, query, columns, refreshed_at, created_by) VALUES ($1, $2, 'sql', $3, $4, $5, now(), $6)")
-                .bind(id)
-                .bind(&name)
-                .bind(s.id)
-                .bind(&q)
-                .bind(serde_json::to_value(&cols).map_err(anyhow::Error::from)?)
-                .bind(auth.id)
+            sqlx::query!("INSERT INTO bi_datasets (id, name, kind, source_id, query, columns, refreshed_at, created_by) VALUES ($1, $2, 'sql', $3, $4, $5, now(), $6)", id, &name, s.id, &q, serde_json::to_value(&cols).map_err(anyhow::Error::from)?, auth.id)
                 .execute(&state.db)
                 .await?;
         }
@@ -357,24 +346,21 @@ async fn change_dataset(State(state): State<AppState>, auth: AuthUser, Path(key)
     let id: Uuid = key.parse().map_err(|_| AppError::Forbidden)?;
     let r = ds_row(&state, id).await?;
     if let Some(n) = &b.name {
-        sqlx::query("UPDATE bi_datasets SET name = $2 WHERE id = $1").bind(id).bind(required("name", n, 200)?).execute(&state.db).await?;
+        sqlx::query!("UPDATE bi_datasets SET name = $2 WHERE id = $1", id, required("name", n, 200)?).execute(&state.db).await?;
     }
     if let Some(h) = b.refresh_hours {
         check_refresh(h)?;
-        sqlx::query("UPDATE bi_datasets SET refresh_hours = $2 WHERE id = $1").bind(id).bind(h).execute(&state.db).await?;
+        sqlx::query!("UPDATE bi_datasets SET refresh_hours = $2 WHERE id = $1", id, h).execute(&state.db).await?;
     }
     if let Some(u) = b.url.as_deref().filter(|_| r.kind == "url") {
         crate::outbound::check_url(u.trim()).map_err(bad)?;
-        sqlx::query("UPDATE bi_datasets SET url = $2 WHERE id = $1").bind(id).bind(u.trim()).execute(&state.db).await?;
+        sqlx::query!("UPDATE bi_datasets SET url = $2 WHERE id = $1", id, u.trim()).execute(&state.db).await?;
         refresh_one(&state, id).await.map_err(bad)?;
     }
     if let (Some(q), Some(sid)) = (b.query.as_deref().map(sources::strip).filter(|q| !q.is_empty()), r.source_id) {
         let s = source(&state, sid).await?;
         let cols = describe(&state, &s, q).await?;
-        sqlx::query("UPDATE bi_datasets SET query = $2, columns = $3, refreshed_at = now(), last_error = NULL WHERE id = $1")
-            .bind(id)
-            .bind(q)
-            .bind(serde_json::to_value(&cols).map_err(anyhow::Error::from)?)
+        sqlx::query!("UPDATE bi_datasets SET query = $2, columns = $3, refreshed_at = now(), last_error = NULL WHERE id = $1", id, q, serde_json::to_value(&cols).map_err(anyhow::Error::from)?)
             .execute(&state.db)
             .await?;
     }
@@ -402,14 +388,14 @@ async fn refresh(State(state): State<AppState>, auth: AuthUser, Path(key): Path<
         _ => {
             let s = source(&state, r.source_id.expect("sql datasets have a source")).await?;
             let cols = describe(&state, &s, r.query.as_deref().unwrap_or("")).await?;
-            sqlx::query("UPDATE bi_datasets SET columns = $2, refreshed_at = now(), last_error = NULL WHERE id = $1").bind(id).bind(serde_json::to_value(&cols).map_err(anyhow::Error::from)?).execute(&state.db).await?;
+            sqlx::query!("UPDATE bi_datasets SET columns = $2, refreshed_at = now(), last_error = NULL WHERE id = $1", id, serde_json::to_value(&cols).map_err(anyhow::Error::from)?).execute(&state.db).await?;
         }
     }
     dataset_info(State(state), auth, Path(key)).await
 }
 
 async fn refresh_one(state: &AppState, id: Uuid) -> Result<(), String> {
-    let url: Option<String> = sqlx::query_scalar("SELECT url FROM bi_datasets WHERE id = $1 AND kind = 'url'").bind(id).fetch_optional(&state.db).await.map_err(|e| e.to_string())?.flatten();
+    let url: Option<String> = sqlx::query_scalar!("SELECT url FROM bi_datasets WHERE id = $1 AND kind = 'url'", id).fetch_optional(&state.db).await.map_err(|e| e.to_string())?.flatten();
     let url = url.ok_or("not a URL dataset")?;
     let res = match sources::fetch(state, &url).await {
         Ok(t) => {
@@ -419,16 +405,14 @@ async fn refresh_one(state: &AppState, id: Uuid) -> Result<(), String> {
         Err(e) => Err(e),
     };
     if let Err(e) = &res {
-        let _ = sqlx::query("UPDATE bi_datasets SET last_error = $2, refreshed_at = now() WHERE id = $1").bind(id).bind(e).execute(&state.db).await;
+        let _ = sqlx::query!("UPDATE bi_datasets SET last_error = $2, refreshed_at = now() WHERE id = $1", id, e).execute(&state.db).await;
     }
     res
 }
 
 /// The job: URL datasets due for a refresh.
 pub async fn refresh_due(state: &AppState) -> anyhow::Result<()> {
-    let due: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM bi_datasets WHERE kind = 'url' AND refresh_hours IS NOT NULL AND (refreshed_at IS NULL OR refreshed_at < now() - refresh_hours * interval '1 hour') LIMIT 50",
-    )
+    let due: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM bi_datasets WHERE kind = 'url' AND refresh_hours IS NOT NULL AND (refreshed_at IS NULL OR refreshed_at < now() - refresh_hours * interval '1 hour') LIMIT 50")
     .fetch_all(&state.db)
     .await?;
     for id in due {
@@ -442,11 +426,11 @@ pub async fn refresh_due(state: &AppState) -> anyhow::Result<()> {
 async fn drop_dataset(State(state): State<AppState>, auth: AuthUser, Path(key): Path<String>) -> AppResult<Json<Value>> {
     need_bi(&auth)?;
     let id: Uuid = key.parse().map_err(|_| AppError::Forbidden)?;
-    let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bi_widgets WHERE spec->>'dataset' = $1").bind(&key).fetch_one(&state.db).await?;
+    let used: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM bi_widgets WHERE spec->>'dataset' = $1"#, &key).fetch_one(&state.db).await?;
     if used > 0 {
         return Err(AppError::Conflict(format!("{used} chart(s) use this dataset; remove them first")));
     }
-    sqlx::query("DELETE FROM bi_datasets WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM bi_datasets WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -537,20 +521,8 @@ async fn save_source(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: Sou
     }
     let c = sources::connect(state, &s).await.map_err(|e| bad(format!("cannot connect: {e}")))?;
     c.close().await;
-    sqlx::query(
-        "INSERT INTO bi_sources (id, name, kind, host, port, database, username, password, tls, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (id) DO UPDATE SET name = $2, kind = $3, host = $4, port = $5, database = $6, username = $7, password = $8, tls = $9",
-    )
-    .bind(s.id)
-    .bind(&s.name)
-    .bind(&s.kind)
-    .bind(&s.host)
-    .bind(s.port)
-    .bind(&s.database)
-    .bind(&s.username)
-    .bind(&s.password)
-    .bind(s.tls)
-    .bind(auth.id)
+    sqlx::query!("INSERT INTO bi_sources (id, name, kind, host, port, database, username, password, tls, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (id) DO UPDATE SET name = $2, kind = $3, host = $4, port = $5, database = $6, username = $7, password = $8, tls = $9", s.id, &s.name, &s.kind, &s.host, s.port, &s.database, &s.username, s.password.as_deref(), s.tls, auth.id)
     .execute(&state.db)
     .await?;
     Ok(Json(source_json(&s)))
@@ -568,11 +540,11 @@ async fn change_source(State(state): State<AppState>, auth: AuthUser, Path(id): 
 
 async fn drop_source(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need_bi(&auth)?;
-    let used: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bi_widgets w JOIN bi_datasets d ON w.spec->>'dataset' = d.id::text WHERE d.source_id = $1").bind(id).fetch_one(&state.db).await?;
+    let used: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM bi_widgets w JOIN bi_datasets d ON w.spec->>'dataset' = d.id::text WHERE d.source_id = $1"#, id).fetch_one(&state.db).await?;
     if used > 0 {
         return Err(AppError::Conflict(format!("{used} chart(s) use data from this database; remove them first")));
     }
-    sqlx::query("DELETE FROM bi_sources WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM bi_sources WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -600,7 +572,7 @@ struct Dash {
 }
 
 async fn load(state: &AppState, id: Uuid) -> AppResult<Dash> {
-    sqlx::query_as("SELECT id, title, description, owner_id, filters, updated_at FROM bi_dashboards WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("dashboard"))
+    sqlx::query_as!(Dash, r#"SELECT id, title, description AS "description?", owner_id, filters, updated_at FROM bi_dashboards WHERE id = $1"#, id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("dashboard"))
 }
 
 const SHARED: &str = "EXISTS (SELECT 1 FROM bi_access a WHERE a.dashboard_id = d.id AND (a.grantee_kind = 'everyone' OR (a.grantee_kind = 'user' AND a.grantee_id = $1)
@@ -676,11 +648,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Das
     let title = required("title", b.title.as_deref().unwrap_or(""), 200)?;
     let filters = b.filters.unwrap_or_else(|| json!({ "period": { "preset": "this_month" } }));
     check_filters(&filters)?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO bi_dashboards (title, description, owner_id, filters) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(title)
-        .bind(b.description.as_deref().map(str::trim).filter(|s| !s.is_empty()))
-        .bind(auth.id)
-        .bind(filters)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO bi_dashboards (title, description, owner_id, filters) VALUES ($1, $2, $3, $4) RETURNING id", title, b.description.as_deref().map(str::trim).filter(|s| !s.is_empty()), auth.id, filters)
         .fetch_one(&state.db)
         .await?;
     open(State(state), auth, Path(id)).await
@@ -697,7 +665,7 @@ struct Widget {
 }
 
 async fn widgets(state: &AppState, id: Uuid) -> AppResult<Vec<Widget>> {
-    Ok(sqlx::query_as("SELECT id, title, chart, w, h, spec FROM bi_widgets WHERE dashboard_id = $1 ORDER BY position, created_at").bind(id).fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(Widget, "SELECT id, title, chart, w, h, spec FROM bi_widgets WHERE dashboard_id = $1 ORDER BY position, created_at", id).fetch_all(&state.db).await?)
 }
 
 fn widget_json(w: &Widget, with_spec: bool) -> Value {
@@ -729,16 +697,12 @@ async fn fields(state: &AppState, ws: &[Widget]) -> Vec<Value> {
 async fn open(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let (d, can_edit) = viewable(&state, &auth, id).await?;
     let ws = widgets(&state, id).await?;
-    let presets: Vec<(Uuid, String, bool, Value, bool)> = sqlx::query_as(
-        "SELECT id, name, shared, filters, user_id = $2 FROM bi_presets WHERE dashboard_id = $1 AND (user_id = $2 OR shared) ORDER BY shared, lower(name)",
-    )
-    .bind(id)
-    .bind(auth.id)
+    let presets: Vec<(Uuid, String, bool, Value, bool)> = sqlx::query!(r#"SELECT id AS "id!", name AS "name!", shared AS "shared!", filters AS "filters!", user_id = $2 AS "c4!" FROM bi_presets WHERE dashboard_id = $1 AND (user_id = $2 OR shared) ORDER BY shared, lower(name)"#, id, auth.id).map(|r| (r.id, r.name, r.shared, r.filters, r.c4))
     .fetch_all(&state.db)
     .await?;
     let mut v = json!({
         "id": d.id, "title": d.title, "description": d.description, "filters": d.filters, "updated_at": d.updated_at,
-        "owner": sqlx::query_scalar::<_, Option<String>>("SELECT bi_person($1)").bind(d.owner_id).fetch_one(&state.db).await?,
+        "owner": sqlx::query_scalar!(r#"SELECT bi_person($1) AS "v?""#, d.owner_id).fetch_one(&state.db).await?,
         "can_edit": can_edit,
         "widgets": ws.iter().map(|w| widget_json(w, true)).collect::<Vec<_>>(),
         "fields": fields(&state, &ws).await,
@@ -756,12 +720,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if let Some(f) = &b.filters {
         check_filters(f)?;
     }
-    sqlx::query("UPDATE bi_dashboards SET title = COALESCE($2, title), description = CASE WHEN $3 THEN $4 ELSE description END, filters = COALESCE($5, filters), updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(title)
-        .bind(b.description.is_some())
-        .bind(b.description.as_deref().map(str::trim).filter(|s| !s.is_empty()))
-        .bind(b.filters)
+    sqlx::query!("UPDATE bi_dashboards SET title = COALESCE($2, title), description = CASE WHEN $3 THEN $4 ELSE description END, filters = COALESCE($5, filters), updated_at = now() WHERE id = $1", id, title, b.description.is_some(), b.description.as_deref().map(str::trim).filter(|s| !s.is_empty()), b.filters)
         .execute(&state.db)
         .await?;
     open(State(state), auth, Path(id)).await
@@ -769,23 +728,17 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     editable(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM bi_dashboards WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM bi_dashboards WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn copy(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let d = editable(&state, &auth, id).await?;
     let mut tx = state.db.begin().await?;
-    let new: Uuid = sqlx::query_scalar("INSERT INTO bi_dashboards (title, description, owner_id, filters) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(format!("{} (copy)", d.title).chars().take(200).collect::<String>())
-        .bind(&d.description)
-        .bind(auth.id)
-        .bind(&d.filters)
+    let new: Uuid = sqlx::query_scalar!("INSERT INTO bi_dashboards (title, description, owner_id, filters) VALUES ($1, $2, $3, $4) RETURNING id", format!("{} (copy)", d.title).chars().take(200).collect::<String>(), d.description.as_deref(), auth.id, &d.filters)
         .fetch_one(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO bi_widgets (dashboard_id, position, title, chart, w, h, spec) SELECT $2, position, title, chart, w, h, spec FROM bi_widgets WHERE dashboard_id = $1")
-        .bind(id)
-        .bind(new)
+    sqlx::query!("INSERT INTO bi_widgets (dashboard_id, position, title, chart, w, h, spec) SELECT $2, position, title, chart, w, h, spec FROM bi_widgets WHERE dashboard_id = $1", id, new)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -801,7 +754,7 @@ struct DataInput {
 }
 
 async fn tz_of(state: &AppState, user: Uuid) -> String {
-    sqlx::query_scalar::<_, String>("SELECT timezone FROM users WHERE id = $1").bind(user).fetch_optional(&state.db).await.ok().flatten().filter(|t| t.parse::<chrono_tz::Tz>().is_ok()).unwrap_or_else(|| "UTC".into())
+    sqlx::query_scalar!("SELECT timezone FROM users WHERE id = $1", user).fetch_optional(&state.db).await.ok().flatten().filter(|t| t.parse::<chrono_tz::Tz>().is_ok()).unwrap_or_else(|| "UTC".into())
 }
 
 /// Every chart's figures.
@@ -891,7 +844,7 @@ async fn check_widget(state: &AppState, chart: &str, w: i16, h: i16, spec: &Valu
 
 async fn add_widget(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<WidgetInput>) -> AppResult<Json<Value>> {
     editable(&state, &auth, id).await?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bi_widgets WHERE dashboard_id = $1").bind(id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM bi_widgets WHERE dashboard_id = $1"#, id).fetch_one(&state.db).await?;
     if n >= MAX_WIDGETS {
         return Err(bad(format!("at most {MAX_WIDGETS} charts on a dashboard")));
     }
@@ -900,25 +853,18 @@ async fn add_widget(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     let (w, h) = (b.w.unwrap_or(6), b.h.unwrap_or(2));
     let spec = b.spec.ok_or_else(|| bad("the chart needs its settings"))?;
     check_widget(&state, &chart, w, h, &spec).await?;
-    sqlx::query("INSERT INTO bi_widgets (dashboard_id, position, title, chart, w, h, spec) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-        .bind(id)
-        .bind(n as i32)
-        .bind(title)
-        .bind(&chart)
-        .bind(w)
-        .bind(h)
-        .bind(spec)
+    sqlx::query!("INSERT INTO bi_widgets (dashboard_id, position, title, chart, w, h, spec) VALUES ($1, $2, $3, $4, $5, $6, $7)", id, n as i32, title, &chart, w, h, spec)
         .execute(&state.db)
         .await?;
-    sqlx::query("UPDATE bi_dashboards SET updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE bi_dashboards SET updated_at = now() WHERE id = $1", id).execute(&state.db).await?;
     open(State(state), auth, Path(id)).await
 }
 
 async fn change_widget(State(state): State<AppState>, auth: AuthUser, Path(wid): Path<Uuid>, Json(b): Json<WidgetInput>) -> AppResult<Json<Value>> {
     need_bi(&auth)?;
     let (dash, old): (Uuid, Widget) = {
-        let d: Uuid = sqlx::query_scalar("SELECT dashboard_id FROM bi_widgets WHERE id = $1").bind(wid).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("chart"))?;
-        let w: Widget = sqlx::query_as("SELECT id, title, chart, w, h, spec FROM bi_widgets WHERE id = $1").bind(wid).fetch_one(&state.db).await?;
+        let d: Uuid = sqlx::query_scalar!("SELECT dashboard_id FROM bi_widgets WHERE id = $1", wid).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("chart"))?;
+        let w: Widget = sqlx::query_as!(Widget, "SELECT id, title, chart, w, h, spec FROM bi_widgets WHERE id = $1", wid).fetch_one(&state.db).await?;
         (d, w)
     };
     let title = match b.title.as_deref() {
@@ -929,14 +875,14 @@ async fn change_widget(State(state): State<AppState>, auth: AuthUser, Path(wid):
     let (w, h) = (b.w.unwrap_or(old.w), b.h.unwrap_or(old.h));
     let spec = b.spec.unwrap_or(old.spec);
     check_widget(&state, &chart, w, h, &spec).await?;
-    sqlx::query("UPDATE bi_widgets SET title = $2, chart = $3, w = $4, h = $5, spec = $6 WHERE id = $1").bind(wid).bind(title).bind(chart).bind(w).bind(h).bind(spec).execute(&state.db).await?;
-    sqlx::query("UPDATE bi_dashboards SET updated_at = now() WHERE id = $1").bind(dash).execute(&state.db).await?;
+    sqlx::query!("UPDATE bi_widgets SET title = $2, chart = $3, w = $4, h = $5, spec = $6 WHERE id = $1", wid, title, chart, w, h, spec).execute(&state.db).await?;
+    sqlx::query!("UPDATE bi_dashboards SET updated_at = now() WHERE id = $1", dash).execute(&state.db).await?;
     open(State(state), auth, Path(dash)).await
 }
 
 async fn drop_widget(State(state): State<AppState>, auth: AuthUser, Path(wid): Path<Uuid>) -> AppResult<Json<Value>> {
     need_bi(&auth)?;
-    let dash: Uuid = sqlx::query_scalar("DELETE FROM bi_widgets WHERE id = $1 RETURNING dashboard_id").bind(wid).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("chart"))?;
+    let dash: Uuid = sqlx::query_scalar!("DELETE FROM bi_widgets WHERE id = $1 RETURNING dashboard_id", wid).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("chart"))?;
     open(State(state), auth, Path(dash)).await
 }
 
@@ -960,9 +906,9 @@ async fn layout(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     }
     let mut tx = state.db.begin().await?;
     for (pos, i) in b.items.iter().enumerate() {
-        sqlx::query("UPDATE bi_widgets SET position = $3, w = $4, h = $5 WHERE id = $1 AND dashboard_id = $2").bind(i.id).bind(id).bind(pos as i32).bind(i.w).bind(i.h).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE bi_widgets SET position = $3, w = $4, h = $5 WHERE id = $1 AND dashboard_id = $2", i.id, id, pos as i32, i.w, i.h).execute(&mut *tx).await?;
     }
-    sqlx::query("UPDATE bi_dashboards SET updated_at = now() WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE bi_dashboards SET updated_at = now() WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     open(State(state), auth, Path(id)).await
 }
@@ -972,11 +918,8 @@ async fn layout(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 // ---------------------------------------------------------------------------
 
 async fn access_json(state: &AppState, id: Uuid) -> AppResult<Value> {
-    let rows: Vec<(String, Option<Uuid>, Option<String>)> = sqlx::query_as(
-        "SELECT a.grantee_kind, a.grantee_id, CASE a.grantee_kind WHEN 'user' THEN bi_person(a.grantee_id) WHEN 'department' THEN (SELECT name FROM departments WHERE id = a.grantee_id) END
-         FROM bi_access a WHERE a.dashboard_id = $1 ORDER BY a.grantee_kind",
-    )
-    .bind(id)
+    let rows: Vec<(String, Option<Uuid>, Option<String>)> = sqlx::query!(r#"SELECT a.grantee_kind, a.grantee_id, CASE a.grantee_kind WHEN 'user' THEN bi_person(a.grantee_id) WHEN 'department' THEN (SELECT name FROM departments WHERE id = a.grantee_id) END AS "c2"
+         FROM bi_access a WHERE a.dashboard_id = $1 ORDER BY a.grantee_kind"#, id).map(|r| (r.grantee_kind, r.grantee_id, r.c2))
     .fetch_all(&state.db)
     .await?;
     Ok(json!(rows.into_iter().map(|(k, i, n)| json!({ "kind": k, "id": i, "name": n })).collect::<Vec<_>>()))
@@ -999,17 +942,14 @@ async fn set_access(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         return Err(bad("at most 200 entries"));
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM bi_access WHERE dashboard_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM bi_access WHERE dashboard_id = $1", id).execute(&mut *tx).await?;
     for g in &b.grants {
         let gid = match (g.kind.as_str(), g.id) {
             ("everyone", _) => None,
             ("user" | "department", Some(u)) => Some(u),
             _ => return Err(bad("share with everyone, a department or a person")),
         };
-        sqlx::query("INSERT INTO bi_access (dashboard_id, grantee_kind, grantee_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
-            .bind(id)
-            .bind(&g.kind)
-            .bind(gid)
+        sqlx::query!("INSERT INTO bi_access (dashboard_id, grantee_kind, grantee_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", id, &g.kind, gid)
             .execute(&mut *tx)
             .await
             .map_err(|_| bad("no such person or department"))?;
@@ -1033,21 +973,21 @@ async fn add_preset(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     }
     check_filters(&b.filters)?;
     let name = required("name", &b.name, 100)?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bi_presets WHERE dashboard_id = $1 AND user_id = $2").bind(id).bind(auth.id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM bi_presets WHERE dashboard_id = $1 AND user_id = $2"#, id, auth.id).fetch_one(&state.db).await?;
     if n >= 50 {
         return Err(bad("at most 50 presets"));
     }
-    sqlx::query("INSERT INTO bi_presets (dashboard_id, user_id, name, shared, filters) VALUES ($1, $2, $3, $4, $5)").bind(id).bind(auth.id).bind(name).bind(b.shared).bind(b.filters).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO bi_presets (dashboard_id, user_id, name, shared, filters) VALUES ($1, $2, $3, $4, $5)", id, auth.id, name, b.shared, b.filters).execute(&state.db).await?;
     open(State(state), auth, Path(id)).await
 }
 
 async fn drop_preset(State(state): State<AppState>, auth: AuthUser, Path(pid): Path<Uuid>) -> AppResult<Json<Value>> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT dashboard_id, user_id FROM bi_presets WHERE id = $1").bind(pid).fetch_optional(&state.db).await?;
+    let row: Option<(Uuid, Uuid)> = sqlx::query!(r#"SELECT dashboard_id, user_id FROM bi_presets WHERE id = $1"#, pid).map(|r| (r.dashboard_id, r.user_id)).fetch_optional(&state.db).await?;
     let (dash, owner) = row.ok_or(AppError::NotFound("preset"))?;
     if owner != auth.id && !auth.can(BI) {
         return Err(AppError::NotFound("preset"));
     }
-    sqlx::query("DELETE FROM bi_presets WHERE id = $1").bind(pid).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM bi_presets WHERE id = $1", pid).execute(&state.db).await?;
     open(State(state), auth, Path(dash)).await
 }
 
@@ -1057,10 +997,7 @@ fn hash(t: &str) -> String {
 
 async fn links(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     editable(&state, &auth, id).await?;
-    let rows: Vec<(Uuid, Option<DateTime<Utc>>, bool, DateTime<Utc>, Option<String>)> = sqlx::query_as(
-        "SELECT id, expires_at, password_hash IS NOT NULL, created_at, bi_person(created_by) FROM bi_links WHERE dashboard_id = $1 ORDER BY created_at",
-    )
-    .bind(id)
+    let rows: Vec<(Uuid, Option<DateTime<Utc>>, bool, DateTime<Utc>, Option<String>)> = sqlx::query!(r#"SELECT id AS "id!", expires_at AS "expires_at?", password_hash IS NOT NULL AS "c2!", created_at AS "created_at!", bi_person(created_by) AS "c4?" FROM bi_links WHERE dashboard_id = $1 ORDER BY created_at"#, id).map(|r| (r.id, r.expires_at, r.c2, r.created_at, r.c4))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(l, e, p, c, by)| json!({ "id": l, "expires_at": e, "password": p, "created_at": c, "created_by": by })).collect::<Vec<_>>() })))
@@ -1085,12 +1022,7 @@ async fn new_link(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         None => None,
     };
     let token = random_token(24);
-    let lid: Uuid = sqlx::query_scalar("INSERT INTO bi_links (dashboard_id, token_hash, expires_at, password_hash, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id")
-        .bind(id)
-        .bind(hash(&token))
-        .bind(b.expires_at)
-        .bind(pw)
-        .bind(auth.id)
+    let lid: Uuid = sqlx::query_scalar!("INSERT INTO bi_links (dashboard_id, token_hash, expires_at, password_hash, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id", id, hash(&token), b.expires_at, pw, auth.id)
         .fetch_one(&state.db)
         .await?;
     Ok(Json(json!({ "id": lid, "url": format!("{}/dash/{token}", state.config.public_url) })))
@@ -1098,7 +1030,7 @@ async fn new_link(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 
 async fn drop_link(State(state): State<AppState>, auth: AuthUser, Path((id, link)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
     editable(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM bi_links WHERE id = $1 AND dashboard_id = $2").bind(link).bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM bi_links WHERE id = $1 AND dashboard_id = $2", link, id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1109,7 +1041,7 @@ async fn by_link(state: &AppState, token: &str, headers: &HeaderMap, ip: Option<
         return Err(AppError::NotFound("dashboard"));
     }
     let row: Option<(Uuid, Option<DateTime<Utc>>, Option<String>)> =
-        sqlx::query_as("SELECT dashboard_id, expires_at, password_hash FROM bi_links WHERE token_hash = $1").bind(hash(token)).fetch_optional(&state.db).await?;
+        sqlx::query!(r#"SELECT dashboard_id, expires_at, password_hash FROM bi_links WHERE token_hash = $1"#, hash(token)).map(|r| (r.dashboard_id, r.expires_at, r.password_hash)).fetch_optional(&state.db).await?;
     let (dash, expires, pw) = row.ok_or(AppError::NotFound("dashboard"))?;
     if expires.is_some_and(|e| e <= Utc::now()) {
         return Err(AppError::NotFound("dashboard"));

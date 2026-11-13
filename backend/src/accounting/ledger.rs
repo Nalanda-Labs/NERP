@@ -76,7 +76,7 @@ impl Line {
 
 /// The lock date: nothing on or before it may be posted, changed or reversed.
 pub async fn check_open(tx: &mut Tx<'_>, date: NaiveDate) -> AppResult<()> {
-    let (ready, lock): (bool, Option<NaiveDate>) = sqlx::query_as("SELECT ready, lock_date FROM acc_settings WHERE id = 1").fetch_one(&mut **tx).await?;
+    let (ready, lock): (bool, Option<NaiveDate>) = sqlx::query!(r#"SELECT ready, lock_date FROM acc_settings WHERE id = 1"#).map(|r| (r.ready, r.lock_date)).fetch_one(&mut **tx).await?;
     if !ready {
         return Err(AppError::bad("set up accounting first"));
     }
@@ -91,7 +91,7 @@ pub async fn check_open(tx: &mut Tx<'_>, date: NaiveDate) -> AppResult<()> {
 /// The next number of a kind (entry, bill, payment), without gaps: the counter row stays
 /// locked until the transaction ends, and a rolled-back transaction gives its number back.
 pub async fn next_number(tx: &mut Tx<'_>, kind: &str) -> AppResult<i64> {
-    let n: i64 = sqlx::query_scalar("UPDATE acc_counters SET next = next + 1 WHERE kind = $1 RETURNING next - 1").bind(kind).fetch_one(&mut **tx).await?;
+    let n: i64 = sqlx::query_scalar!(r#"UPDATE acc_counters SET next = next + 1 WHERE kind = $1 RETURNING next - 1 AS "v!""#, kind).fetch_one(&mut **tx).await?;
     Ok(n)
 }
 
@@ -122,7 +122,7 @@ pub async fn validate(tx: &mut Tx<'_>, lines: &[Line]) -> AppResult<()> {
         return Err(AppError::bad("the amounts are too large"));
     }
     let ids: Vec<Uuid> = live.iter().map(|l| l.account).collect();
-    let ok: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT id) FROM acc_accounts WHERE id = ANY($1) AND is_active").bind(&ids).fetch_one(&mut **tx).await?;
+    let ok: i64 = sqlx::query_scalar!(r#"SELECT COUNT(DISTINCT id) AS "v!" FROM acc_accounts WHERE id = ANY($1) AND is_active"#, &ids).fetch_one(&mut **tx).await?;
     let distinct = ids.iter().collect::<std::collections::HashSet<_>>().len();
     if ok as usize != distinct {
         return Err(AppError::bad("an account on the entry doesn't exist or is inactive"));
@@ -136,15 +136,7 @@ pub async fn post(tx: &mut Tx<'_>, date: NaiveDate, memo: Option<&str>, source: 
     check_open(tx, date).await?;
     validate(tx, lines).await?;
     let number = next_number(tx, "entry").await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO acc_entries (number, date, memo, source, source_id, status, created_by, posted_at) VALUES ($1, $2, $3, $4, $5, 'posted', $6, now()) RETURNING id",
-    )
-    .bind(number)
-    .bind(date)
-    .bind(memo)
-    .bind(source)
-    .bind(source_id)
-    .bind(user)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_entries (number, date, memo, source, source_id, status, created_by, posted_at) VALUES ($1, $2, $3, $4, $5, 'posted', $6, now()) RETURNING id", number, date, memo, source, source_id, user)
     .fetch_one(&mut **tx)
     .await?;
     insert_lines(tx, id, date, lines).await?;
@@ -152,24 +144,10 @@ pub async fn post(tx: &mut Tx<'_>, date: NaiveDate, memo: Option<&str>, source: 
 }
 
 pub async fn insert_lines(tx: &mut Tx<'_>, entry: Uuid, date: NaiveDate, lines: &[Line]) -> AppResult<()> {
-    sqlx::query("DELETE FROM acc_lines WHERE entry_id = $1").bind(entry).execute(&mut **tx).await?;
+    sqlx::query!("DELETE FROM acc_lines WHERE entry_id = $1", entry).execute(&mut **tx).await?;
     for (i, l) in lines.iter().filter(|l| !l.debit.is_zero() || !l.credit.is_zero()).enumerate() {
-        sqlx::query(
-            "INSERT INTO acc_lines (entry_id, account_id, date, debit, credit, currency, amount_currency, description, party_id, tax_id, tax_base, sort)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-        )
-        .bind(entry)
-        .bind(l.account)
-        .bind(date)
-        .bind(l.debit)
-        .bind(l.credit)
-        .bind(&l.currency)
-        .bind(l.amount_currency)
-        .bind(&l.description)
-        .bind(l.party)
-        .bind(l.tax)
-        .bind(l.tax_base)
-        .bind(i as i32)
+        sqlx::query!("INSERT INTO acc_lines (entry_id, account_id, date, debit, credit, currency, amount_currency, description, party_id, tax_id, tax_base, sort)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", entry, l.account, date, l.debit, l.credit, l.currency.as_deref(), l.amount_currency, l.description.as_deref(), l.party, l.tax, l.tax_base, i as i32)
         .execute(&mut **tx)
         .await?;
     }
@@ -181,8 +159,7 @@ pub async fn insert_lines(tx: &mut Tx<'_>, entry: Uuid, date: NaiveDate, lines: 
 /// lines stay as they were. Returns the reversal's id.
 pub async fn reverse(tx: &mut Tx<'_>, entry: Uuid, date: NaiveDate, user: Option<Uuid>) -> AppResult<Uuid> {
     let row: Option<(String, NaiveDate, Option<i64>, Option<String>, String, Option<Uuid>)> =
-        sqlx::query_as("SELECT status, date, number, memo, source, source_id FROM acc_entries WHERE id = $1 FOR UPDATE")
-            .bind(entry)
+        sqlx::query!(r#"SELECT status, date, number, memo, source, source_id FROM acc_entries WHERE id = $1 FOR UPDATE"#, entry).map(|r| (r.status, r.date, r.number, r.memo, r.source, r.source_id))
             .fetch_optional(&mut **tx)
             .await?;
     let (status, orig_date, number, _memo, source, source_id) = row.ok_or(AppError::NotFound("entry"))?;
@@ -194,10 +171,7 @@ pub async fn reverse(tx: &mut Tx<'_>, entry: Uuid, date: NaiveDate, user: Option
         return Err(AppError::bad("a reversal can't be dated before the entry it reverses"));
     }
     type L = (Uuid, Decimal, Decimal, Option<String>, Option<Decimal>, Option<String>, Option<Uuid>, Option<Uuid>, Option<Decimal>);
-    let lines: Vec<L> = sqlx::query_as(
-        "SELECT account_id, debit, credit, currency, amount_currency, description, party_id, tax_id, tax_base FROM acc_lines WHERE entry_id = $1 ORDER BY sort",
-    )
-    .bind(entry)
+    let lines: Vec<L> = sqlx::query!(r#"SELECT account_id, debit, credit, currency, amount_currency, description, party_id, tax_id, tax_base FROM acc_lines WHERE entry_id = $1 ORDER BY sort"#, entry).map(|r| (r.account_id, r.debit, r.credit, r.currency, r.amount_currency, r.description, r.party_id, r.tax_id, r.tax_base))
     .fetch_all(&mut **tx)
     .await?;
     let back: Vec<Line> = lines
@@ -217,20 +191,11 @@ pub async fn reverse(tx: &mut Tx<'_>, entry: Uuid, date: NaiveDate, user: Option
     // Accounts made inactive since are fine for a reversal.
     check_open(tx, date).await?;
     let n = next_number(tx, "entry").await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO acc_entries (number, date, memo, source, source_id, status, reverses, created_by, posted_at) VALUES ($1, $2, $3, $4, $5, 'posted', $6, $7, now()) RETURNING id",
-    )
-    .bind(n)
-    .bind(date)
-    .bind(format!("Reversal of entry {}", number.unwrap_or_default()))
-    .bind(source)
-    .bind(source_id)
-    .bind(entry)
-    .bind(user)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_entries (number, date, memo, source, source_id, status, reverses, created_by, posted_at) VALUES ($1, $2, $3, $4, $5, 'posted', $6, $7, now()) RETURNING id", n, date, format!("Reversal of entry {}", number.unwrap_or_default()), source, source_id, entry, user)
     .fetch_one(&mut **tx)
     .await?;
     insert_lines(tx, id, date, &back).await?;
-    sqlx::query("UPDATE acc_entries SET status = 'void', reversed_by = $2 WHERE id = $1").bind(entry).bind(id).execute(&mut **tx).await?;
+    sqlx::query!("UPDATE acc_entries SET status = 'void', reversed_by = $2 WHERE id = $1", entry, id).execute(&mut **tx).await?;
     Ok(id)
 }
 

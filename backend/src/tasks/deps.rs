@@ -72,8 +72,7 @@ async fn creates_cycle(state: &AppState, task: Uuid, on: Uuid) -> AppResult<bool
         if !seen.insert(cur) || seen.len() > 10_000 {
             continue;
         }
-        let next: Vec<Uuid> = sqlx::query_scalar("SELECT depends_on_id FROM task_dependencies WHERE task_id = $1")
-            .bind(cur)
+        let next: Vec<Uuid> = sqlx::query_scalar!("SELECT depends_on_id FROM task_dependencies WHERE task_id = $1", cur)
             .fetch_all(&state.db)
             .await?;
         queue.extend(next);
@@ -98,10 +97,7 @@ async fn add(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>
     if creates_cycle(&state, id, body.depends_on_id).await? {
         return Err(AppError::bad("that would create a loop: the other task already waits for this one"));
     }
-    sqlx::query("INSERT INTO task_dependencies (task_id, depends_on_id, created_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
-        .bind(id)
-        .bind(body.depends_on_id)
-        .bind(auth.id)
+    sqlx::query!("INSERT INTO task_dependencies (task_id, depends_on_id, created_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", id, body.depends_on_id, auth.id)
         .execute(&state.db)
         .await?;
     record_history(&state.db, id, auth.id, "blocked_by_added", None, Some(other.title.clone())).await?;
@@ -117,10 +113,8 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path((id, other))
     if !access.edit {
         return Err(AppError::Forbidden);
     }
-    let title: Option<String> = sqlx::query_scalar("SELECT title FROM tasks WHERE id = $1").bind(other).fetch_optional(&state.db).await?;
-    sqlx::query("DELETE FROM task_dependencies WHERE task_id = $1 AND depends_on_id = $2")
-        .bind(id)
-        .bind(other)
+    let title: Option<String> = sqlx::query_scalar!("SELECT title FROM tasks WHERE id = $1", other).fetch_optional(&state.db).await?;
+    sqlx::query!("DELETE FROM task_dependencies WHERE task_id = $1 AND depends_on_id = $2", id, other)
         .execute(&state.db)
         .await?;
     record_history(&state.db, id, auth.id, "blocked_by_removed", None, title).await?;
@@ -137,17 +131,13 @@ pub async fn reschedule_dependents(state: &AppState, auth: &AuthUser, task: Uuid
     let mut seen = HashSet::from([task]);
     let mut queue = VecDeque::from([task]);
     while let Some(pred) = queue.pop_front() {
-        let end: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT COALESCE(deadline, start_date) FROM tasks WHERE id = $1")
-            .bind(pred)
+        let end: Option<DateTime<Utc>> = sqlx::query_scalar!("SELECT COALESCE(deadline, start_date) FROM tasks WHERE id = $1", pred)
             .fetch_optional(&state.db)
             .await?
             .flatten();
         let Some(end) = end else { continue };
-        let succs: Vec<Successor> = sqlx::query_as(
-            "SELECT t.id, t.start_date, t.deadline, t.status FROM task_dependencies d JOIN tasks t ON t.id = d.task_id
-             WHERE d.depends_on_id = $1",
-        )
-        .bind(pred)
+        let succs: Vec<Successor> = sqlx::query!(r#"SELECT t.id, t.start_date, t.deadline, t.status FROM task_dependencies d JOIN tasks t ON t.id = d.task_id
+             WHERE d.depends_on_id = $1"#, pred).map(|r| (r.id, r.start_date, r.deadline, r.status))
         .fetch_all(&state.db)
         .await?;
         for (sid, start, deadline, status) in succs {
@@ -166,13 +156,8 @@ pub async fn reschedule_dependents(state: &AppState, auth: &AuthUser, task: Uuid
             let delta: Duration = end - anchor;
             let new_start = start.map(|s| s + delta);
             let new_deadline = deadline.map(|d| d + delta);
-            sqlx::query(
-                "UPDATE tasks SET start_date = $1, deadline = $2, deadline_reminded_at = NULL, overdue_notified_at = NULL,
-                     updated_at = now() WHERE id = $3",
-            )
-            .bind(new_start)
-            .bind(new_deadline)
-            .bind(sid)
+            sqlx::query!("UPDATE tasks SET start_date = $1, deadline = $2, deadline_reminded_at = NULL, overdue_notified_at = NULL,
+                     updated_at = now() WHERE id = $3", new_start, new_deadline, sid)
             .execute(&state.db)
             .await?;
             record_history(
@@ -191,8 +176,7 @@ pub async fn reschedule_dependents(state: &AppState, auth: &AuthUser, task: Uuid
     if !moved.is_empty() {
         let actor = user_name(state, auth.id).await;
         for sid in &moved {
-            let row: Option<(String, Uuid, Option<Uuid>)> = sqlx::query_as("SELECT title, responsible_id, project_id FROM tasks WHERE id = $1")
-                .bind(sid)
+            let row: Option<(String, Uuid, Option<Uuid>)> = sqlx::query!(r#"SELECT title, responsible_id, project_id FROM tasks WHERE id = $1"#, sid).map(|r| (r.title, r.responsible_id, r.project_id))
                 .fetch_optional(&state.db)
                 .await?;
             if let Some((title, responsible, project)) = row {
@@ -252,10 +236,7 @@ async fn gantt(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Ga
     qb.push(" AND t.status <> 'deferred' ORDER BY COALESCE(t.start_date, t.created_at), t.number LIMIT 500");
     let tasks: Vec<TaskSummary> = qb.build_query_as().fetch_all(&state.db).await?;
     let ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
-    let edges: Vec<Edge> = sqlx::query_as(
-        "SELECT task_id, depends_on_id FROM task_dependencies WHERE task_id = ANY($1) AND depends_on_id = ANY($1)",
-    )
-    .bind(&ids)
+    let edges: Vec<Edge> = sqlx::query_as!(Edge, "SELECT task_id, depends_on_id FROM task_dependencies WHERE task_id = ANY($1) AND depends_on_id = ANY($1)", &ids)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "tasks": tasks, "dependencies": edges })))

@@ -27,13 +27,11 @@ async fn matrix(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json
     if !is_crm_admin(&auth) {
         return Err(AppError::Forbidden);
     }
-    let roles: Vec<(Uuid, String, String, bool)> = sqlx::query_as(
-        "SELECT r.id, r.code, r.name, EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id = r.id AND rp.permission IN ('*', 'crm.admin'))
-         FROM roles r ORDER BY r.is_system DESC, r.name",
-    )
+    let roles: Vec<(Uuid, String, String, bool)> = sqlx::query!(r#"SELECT r.id AS "id!", r.code AS "code!", r.name AS "name!", EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id = r.id AND rp.permission IN ('*', 'crm.admin')) AS "c3!"
+         FROM roles r ORDER BY r.is_system DESC, r.name"#).map(|r| (r.id, r.code, r.name, r.c3))
     .fetch_all(&state.db)
     .await?;
-    let entries: Vec<(Uuid, i16, String, String)> = sqlx::query_as("SELECT role_id, entity_type, action, scope FROM crm_role_permissions")
+    let entries: Vec<(Uuid, i16, String, String)> = sqlx::query!(r#"SELECT role_id, entity_type, action, scope FROM crm_role_permissions"#).map(|r| (r.role_id, r.entity_type, r.action, r.scope))
         .fetch_all(&state.db)
         .await?;
     let mut m: Map<String, Value> = Map::new();
@@ -73,13 +71,9 @@ async fn save(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clien
         }
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM crm_role_permissions WHERE role_id = $1").bind(role).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM crm_role_permissions WHERE role_id = $1", role).execute(&mut *tx).await?;
     for e in &b.entries {
-        sqlx::query("INSERT INTO crm_role_permissions (role_id, entity_type, action, scope) VALUES ($1, $2, $3, $4)")
-            .bind(role)
-            .bind(e.entity_type)
-            .bind(&e.action)
-            .bind(&e.scope)
+        sqlx::query!("INSERT INTO crm_role_permissions (role_id, entity_type, action, scope) VALUES ($1, $2, $3, $4)", role, e.entity_type, &e.action, &e.scope)
             .execute(&mut *tx)
             .await
             .map_err(|e| if crate::error::is_fk_violation(&e) { AppError::bad("unknown role or record type") } else { e.into() })?;
@@ -87,7 +81,7 @@ async fn save(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clien
     audit::record(&mut *tx, Some(auth.id), "crm.permissions", "role", Some(role.to_string()), json!({ "entries": b.entries.len() }), ip.as_deref()).await;
     tx.commit().await?;
     // CRM scopes are read per request, but drop cached auth anyway for consistency.
-    let members: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM user_roles WHERE role_id = $1").bind(role).fetch_all(&state.db).await?;
+    let members: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM user_roles WHERE role_id = $1", role).fetch_all(&state.db).await?;
     invalidate_authz(&state, &members).await?;
     matrix(State(state), auth).await
 }

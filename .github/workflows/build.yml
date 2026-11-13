@@ -1,5 +1,6 @@
 # Build: compiles the backend and runs its unit tests, type-checks and builds the frontend,
-# and type-checks the end-to-end suites. Fast; no services needed.
+# and type-checks the end-to-end suites. The backend's SQL is checked against the schema at
+# compile time, so it migrates a PostgreSQL database first (nerp-migrate) and builds against it.
 name: Build
 
 on:
@@ -16,6 +17,18 @@ jobs:
   backend:
     name: Backend (build + unit tests)
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_USER: nerp
+          POSTGRES_PASSWORD: nerp-ci
+          POSTGRES_DB: nerp
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U nerp" --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_URL: postgres://nerp:nerp-ci@127.0.0.1:5432/nerp
     defaults:
       run:
         working-directory: backend
@@ -28,6 +41,8 @@ jobs:
       # SAML sign-on verifies signatures with xmlsec (samael builds its bindings with clang).
       - name: Install xmlsec and libxml2
         run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libxmlsec1-dev libxml2-dev libclang-dev pkg-config
+      - name: Migrate the build database
+        run: cargo run --locked --bin nerp-migrate
       - run: cargo build --locked
       - run: cargo test --locked
 

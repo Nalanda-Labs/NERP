@@ -331,7 +331,7 @@ pub async fn purge_deleted(state: &AppState) -> anyhow::Result<()> {
 /// How many files are under the current key, under another key, and not encrypted.
 pub async fn status(state: &AppState) -> anyhow::Result<serde_json::Value> {
     let rows: Vec<(Option<String>, i64, i64)> =
-        sqlx::query_as("SELECT enc_key, COUNT(*), COALESCE(SUM(size_bytes), 0)::bigint FROM files GROUP BY 1").fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT enc_key AS "enc_key?", COUNT(*) AS "c1!", COALESCE(SUM(size_bytes), 0)::bigint AS "c2!" FROM files GROUP BY 1"#).map(|r| (r.enc_key, r.c1, r.c2)).fetch_all(&state.db).await?;
     let cur = state.config.file_keys.current_id();
     let (mut current, mut other, mut plain) = (0i64, 0i64, 0i64);
     for (k, n, _) in &rows {
@@ -376,7 +376,7 @@ fn dir_usage(dir: &Path) -> (u64, u64) {
 /// At start: refuse to run when files are under a key the server wasn't given (it would
 /// serve errors for them), and start bringing files to the current key.
 pub async fn check_at_start(state: &AppState) -> anyhow::Result<()> {
-    let keys: Vec<String> = sqlx::query_scalar("SELECT DISTINCT enc_key FROM files WHERE enc_key IS NOT NULL").fetch_all(&state.db).await?;
+    let keys: Vec<String> = sqlx::query_scalar!(r#"SELECT DISTINCT enc_key AS "enc_key!" FROM files WHERE enc_key IS NOT NULL"#).fetch_all(&state.db).await?;
     let unknown: Vec<&String> = keys.iter().filter(|k| !state.config.file_keys.knows(k)).collect();
     if !unknown.is_empty() {
         anyhow::bail!(
@@ -392,8 +392,7 @@ pub async fn check_at_start(state: &AppState) -> anyhow::Result<()> {
 }
 
 async fn pending(state: &AppState) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE enc_key IS DISTINCT FROM $1")
-        .bind(state.config.file_keys.current_id())
+    Ok(sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM files WHERE enc_key IS DISTINCT FROM $1"#, state.config.file_keys.current_id())
         .fetch_one(&state.db)
         .await?)
 }
@@ -404,7 +403,7 @@ async fn pending(state: &AppState) -> anyhow::Result<i64> {
 pub async fn convert(state: &AppState) -> anyhow::Result<()> {
     // One run at a time (on any server sharing the database).
     let mut lock = state.db.acquire().await?;
-    let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtext('nerp:files.encrypt'))").fetch_one(&mut *lock).await?;
+    let got: bool = sqlx::query_scalar!(r#"SELECT pg_try_advisory_lock(hashtext('nerp:files.encrypt')) AS "v!""#).fetch_one(&mut *lock).await?;
     if !got {
         return Ok(());
     }
@@ -416,8 +415,7 @@ pub async fn convert(state: &AppState) -> anyhow::Result<()> {
 async fn convert_batch(state: &AppState) -> anyhow::Result<()> {
     let cur = state.config.file_keys.current_id();
     let batch: Vec<(Uuid, String, Option<String>)> =
-        sqlx::query_as("SELECT id, storage_path, enc_key FROM files WHERE enc_key IS DISTINCT FROM $1 ORDER BY created_at LIMIT 100")
-            .bind(&cur)
+        sqlx::query!(r#"SELECT id, storage_path, enc_key FROM files WHERE enc_key IS DISTINCT FROM $1 ORDER BY created_at LIMIT 100"#, cur.as_deref()).map(|r| (r.id, r.storage_path, r.enc_key))
             .fetch_all(&state.db)
             .await?;
     let mut failed = 0;
@@ -470,7 +468,7 @@ async fn convert_one(state: &AppState, id: Uuid, rel: &str, enc: Option<&str>) -
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             if e.to_string() == "missing on disk" {
-                sqlx::query("UPDATE files SET enc_key = $2 WHERE id = $1").bind(id).bind(keys.current_id()).execute(&state.db).await?;
+                sqlx::query!("UPDATE files SET enc_key = $2 WHERE id = $1", id, keys.current_id()).execute(&state.db).await?;
             }
             return Err(e);
         }

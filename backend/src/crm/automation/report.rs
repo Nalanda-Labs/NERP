@@ -164,7 +164,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
 /// conditions, but does not wait again.
 async fn retry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    let old: Option<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as("SELECT status, robot_id, schedule_id FROM crm_robot_runs WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let old: Option<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query!(r#"SELECT status, robot_id, schedule_id FROM crm_robot_runs WHERE id = $1"#, id).map(|r| (r.status, r.robot_id, r.schedule_id)).fetch_optional(&state.db).await?;
     let Some((status, robot, schedule)) = old else { return Err(AppError::NotFound("run")) };
     if status != "failed" {
         return Err(AppError::bad("only failed runs can be retried"));
@@ -172,11 +172,8 @@ async fn retry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     if robot.is_none() && schedule.is_none() {
         return Err(AppError::bad("the robot of this run was deleted"));
     }
-    let run: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_robot_runs (robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, data, is_test)
-         SELECT robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, now(), 0, '{\"waited\": true}', is_test FROM crm_robot_runs WHERE id = $1 RETURNING id",
-    )
-    .bind(id)
+    let run: Uuid = sqlx::query_scalar!("INSERT INTO crm_robot_runs (robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, data, is_test)
+         SELECT robot_id, schedule_id, robot_name, item_id, stage_id, category_id, action, now(), 0, '{\"waited\": true}', is_test FROM crm_robot_runs WHERE id = $1 RETURNING id", id)
     .fetch_one(&state.db)
     .await?;
     enqueue_run(&state, run, Utc::now(), false).await?;
@@ -209,48 +206,34 @@ async fn stage_times(State(state): State<AppState>, auth: AuthUser, Query(q): Qu
     if to <= from || to - from > Duration::days(3 * 366) {
         return Err(AppError::bad("choose a period of at most three years"));
     }
-    let times: Vec<StageTime> = sqlx::query_as(
-        "WITH visits AS (
+    let times: Vec<StageTime> = sqlx::query_as!(StageTime, r#"WITH visits AS (
              SELECT h.item_id, h.category_id, h.stage_id, h.entered_at,
                     LEAD(h.entered_at) OVER (PARTITION BY h.item_id ORDER BY h.entered_at, h.id) AS left_at
                FROM crm_stage_history h
               WHERE h.item_id IN (SELECT item_id FROM crm_stage_history WHERE category_id = $1 AND entered_at >= $2 AND entered_at < $3)
          )
-         SELECT v.stage_id, COUNT(*)::int8 AS entries,
-                (AVG(EXTRACT(EPOCH FROM (COALESCE(v.left_at, now()) - v.entered_at))) / 3600)::float8 AS avg_hours,
-                (percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (COALESCE(v.left_at, now()) - v.entered_at))) / 3600)::float8 AS median_hours,
-                (MAX(EXTRACT(EPOCH FROM (COALESCE(v.left_at, now()) - v.entered_at))) / 3600)::float8 AS max_hours
+         SELECT v.stage_id AS "stage_id!", COUNT(*)::int8 AS "entries!",
+                (AVG(EXTRACT(EPOCH FROM (COALESCE(v.left_at, now()) - v.entered_at))) / 3600)::float8 AS "avg_hours?",
+                (percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (COALESCE(v.left_at, now()) - v.entered_at))) / 3600)::float8 AS "median_hours?",
+                (MAX(EXTRACT(EPOCH FROM (COALESCE(v.left_at, now()) - v.entered_at))) / 3600)::float8 AS "max_hours?"
            FROM visits v JOIN crm_items i ON i.id = v.item_id AND i.deleted_at IS NULL
           WHERE v.category_id = $1 AND v.entered_at >= $2 AND v.entered_at < $3
-          GROUP BY v.stage_id",
-    )
-    .bind(q.category_id)
-    .bind(from)
-    .bind(to)
+          GROUP BY v.stage_id"#, q.category_id, from, to)
     .fetch_all(&state.db)
     .await?;
-    let now: Vec<(Uuid, i64, i64)> = sqlx::query_as(
-        "SELECT i.stage_id, COUNT(*)::int8,
-                COUNT(*) FILTER (WHERE s.sla_minutes IS NOT NULL AND i.stage_changed_at + make_interval(mins => s.sla_minutes) < now())::int8
+    let now: Vec<(Uuid, i64, i64)> = sqlx::query!(r#"SELECT i.stage_id AS "stage_id!", COUNT(*)::int8 AS "c1!",
+                COUNT(*) FILTER (WHERE s.sla_minutes IS NOT NULL AND i.stage_changed_at + make_interval(mins => s.sla_minutes) < now())::int8 AS "c2!"
            FROM crm_items i JOIN crm_stages s ON s.id = i.stage_id
           WHERE i.category_id = $1 AND i.deleted_at IS NULL
-          GROUP BY i.stage_id",
-    )
-    .bind(q.category_id)
+          GROUP BY i.stage_id"#, q.category_id).map(|r| (r.stage_id, r.c1, r.c2))
     .fetch_all(&state.db)
     .await?;
-    let breaches: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT t.data->'stage'->>'id', COUNT(*)::int8 FROM crm_timeline t JOIN crm_items i ON i.id = t.item_id
+    let breaches: Vec<(String, i64)> = sqlx::query!(r#"SELECT t.data->'stage'->>'id' AS "c0!", COUNT(*)::int8 AS "c1!" FROM crm_timeline t JOIN crm_items i ON i.id = t.item_id
           WHERE t.kind = 'sla' AND i.category_id = $1 AND t.created_at >= $2 AND t.created_at < $3
-          GROUP BY 1",
-    )
-    .bind(q.category_id)
-    .bind(from)
-    .bind(to)
+          GROUP BY 1"#, q.category_id, from, to).map(|r| (r.c0, r.c1))
     .fetch_all(&state.db)
     .await?;
-    let stages: Vec<(Uuid, String, String, String, Option<i32>)> = sqlx::query_as("SELECT id, name, color, semantics, sla_minutes FROM crm_stages WHERE category_id = $1 ORDER BY sort, name")
-        .bind(q.category_id)
+    let stages: Vec<(Uuid, String, String, String, Option<i32>)> = sqlx::query!(r#"SELECT id, name, color, semantics, sla_minutes FROM crm_stages WHERE category_id = $1 ORDER BY sort, name"#, q.category_id).map(|r| (r.id, r.name, r.color, r.semantics, r.sla_minutes))
         .fetch_all(&state.db)
         .await?;
     let rows: Vec<Value> = stages

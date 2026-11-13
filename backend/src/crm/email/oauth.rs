@@ -249,54 +249,28 @@ async fn finish(state: &AppState, code: String, saved: Value) -> Result<String, 
     // Reconnecting, or the same account connected again: update in place.
     let existing: Option<Uuid> = match reconnect {
         Some(id) => Some(id),
-        None => sqlx::query_scalar("SELECT id FROM crm_mailboxes WHERE owner_id = $1 AND lower(email) = $2 AND auth_kind = $3")
-            .bind(user)
-            .bind(&email)
-            .bind(p.kind)
+        None => sqlx::query_scalar!("SELECT id FROM crm_mailboxes WHERE owner_id = $1 AND lower(email) = $2 AND auth_kind = $3", user, &email, p.kind)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| e.to_string())?,
     };
     let id = match existing {
         Some(id) => {
-            sqlx::query(
-                "UPDATE crm_mailboxes SET secret = $3, access_token = $4, access_expires_at = $5, last_error = NULL, updated_at = now()
-                 WHERE id = $1 AND owner_id = $2 AND auth_kind = $6",
-            )
-            .bind(id)
-            .bind(user)
-            .bind(crypto::seal(key, &refresh))
-            .bind(crypto::seal(key, &t.access_token))
-            .bind(expires)
-            .bind(p.kind)
+            sqlx::query!("UPDATE crm_mailboxes SET secret = $3, access_token = $4, access_expires_at = $5, last_error = NULL, updated_at = now()
+                 WHERE id = $1 AND owner_id = $2 AND auth_kind = $6", id, user, crypto::seal(key, &refresh), crypto::seal(key, &t.access_token), expires, p.kind)
             .execute(&state.db)
             .await
             .map_err(|e| e.to_string())?;
             id
         }
         None => {
-            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_mailboxes WHERE owner_id = $1").bind(user).fetch_one(&state.db).await.map_err(|e| e.to_string())?;
+            let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_mailboxes WHERE owner_id = $1"#, user).fetch_one(&state.db).await.map_err(|e| e.to_string())?;
             if n >= 10 {
                 return Err("at most 10 mailboxes per person".into());
             }
-            sqlx::query_scalar(
-                "INSERT INTO crm_mailboxes (owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
+            sqlx::query_scalar!("INSERT INTO crm_mailboxes (owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
                      username, secret, auth_kind, access_token, access_expires_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $2, $10, $11, $12, $13) RETURNING id",
-            )
-            .bind(user)
-            .bind(&email)
-            .bind(&name)
-            .bind(p.imap.0)
-            .bind(p.imap.1)
-            .bind(p.imap.2)
-            .bind(p.smtp.0)
-            .bind(p.smtp.1)
-            .bind(p.smtp.2)
-            .bind(crypto::seal(key, &refresh))
-            .bind(p.kind)
-            .bind(crypto::seal(key, &t.access_token))
-            .bind(expires)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $2, $10, $11, $12, $13) RETURNING id", user, &email, &name, p.imap.0, p.imap.1, p.imap.2, p.smtp.0, p.smtp.1, p.smtp.2, crypto::seal(key, &refresh), p.kind, crypto::seal(key, &t.access_token), expires)
             .fetch_one(&state.db)
             .await
             .map_err(|e| e.to_string())?
@@ -319,11 +293,7 @@ pub async fn access_token(state: &AppState, mb: &MailboxRow) -> Result<String, S
     let refresh = crypto::open(key, &mb.secret).ok_or("the stored sign-in cannot be read; reconnect the mailbox")?;
     let t = token_request(&p, &[("grant_type", "refresh_token"), ("refresh_token", &refresh)]).await?;
     // Microsoft rotates refresh tokens; keep the newest.
-    sqlx::query("UPDATE crm_mailboxes SET access_token = $2, access_expires_at = $3, secret = COALESCE($4, secret) WHERE id = $1")
-        .bind(mb.id)
-        .bind(crypto::seal(key, &t.access_token))
-        .bind(Utc::now() + Duration::seconds(t.expires_in.unwrap_or(3600)))
-        .bind(t.refresh_token.as_deref().map(|r| crypto::seal(key, r)))
+    sqlx::query!("UPDATE crm_mailboxes SET access_token = $2, access_expires_at = $3, secret = COALESCE($4, secret) WHERE id = $1", mb.id, crypto::seal(key, &t.access_token), Utc::now() + Duration::seconds(t.expires_in.unwrap_or(3600)), t.refresh_token.as_deref().map(|r| crypto::seal(key, r)))
         .execute(&state.db)
         .await
         .map_err(|e| e.to_string())?;

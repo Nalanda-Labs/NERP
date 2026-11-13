@@ -48,7 +48,7 @@ struct Row {
 
 /// Open deals and leads of these people (all, when None) with at least one reason.
 async fn rows(state: &AppState, users: Option<&[Uuid]>) -> AppResult<Vec<Row>> {
-    let hours: i32 = sqlx::query_scalar("SELECT reply_hours FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
+    let hours: i32 = sqlx::query_scalar!("SELECT reply_hours FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
     Ok(sqlx::query_as(
         "WITH open AS (
              SELECT i.id, t.code, t.name AS type_name, i.title, s.name AS stage, i.assigned_to, i.close_date, i.entity_type, i.stage_changed_at, s.sla_minutes
@@ -137,11 +137,11 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Q>)
 
 /// Hourly: at 8:00 company time, each responsible person gets their summary (once a day).
 pub async fn run(state: &AppState) -> anyhow::Result<()> {
-    let (digest, email): (bool, bool) = sqlx::query_as("SELECT attention_digest, attention_email FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
+    let (digest, email): (bool, bool) = sqlx::query!(r#"SELECT attention_digest, attention_email FROM crm_insight_settings WHERE id = 1"#).map(|r| (r.attention_digest, r.attention_email)).fetch_one(&state.db).await?;
     if !digest {
         return Ok(());
     }
-    let tz: chrono_tz::Tz = sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = 'default_timezone'")
+    let tz: chrono_tz::Tz = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'default_timezone'")
         .fetch_optional(&state.db)
         .await?
         .and_then(|v| v.as_str().and_then(|s| s.parse().ok()))
@@ -169,7 +169,7 @@ async fn send_digests(state: &AppState, email: bool, day: &str) -> anyhow::Resul
         if !fresh {
             continue;
         }
-        let active: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1 AND is_active AND NOT is_guest").bind(user).fetch_optional(&state.db).await?;
+        let active: Option<String> = sqlx::query_scalar!("SELECT email FROM users WHERE id = $1 AND is_active AND NOT is_guest", user).fetch_optional(&state.db).await?;
         let Some(addr) = active else { continue };
         let mut kinds: BTreeMap<&str, i64> = BTreeMap::new();
         for r in &list {
@@ -207,7 +207,7 @@ async fn send_now_route(State(state): State<AppState>, auth: AuthUser) -> AppRes
 }
 
 async fn send_now(state: &AppState) -> anyhow::Result<()> {
-    let email: bool = sqlx::query_scalar("SELECT attention_email FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
+    let email: bool = sqlx::query_scalar!("SELECT attention_email FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
     let day = Utc::now().date_naive().to_string();
     let mut redis = state.redis.clone();
     // A manual run sends again even if the morning's went out.

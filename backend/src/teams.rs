@@ -61,7 +61,7 @@ fn check(b: &TeamInput) -> AppResult<String> {
 }
 
 async fn employees_exist(state: &AppState, ids: &[Uuid]) -> AppResult<()> {
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND NOT is_guest AND NOT is_system").bind(ids).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND NOT is_guest AND NOT is_system"#, ids).fetch_one(&state.db).await?;
     if n as usize != ids.len() {
         return Err(AppError::bad("team members are employees"));
     }
@@ -69,18 +69,15 @@ async fn employees_exist(state: &AppState, ids: &[Uuid]) -> AppResult<()> {
 }
 
 async fn team_lead(state: &AppState, id: Uuid) -> AppResult<Option<Uuid>> {
-    let row: Option<Option<Uuid>> = sqlx::query_scalar("SELECT lead_id FROM teams WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let row: Option<Option<Uuid>> = sqlx::query_scalar!(r#"SELECT lead_id AS "lead_id?" FROM teams WHERE id = $1"#, id).fetch_optional(&state.db).await?;
     row.ok_or(AppError::NotFound("team"))
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, String, Option<String>, Option<String>, Option<Uuid>, Option<String>, Option<Uuid>, i64, bool)> = sqlx::query_as(
-        "SELECT t.id, t.name, t.description, t.color, t.lead_id, trim(l.first_name || ' ' || l.last_name), l.avatar_file_id,
-                (SELECT COUNT(*) FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = t.id AND u.is_active),
-                EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = t.id AND m.user_id = $1) OR t.lead_id = $1
-         FROM teams t LEFT JOIN users l ON l.id = t.lead_id ORDER BY lower(t.name)",
-    )
-    .bind(auth.id)
+    let rows: Vec<(Uuid, String, Option<String>, Option<String>, Option<Uuid>, Option<String>, Option<Uuid>, i64, bool)> = sqlx::query!(r#"SELECT t.id AS "id!", t.name AS "name!", t.description AS "description?", t.color AS "color?", t.lead_id AS "lead_id?", trim(l.first_name || ' ' || l.last_name) AS "c5?", l.avatar_file_id AS "avatar_file_id?",
+                (SELECT COUNT(*) FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = t.id AND u.is_active) AS "c7!",
+                EXISTS (SELECT 1 FROM team_members m WHERE m.team_id = t.id AND m.user_id = $1) OR t.lead_id = $1 AS "c8!"
+         FROM teams t LEFT JOIN users l ON l.id = t.lead_id ORDER BY lower(t.name)"#, auth.id).map(|r| (r.id, r.name, r.description, r.color, r.lead_id, r.c5, r.avatar_file_id, r.c7, r.c8))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -93,19 +90,15 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
 
 async fn one(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let t: Option<(String, Option<String>, Option<String>, Option<Uuid>, DateTime<Utc>)> =
-        sqlx::query_as("SELECT name, description, color, lead_id, created_at FROM teams WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+        sqlx::query!(r#"SELECT name, description, color, lead_id, created_at FROM teams WHERE id = $1"#, id).map(|r| (r.name, r.description, r.color, r.lead_id, r.created_at)).fetch_optional(&state.db).await?;
     let (name, desc, color, lead, created) = t.ok_or(AppError::NotFound("team"))?;
-    let members: Vec<(Uuid, String, Option<Uuid>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id, u.position, m.role,
-                (SELECT string_agg(d.name, ', ' ORDER BY d.name) FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id)
+    let members: Vec<(Uuid, String, Option<Uuid>, Option<String>, Option<String>, Option<String>)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.avatar_file_id AS "avatar_file_id?", u.position AS "position?", m.role AS "role?",
+                (SELECT string_agg(d.name, ', ' ORDER BY d.name) FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id) AS "c5?"
          FROM team_members m JOIN users u ON u.id = m.user_id WHERE m.team_id = $1 AND u.is_active
-         ORDER BY u.id = $2 DESC, lower(u.first_name), lower(u.last_name)",
-    )
-    .bind(id)
-    .bind(lead)
+         ORDER BY u.id = $2 DESC, lower(u.first_name), lower(u.last_name)"#, id, lead).map(|r| (r.id, r.c1, r.avatar_file_id, r.position, r.role, r.c5))
     .fetch_all(&state.db)
     .await?;
-    let chat: Option<Uuid> = sqlx::query_scalar("SELECT id FROM im_chats WHERE team_id = $1").bind(id).fetch_optional(&state.db).await?;
+    let chat: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM im_chats WHERE team_id = $1", id).fetch_optional(&state.db).await?;
     let in_team = lead == Some(auth.id) || members.iter().any(|m| m.0 == auth.id);
     Ok(Json(json!({
         "id": id, "name": name, "description": desc, "color": color, "lead_id": lead, "created_at": created,
@@ -116,7 +109,7 @@ async fn one(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>
 }
 
 async fn write_members(tx: &mut sqlx::PgConnection, id: Uuid, lead: Option<Uuid>, members: &[Member]) -> AppResult<()> {
-    sqlx::query("DELETE FROM team_members WHERE team_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM team_members WHERE team_id = $1", id).execute(&mut *tx).await?;
     let mut ids: Vec<Uuid> = vec![];
     let mut roles: Vec<Option<String>> = vec![];
     for m in members {
@@ -150,12 +143,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cli
     }
     employees_exist(&state, &members.iter().map(|m| m.user_id).chain(b.lead_id).collect::<Vec<_>>()).await?;
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO teams (name, description, color, lead_id, created_by) VALUES ($1, NULLIF(trim($2), ''), $3, $4, $5) RETURNING id")
-        .bind(&name)
-        .bind(&b.description)
-        .bind(&b.color)
-        .bind(b.lead_id)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO teams (name, description, color, lead_id, created_by) VALUES ($1, NULLIF(trim($2), ''), $3, $4, $5) RETURNING id", &name, b.description.as_deref(), b.color.as_deref(), b.lead_id, auth.id)
         .fetch_one(&mut *tx)
         .await?;
     write_members(&mut tx, id, b.lead_id, &members).await?;
@@ -172,19 +160,14 @@ async fn update(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cli
         employees_exist(&state, &[l]).await?;
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE teams SET name = $2, description = NULLIF(trim($3), ''), color = $4, lead_id = $5, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(&name)
-        .bind(&b.description)
-        .bind(&b.color)
-        .bind(b.lead_id)
+    sqlx::query!("UPDATE teams SET name = $2, description = NULLIF(trim($3), ''), color = $4, lead_id = $5, updated_at = now() WHERE id = $1", id, &name, b.description.as_deref(), b.color.as_deref(), b.lead_id)
         .execute(&mut *tx)
         .await?;
     if let Some(m) = &b.members {
         employees_exist(&state, &m.iter().map(|m| m.user_id).collect::<Vec<_>>()).await?;
         write_members(&mut tx, id, b.lead_id, m).await?;
     } else if let Some(l) = b.lead_id {
-        sqlx::query("INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'Lead') ON CONFLICT DO NOTHING").bind(id).bind(l).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO team_members (team_id, user_id, role) VALUES ($1, $2, 'Lead') ON CONFLICT DO NOTHING", id, l).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     crate::im::sync_linked_chat(&state, Link::Team(id)).await?;
@@ -219,7 +202,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cli
     auth.require(perm::DEPARTMENTS_MANAGE)?;
     team_lead(&state, id).await?;
     let gone = crate::im::linked_chat_people(&state, Link::Team(id)).await?;
-    sqlx::query("DELETE FROM teams WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM teams WHERE id = $1", id).execute(&state.db).await?;
     crate::im::linked_chat_gone(&state, gone).await;
     audit::record(&state.db, Some(auth.id), "team.delete", "team", Some(id.to_string()), json!({}), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))
@@ -236,14 +219,11 @@ async fn chat(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
 }
 
 async fn of_user(State(state): State<AppState>, _auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let employee: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND NOT is_guest AND NOT is_system)").bind(id).fetch_one(&state.db).await?;
+    let employee: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND NOT is_guest AND NOT is_system) AS "v!""#, id).fetch_one(&state.db).await?;
     if !employee {
         return Err(AppError::NotFound("employee"));
     }
-    let rows: Vec<(Uuid, String, Option<String>, Option<String>, bool)> = sqlx::query_as(
-        "SELECT t.id, t.name, t.color, m.role, t.lead_id = $1 FROM team_members m JOIN teams t ON t.id = m.team_id WHERE m.user_id = $1 ORDER BY lower(t.name)",
-    )
-    .bind(id)
+    let rows: Vec<(Uuid, String, Option<String>, Option<String>, bool)> = sqlx::query!(r#"SELECT t.id AS "id!", t.name AS "name!", t.color AS "color?", m.role AS "role?", t.lead_id = $1 AS "c4!" FROM team_members m JOIN teams t ON t.id = m.team_id WHERE m.user_id = $1 ORDER BY lower(t.name)"#, id).map(|r| (r.id, r.name, r.color, r.role, r.c4))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(tid, n, c, r, lead)| json!({ "id": tid, "name": n, "color": c, "role": r, "lead": lead })).collect::<Vec<_>>() })))

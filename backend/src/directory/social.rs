@@ -135,7 +135,7 @@ fn apple_secret(p: &Provider, pem: &str) -> Result<String, String> {
 
 /// Public: the login page's buttons.
 pub async fn public_list(State(state): State<AppState>) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as("SELECT id, kind, label FROM sign_in_providers WHERE enabled AND secret IS NOT NULL ORDER BY position, created_at").fetch_all(&state.db).await?;
+    let rows: Vec<(Uuid, String, String)> = sqlx::query!(r#"SELECT id, kind, label FROM sign_in_providers WHERE enabled AND secret IS NOT NULL ORDER BY position, created_at"#).map(|r| (r.id, r.kind, r.label)).fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, k, l)| json!({ "id": id, "kind": k, "label": l })).collect::<Vec<_>>() })))
 }
 
@@ -226,14 +226,8 @@ async fn callback(state: AppState, meta: ClientMeta, q: Callback) -> Response {
         let who = identify(&state, &p, q.code.as_deref().unwrap_or(""), &saved, q.user.as_deref()).await?;
         let user = match link {
             Some(u) => {
-                sqlx::query(
-                    "INSERT INTO user_identities (provider_id, subject, user_id, email) VALUES ($1, $2, $3, $4)
-                     ON CONFLICT (provider_id, subject) DO UPDATE SET user_id = $3, email = $4 WHERE user_identities.user_id = $3",
-                )
-                .bind(p.id)
-                .bind(&who.subject)
-                .bind(u)
-                .bind(&who.email)
+                sqlx::query!("INSERT INTO user_identities (provider_id, subject, user_id, email) VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (provider_id, subject) DO UPDATE SET user_id = $3, email = $4 WHERE user_identities.user_id = $3", p.id, &who.subject, u, who.email.as_deref())
                 .execute(&state.db)
                 .await
                 .map_err(|e| e.to_string())
@@ -253,7 +247,7 @@ async fn callback(state: AppState, meta: ClientMeta, q: Callback) -> Response {
             if let Err(e) = crate::auth::ip::check_user(&state, user, meta.ip.as_deref()).await {
                 return to_login(&e.to_string());
             }
-            let has_2fa: bool = sqlx::query_scalar("SELECT totp_secret IS NOT NULL FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await.unwrap_or(false);
+            let has_2fa: bool = sqlx::query_scalar!(r#"SELECT totp_secret IS NOT NULL AS "v!" FROM users WHERE id = $1"#, user).fetch_one(&state.db).await.unwrap_or(false);
             match crate::routes::auth::second_step(&state, user, has_2fa).await {
                 Ok(Some(next)) => {
                     let step = if next["two_factor_required"] == json!(true) { "code" } else { "setup" };
@@ -381,9 +375,7 @@ async fn identify(state: &AppState, p: &Provider, code: &str, saved: &Value, app
 
 /// The employee: linked before, or found by a verified email address (and linked now).
 async fn find(state: &AppState, p: &Provider, who: &Who) -> Result<Uuid, String> {
-    let linked: Option<(Uuid, bool)> = sqlx::query_as("SELECT u.id, u.is_active FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider_id = $1 AND i.subject = $2")
-        .bind(p.id)
-        .bind(&who.subject)
+    let linked: Option<(Uuid, bool)> = sqlx::query!(r#"SELECT u.id, u.is_active FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider_id = $1 AND i.subject = $2"#, p.id, &who.subject).map(|r| (r.id, r.is_active))
         .fetch_optional(&state.db)
         .await
         .map_err(|e| e.to_string())?;
@@ -395,16 +387,12 @@ async fn find(state: &AppState, p: &Provider, who: &Who) -> Result<Uuid, String>
             if !who.verified {
                 return Err(format!("{} has not verified {email}; sign in with your password and link the account from your profile", p.label));
             }
-            let found: Option<(Uuid, bool, bool)> = sqlx::query_as("SELECT id, is_active, join_pending FROM users WHERE email = $1 AND NOT is_system").bind(email).fetch_optional(&state.db).await.map_err(|e| e.to_string())?;
+            let found: Option<(Uuid, bool, bool)> = sqlx::query!(r#"SELECT id, is_active, join_pending FROM users WHERE email = $1 AND NOT is_system"#, email).map(|r| (r.id, r.is_active, r.join_pending)).fetch_optional(&state.db).await.map_err(|e| e.to_string())?;
             match found {
                 Some((_, _, true)) => return Err("your request to join is still waiting for approval".into()),
                 Some((_, false, _)) => return Err("this account has been deactivated".into()),
                 Some((id, true, _)) => {
-                    sqlx::query("INSERT INTO user_identities (provider_id, subject, user_id, email) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING")
-                        .bind(p.id)
-                        .bind(&who.subject)
-                        .bind(id)
-                        .bind(email)
+                    sqlx::query!("INSERT INTO user_identities (provider_id, subject, user_id, email) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", p.id, &who.subject, id, email)
                         .execute(&state.db)
                         .await
                         .map_err(|e| e.to_string())?;
@@ -415,8 +403,8 @@ async fn find(state: &AppState, p: &Provider, who: &Who) -> Result<Uuid, String>
         }
     };
     // Signing in this way also accepts a pending invitation.
-    sqlx::query("UPDATE users SET invite_pending = FALSE, last_login_at = now() WHERE id = $1").bind(user).execute(&state.db).await.map_err(|e| e.to_string())?;
-    sqlx::query("UPDATE user_identities SET last_used_at = now() WHERE provider_id = $1 AND subject = $2").bind(p.id).bind(&who.subject).execute(&state.db).await.map_err(|e| e.to_string())?;
+    sqlx::query!("UPDATE users SET invite_pending = FALSE, last_login_at = now() WHERE id = $1", user).execute(&state.db).await.map_err(|e| e.to_string())?;
+    sqlx::query!("UPDATE user_identities SET last_used_at = now() WHERE provider_id = $1 AND subject = $2", p.id, &who.subject).execute(&state.db).await.map_err(|e| e.to_string())?;
     Ok(user)
 }
 
@@ -425,17 +413,14 @@ async fn find(state: &AppState, p: &Provider, who: &Who) -> Result<Uuid, String>
 // ---------------------------------------------------------------------------
 
 pub async fn my_identities(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, String, String, Option<String>, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        "SELECT p.id, p.kind, p.label, i.email, i.created_at, i.last_used_at FROM user_identities i JOIN sign_in_providers p ON p.id = i.provider_id WHERE i.user_id = $1 ORDER BY p.position",
-    )
-    .bind(auth.id)
+    let rows: Vec<(Uuid, String, String, Option<String>, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query!(r#"SELECT p.id, p.kind, p.label, i.email, i.created_at, i.last_used_at FROM user_identities i JOIN sign_in_providers p ON p.id = i.provider_id WHERE i.user_id = $1 ORDER BY p.position"#, auth.id).map(|r| (r.id, r.kind, r.label, r.email, r.created_at, r.last_used_at))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, k, l, e, c, u)| json!({ "provider_id": id, "kind": k, "label": l, "email": e, "created_at": c, "last_used_at": u })).collect::<Vec<_>>() })))
 }
 
 pub async fn unlink(State(state): State<AppState>, auth: AuthUser, Path(provider): Path<Uuid>) -> AppResult<Json<Value>> {
-    sqlx::query("DELETE FROM user_identities WHERE user_id = $1 AND provider_id = $2").bind(auth.id).bind(provider).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM user_identities WHERE user_id = $1 AND provider_id = $2", auth.id, provider).execute(&state.db).await?;
     my_identities(State(state), auth).await
 }
 
@@ -451,7 +436,7 @@ fn admin_json(p: &Provider, linked: i64) -> Value {
 pub async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::SETTINGS_MANAGE)?;
     let rows: Vec<Provider> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLS} FROM sign_in_providers ORDER BY position, created_at"))).fetch_all(&state.db).await?;
-    let counts: Vec<(Uuid, i64)> = sqlx::query_as("SELECT provider_id, COUNT(*) FROM user_identities GROUP BY 1").fetch_all(&state.db).await?;
+    let counts: Vec<(Uuid, i64)> = sqlx::query!(r#"SELECT provider_id AS "provider_id!", COUNT(*) AS "c1!" FROM user_identities GROUP BY 1"#).map(|r| (r.provider_id, r.c1)).fetch_all(&state.db).await?;
     Ok(Json(json!({
         "redirect_uri": redirect_uri(&state),
         "items": rows.iter().map(|p| admin_json(p, counts.iter().find(|(i, _)| *i == p.id).map(|(_, n)| *n).unwrap_or(0))).collect::<Vec<_>>(),
@@ -526,20 +511,9 @@ async fn save(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: ProviderIn
         return Err(bad(if kind == "apple" { "paste the private key (.p8) before turning it on" } else { "set the client secret before turning it on" }));
     }
     let pid = id.unwrap_or_else(Uuid::new_v4);
-    sqlx::query(
-        "INSERT INTO sign_in_providers (id, kind, label, client_id, secret, issuer, team_id, key_id, enabled, position)
+    sqlx::query!("INSERT INTO sign_in_providers (id, kind, label, client_id, secret, issuer, team_id, key_id, enabled, position)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT COALESCE(MAX(position), 0) + 1 FROM sign_in_providers))
-         ON CONFLICT (id) DO UPDATE SET kind = $2, label = $3, client_id = $4, secret = $5, issuer = $6, team_id = $7, key_id = $8, enabled = $9",
-    )
-    .bind(pid)
-    .bind(&kind)
-    .bind(&label)
-    .bind(&client_id)
-    .bind(&secret)
-    .bind(&issuer)
-    .bind(&team_id)
-    .bind(&key_id)
-    .bind(enabled)
+         ON CONFLICT (id) DO UPDATE SET kind = $2, label = $3, client_id = $4, secret = $5, issuer = $6, team_id = $7, key_id = $8, enabled = $9", pid, &kind, &label, &client_id, secret.as_deref(), issuer.as_deref(), team_id.as_deref(), key_id.as_deref(), enabled)
     .execute(&state.db)
     .await?;
     audit::record(&state.db, Some(auth.id), "directory.provider_update", "settings", Some(pid.to_string()), json!({ "kind": kind, "enabled": enabled }), None).await;
@@ -557,6 +531,6 @@ pub async fn change(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 
 pub async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     auth.require(perm::SETTINGS_MANAGE)?;
-    sqlx::query("DELETE FROM sign_in_providers WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM sign_in_providers WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }

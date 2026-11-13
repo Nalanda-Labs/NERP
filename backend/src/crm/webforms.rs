@@ -102,7 +102,7 @@ async fn load(state: &AppState, id: Uuid) -> AppResult<Form> {
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("form"))?;
-    f.submissions = sqlx::query_scalar("SELECT COUNT(*) FROM crm_webform_submissions WHERE form_id = $1").bind(id).fetch_one(&state.db).await?;
+    f.submissions = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_webform_submissions WHERE form_id = $1"#, id).fetch_one(&state.db).await?;
     Ok(f)
 }
 
@@ -153,12 +153,10 @@ async fn targets(State(state): State<AppState>, auth: AuthUser, Query(q): Query<
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    let rows: Vec<(Uuid, String, String, i16, bool, i64, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT f.id, f.key, f.name, f.entity_type, f.is_active,
-             (SELECT COUNT(*) FROM crm_webform_submissions s WHERE s.form_id = f.id),
-             (SELECT MAX(s.created_at) FROM crm_webform_submissions s WHERE s.form_id = f.id)
-         FROM crm_webforms f ORDER BY f.name",
-    )
+    let rows: Vec<(Uuid, String, String, i16, bool, i64, Option<DateTime<Utc>>)> = sqlx::query!(r#"SELECT f.id AS "id!", f.key AS "key!", f.name AS "name!", f.entity_type AS "entity_type!", f.is_active AS "is_active!",
+             (SELECT COUNT(*) FROM crm_webform_submissions s WHERE s.form_id = f.id) AS "c5!",
+             (SELECT MAX(s.created_at) FROM crm_webform_submissions s WHERE s.form_id = f.id) AS "c6?"
+         FROM crm_webforms f ORDER BY f.name"#).map(|r| (r.id, r.key, r.name, r.entity_type, r.is_active, r.c5, r.c6))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -252,16 +250,13 @@ async fn check_target(state: &AppState, entity_type: i16, category: Option<Uuid>
         return Err(AppError::bad("forms create leads, or records linked to a client (deals, smart processes)"));
     }
     if let Some(c) = category {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2)").bind(c).bind(t.id).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2) AS "v!""#, c, t.id).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("that pipeline is not of this record type"));
         }
     }
     if let Some(s) = stage {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1 AND c.entity_type = $2 AND ($3::uuid IS NULL OR c.id = $3))")
-            .bind(s)
-            .bind(t.id)
-            .bind(category)
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1 AND c.entity_type = $2 AND ($3::uuid IS NULL OR c.id = $3)) AS "v!""#, s, t.id, category)
             .fetch_one(&state.db)
             .await?;
         if !ok {
@@ -272,7 +267,7 @@ async fn check_target(state: &AppState, entity_type: i16, category: Option<Uuid>
 }
 
 async fn check_people(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<Uuid>> {
-    let ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active AND NOT is_system").bind(ids).fetch_one(&state.db).await?;
+    let ok: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active AND NOT is_system"#, ids).fetch_one(&state.db).await?;
     if ok as usize != ids.len() {
         return Err(AppError::bad("choose active employees as responsible"));
     }
@@ -284,23 +279,8 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bod
     let et = b.entity_type.unwrap_or(LEAD);
     check_target(&state, et, b.category_id, b.stage_id).await?;
     let fields = check_fields(&state, et, b.fields.unwrap_or_default()).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_webforms (key, name, entity_type, category_id, stage_id, fields, settings, responsible, reply_mailbox, reply_subject, reply_body, is_active, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
-    )
-    .bind(random_token(12))
-    .bind(required("name", b.name.as_deref().unwrap_or(""), 200)?)
-    .bind(et)
-    .bind(b.category_id)
-    .bind(b.stage_id)
-    .bind(fields)
-    .bind(check_settings(b.settings.unwrap_or_default())?)
-    .bind(check_people(&state, &b.responsible.unwrap_or_default()).await?)
-    .bind(b.reply_mailbox)
-    .bind(b.reply_subject.unwrap_or_default().chars().take(300).collect::<String>())
-    .bind(b.reply_body.unwrap_or_default().chars().take(20_000).collect::<String>())
-    .bind(b.is_active.unwrap_or(true))
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_webforms (key, name, entity_type, category_id, stage_id, fields, settings, responsible, reply_mailbox, reply_subject, reply_body, is_active, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id", random_token(12), required("name", b.name.as_deref().unwrap_or(""), 200)?, et, b.category_id, b.stage_id, fields, check_settings(b.settings.unwrap_or_default())?, &(check_people(&state, &b.responsible.unwrap_or_default()).await?), b.reply_mailbox, b.reply_subject.unwrap_or_default().chars().take(300).collect::<String>(), b.reply_body.unwrap_or_default().chars().take(20_000).collect::<String>(), b.is_active.unwrap_or(true), auth.id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(load(&state, id).await?))
@@ -323,22 +303,8 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
             check_fields(&state, et, f).await?
         }
     };
-    sqlx::query(
-        "UPDATE crm_webforms SET name = $2, entity_type = $3, category_id = $4, stage_id = $5, fields = $6, settings = $7, responsible = $8,
-             reply_mailbox = $9, reply_subject = $10, reply_body = $11, is_active = $12, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(match &b.name { Some(n) => required("name", n, 200)?, None => cur.name })
-    .bind(et)
-    .bind(category)
-    .bind(stage)
-    .bind(fields)
-    .bind(match b.settings { Some(s) => check_settings(s)?, None => cur.settings })
-    .bind(match &b.responsible { Some(r) => check_people(&state, r).await?, None => cur.responsible })
-    .bind(if b.reply_mailbox.is_some() || b.reply_subject.is_some() { b.reply_mailbox } else { cur.reply_mailbox })
-    .bind(b.reply_subject.unwrap_or(cur.reply_subject).chars().take(300).collect::<String>())
-    .bind(b.reply_body.unwrap_or(cur.reply_body).chars().take(20_000).collect::<String>())
-    .bind(b.is_active.unwrap_or(cur.is_active))
+    sqlx::query!("UPDATE crm_webforms SET name = $2, entity_type = $3, category_id = $4, stage_id = $5, fields = $6, settings = $7, responsible = $8,
+             reply_mailbox = $9, reply_subject = $10, reply_body = $11, is_active = $12, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 200)?, None => cur.name }, et, category, stage, fields, match b.settings { Some(s) => check_settings(s)?, None => cur.settings }, &(match &b.responsible { Some(r) => check_people(&state, r).await?, None => cur.responsible }), if b.reply_mailbox.is_some() || b.reply_subject.is_some() { b.reply_mailbox } else { cur.reply_mailbox }, b.reply_subject.unwrap_or(cur.reply_subject).chars().take(300).collect::<String>(), b.reply_body.unwrap_or(cur.reply_body).chars().take(20_000).collect::<String>(), b.is_active.unwrap_or(cur.is_active))
     .execute(&state.db)
     .await?;
     Ok(Json(load(&state, id).await?))
@@ -347,7 +313,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
     // Records created by the form stay; only its submission log goes.
-    let n = sqlx::query("DELETE FROM crm_webforms WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM crm_webforms WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("form"));
     }
@@ -356,12 +322,9 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn submissions(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    let rows: Vec<(Uuid, Option<Uuid>, Option<i16>, Option<String>, Value, Option<Value>, Option<String>, DateTime<Utc>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT s.id, s.item_id, i.entity_type, i.title, s.data, s.utm, s.page_url, s.created_at, s.contact_id
+    let rows: Vec<(Uuid, Option<Uuid>, Option<i16>, Option<String>, Value, Option<Value>, Option<String>, DateTime<Utc>, Option<Uuid>)> = sqlx::query!(r#"SELECT s.id AS "id!", s.item_id AS "item_id?", i.entity_type AS "entity_type?", i.title AS "title?", s.data AS "data!", s.utm AS "utm?", s.page_url AS "page_url?", s.created_at AS "created_at!", s.contact_id AS "contact_id?"
          FROM crm_webform_submissions s LEFT JOIN crm_items i ON i.id = s.item_id
-         WHERE s.form_id = $1 ORDER BY s.created_at DESC LIMIT 200",
-    )
-    .bind(id)
+         WHERE s.form_id = $1 ORDER BY s.created_at DESC LIMIT 200"#, id).map(|r| (r.id, r.item_id, r.entity_type, r.title, r.data, r.utm, r.page_url, r.created_at, r.contact_id))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -391,14 +354,14 @@ fn token_age_secs(state: &AppState, form: Uuid, token: &str) -> Option<i64> {
 }
 
 async fn active_form(state: &AppState, key: &str) -> AppResult<Form> {
-    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_webforms WHERE key = $1 AND is_active").bind(key).fetch_optional(&state.db).await?;
+    let id: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_webforms WHERE key = $1 AND is_active", key).fetch_optional(&state.db).await?;
     load(state, id.ok_or(AppError::NotFound("form"))?).await
 }
 
 /// What a visitor's browser needs to show the form (nothing internal).
 async fn public_form(State(state): State<AppState>, Path(key): Path<String>) -> AppResult<Json<Value>> {
     let f = active_form(&state, &key).await?;
-    let company: String = sqlx::query_scalar("SELECT value #>> '{}' FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await?.unwrap_or_default();
+    let company: String = sqlx::query_scalar!(r#"SELECT value #>> '{}' AS "v!" FROM settings WHERE key = 'company_name'"#).fetch_optional(&state.db).await?.unwrap_or_default();
     let fields: Vec<Field> = serde_json::from_value(f.fields).unwrap_or_default();
     Ok(Json(json!({
         "name": f.name,
@@ -517,14 +480,7 @@ async fn submit(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(key)
     // The visitor's journey on the website leads to the person (or the record made).
     crate::tracking::link_visitor(&state, b.visitor_id.as_deref(), contact.unwrap_or(item)).await;
     let data: Vec<Value> = values.iter().map(|(fl, v)| json!({ "key": fl.key, "label": fl.label, "value": v })).collect();
-    sqlx::query("INSERT INTO crm_webform_submissions (form_id, item_id, contact_id, data, utm, page_url, referrer) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-        .bind(f.id)
-        .bind(item)
-        .bind(contact)
-        .bind(json!(data))
-        .bind(&utm)
-        .bind(&page)
-        .bind(&referrer)
+    sqlx::query!("INSERT INTO crm_webform_submissions (form_id, item_id, contact_id, data, utm, page_url, referrer) VALUES ($1, $2, $3, $4, $5, $6, $7)", f.id, item, contact, json!(data), utm.clone(), page.as_deref(), referrer.as_deref())
         .execute(&state.db)
         .await?;
     for id in [Some(item), contact].into_iter().flatten() {
@@ -630,13 +586,8 @@ async fn create_records(state: &AppState, f: &Form, values: &[(Field, String)], 
             break;
         }
         if let Some(v) = v {
-            contact = sqlx::query_scalar(
-                "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
-                 WHERE m.kind = $1 AND m.normalized = $2 AND i.entity_type = $3 AND i.deleted_at IS NULL ORDER BY i.updated_at DESC LIMIT 1",
-            )
-            .bind(kind)
-            .bind(normalize(kind, v))
-            .bind(CONTACT)
+            contact = sqlx::query_scalar!("SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+                 WHERE m.kind = $1 AND m.normalized = $2 AND i.entity_type = $3 AND i.deleted_at IS NULL ORDER BY i.updated_at DESC LIMIT 1", kind, normalize(kind, v), CONTACT)
             .fetch_optional(&state.db)
             .await?;
         }
@@ -664,9 +615,7 @@ async fn create_records(state: &AppState, f: &Form, values: &[(Field, String)], 
         contact = Some(id);
     }
     if let Some(name) = get("company.name") {
-        let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_items WHERE entity_type = $1 AND deleted_at IS NULL AND lower(title) = lower($2) LIMIT 1")
-            .bind(COMPANY)
-            .bind(&name)
+        let existing: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_items WHERE entity_type = $1 AND deleted_at IS NULL AND lower(title) = lower($2) LIMIT 1", COMPANY, &name)
             .fetch_optional(&state.db)
             .await?;
         let company = match existing {

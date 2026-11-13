@@ -48,13 +48,13 @@ async fn instance(State(state): State<AppState>) -> AppResult<Json<Value>> {
     if !state.config.sandbox {
         return Ok(Json(json!({ "sandbox": false })));
     }
-    let of: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'sandbox_of'").fetch_optional(&state.db).await?;
+    let of: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'sandbox_of'").fetch_optional(&state.db).await?;
     Ok(Json(json!({ "sandbox": true, "copy": of })))
 }
 
 async fn status(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::SYSTEM_MANAGE)?;
-    let last: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'sandbox_last'").fetch_optional(&state.db).await?;
+    let last: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'sandbox_last'").fetch_optional(&state.db).await?;
     let mut redis = state.redis.clone();
     let running: Option<String> = redis.get("sandbox:refreshing").await?;
     Ok(Json(json!({ "is_sandbox": state.config.sandbox, "configured": target().is_some(), "url": link(), "running": running.is_some(), "last": last })))
@@ -66,8 +66,7 @@ async fn outbox(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json
     if !state.config.sandbox {
         return Err(AppError::bad("only a sandbox keeps its emails"));
     }
-    let rows: Vec<(Value, DateTime<Utc>)> = sqlx::query_as("SELECT payload, created_at FROM jobs WHERE kind = $1 ORDER BY created_at DESC LIMIT 100")
-        .bind(crate::jobs::EMAIL_SEND)
+    let rows: Vec<(Value, DateTime<Utc>)> = sqlx::query!(r#"SELECT payload, created_at FROM jobs WHERE kind = $1 ORDER BY created_at DESC LIMIT 100"#, crate::jobs::EMAIL_SEND).map(|r| (r.payload, r.created_at))
         .fetch_all(&state.db)
         .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(p, at)| json!({ "to": p["to"], "subject": p["subject"], "text": p["text"], "at": at })).collect::<Vec<_>>() })))
@@ -97,8 +96,7 @@ async fn refresh(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
             Err(e) => (false, format!("{e:#}")),
         };
         let v = json!({ "started_at": started, "finished_at": Utc::now(), "ok": ok, "output": text });
-        let _ = sqlx::query("INSERT INTO settings (key, value) VALUES ('sandbox_last', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()")
-            .bind(v)
+        let _ = sqlx::query!("INSERT INTO settings (key, value) VALUES ('sandbox_last', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", v)
             .execute(&st.db)
             .await;
         let mut redis = st.redis.clone();
@@ -178,8 +176,7 @@ async fn run(state: &AppState, to: &str) -> anyhow::Result<String> {
             let n = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).execute(&mut *tx).await.map_err(|e| anyhow::anyhow!("{what}: {e}"))?.rows_affected();
             log.push(format!("{what}: {n}"));
         }
-        sqlx::query("INSERT INTO settings (key, value) VALUES ('sandbox_of', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
-            .bind(json!({ "company": company, "copied_at": Utc::now() }))
+        sqlx::query!("INSERT INTO settings (key, value) VALUES ('sandbox_of', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", json!({ "company": company, "copied_at": Utc::now() }))
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;

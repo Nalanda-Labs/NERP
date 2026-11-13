@@ -341,27 +341,14 @@ async fn upsert_once(state: &AppState, p: &Person) -> AppResult<(Uuid, Outcome, 
     }
 
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (email, password_hash, first_name, last_name, phone, position, auth_source, external_id, ldap_dn)
-         VALUES ($1, '!ldap', $2, $3, $4, $5, 'ldap', $6, $7) RETURNING id",
-    )
-    .bind(&p.email)
-    .bind(&p.first_name)
-    .bind(&p.last_name)
-    .bind(&p.phone)
-    .bind(&p.position)
-    .bind(&p.id)
-    .bind(&p.dn)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO users (email, password_hash, first_name, last_name, phone, position, auth_source, external_id, ldap_dn)
+         VALUES ($1, '!ldap', $2, $3, $4, $5, 'ldap', $6, $7) RETURNING id", &p.email, &p.first_name, &p.last_name, p.phone.as_deref(), p.position.as_deref(), &p.id, &p.dn)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'", id).execute(&mut *tx).await?;
     if let Some(d) = &p.department {
-        sqlx::query(
-            "INSERT INTO user_departments (user_id, department_id)
-             SELECT $1, id FROM departments WHERE lower(name) = lower($2) ORDER BY id LIMIT 1",
-        )
-        .bind(id)
-        .bind(d)
+        sqlx::query!("INSERT INTO user_departments (user_id, department_id)
+             SELECT $1, id FROM departments WHERE lower(name) = lower($2) ORDER BY id LIMIT 1", id, d)
         .execute(&mut *tx)
         .await?;
     }
@@ -399,7 +386,7 @@ pub async fn enabled(state: &AppState) -> AppResult<bool> {
     if !state.config.ldap_enabled {
         return Ok(false);
     }
-    let on: Option<bool> = sqlx::query_scalar("SELECT COALESCE((ldap ->> 'enabled')::boolean, FALSE) FROM directory_config WHERE id = 1")
+    let on: Option<bool> = sqlx::query_scalar!(r#"SELECT COALESCE((ldap ->> 'enabled')::boolean, FALSE) AS "v!" FROM directory_config WHERE id = 1"#)
         .fetch_optional(&state.db)
         .await?;
     Ok(on.unwrap_or(false))
@@ -425,7 +412,7 @@ pub async fn sync(state: &AppState, actor: Option<Uuid>) -> AppResult<Value> {
         Err(AppError::BadRequest(e)) => json!({ "error": e }),
         Err(e) => return Err(e),
     };
-    sqlx::query("UPDATE directory_config SET ldap_synced_at = now(), ldap_sync_result = $1 WHERE id = 1").bind(&result).execute(&state.db).await?;
+    sqlx::query!("UPDATE directory_config SET ldap_synced_at = now(), ldap_sync_result = $1 WHERE id = 1", &result).execute(&state.db).await?;
     audit::record(&state.db, actor, "directory.sync", "settings", None, result.clone(), None).await;
     Ok(result)
 }
@@ -477,11 +464,8 @@ async fn sync_locked(state: &AppState, cfg: &LdapConfig, secret: Option<&str>) -
             }
         }
     }
-    let gone: Vec<Uuid> = sqlx::query_scalar(
-        "UPDATE users SET is_active = FALSE, directory_deactivated = TRUE, updated_at = now()
-         WHERE auth_source = 'ldap' AND is_active AND NOT (external_id = ANY($1)) RETURNING id",
-    )
-    .bind(&ids)
+    let gone: Vec<Uuid> = sqlx::query_scalar!("UPDATE users SET is_active = FALSE, directory_deactivated = TRUE, updated_at = now()
+         WHERE auth_source = 'ldap' AND is_active AND NOT (external_id = ANY($1)) RETURNING id", &ids)
     .fetch_all(&state.db)
     .await?;
     if !gone.is_empty() {
@@ -541,10 +525,7 @@ pub async fn put_config(State(state): State<AppState>, auth: AuthUser, Json(mut 
     available(&state)?;
     b.cfg.validate()?;
     let secret = b.bind_password.sealed(&state);
-    sqlx::query("UPDATE directory_config SET ldap = $1, ldap_secret = CASE WHEN $2 THEN $3 ELSE ldap_secret END WHERE id = 1")
-        .bind(serde_json::to_value(&b.cfg).map_err(anyhow::Error::from)?)
-        .bind(secret.is_some())
-        .bind(secret.flatten())
+    sqlx::query!("UPDATE directory_config SET ldap = $1, ldap_secret = CASE WHEN $2 THEN $3 ELSE ldap_secret END WHERE id = 1", serde_json::to_value(&b.cfg).map_err(anyhow::Error::from)?, secret.is_some(), secret.flatten())
         .execute(&state.db)
         .await?;
     audit::record(&state.db, Some(auth.id), "directory.ldap_update", "settings", None, json!({ "enabled": b.cfg.enabled, "url": b.cfg.url }), None).await;

@@ -68,10 +68,7 @@ pub async fn categories(state: &AppState, entity_type: i16) -> AppResult<Vec<Cat
         .fetch_all(&state.db)
         .await?;
     let ids: Vec<Uuid> = cats.iter().map(|c| c.id).collect();
-    let stages: Vec<Stage> = sqlx::query_as(
-        "SELECT id, category_id, name, color, sort, semantics, sla_minutes, sla_escalate, required_fields FROM crm_stages WHERE category_id = ANY($1) ORDER BY sort, name",
-    )
-    .bind(&ids)
+    let stages: Vec<Stage> = sqlx::query_as!(Stage, r#"SELECT id, category_id, name, color, sort, semantics, sla_minutes AS "sla_minutes?", sla_escalate, required_fields FROM crm_stages WHERE category_id = ANY($1) ORDER BY sort, name"#, &ids)
     .fetch_all(&state.db)
     .await?;
     for c in &mut cats {
@@ -81,8 +78,7 @@ pub async fn categories(state: &AppState, entity_type: i16) -> AppResult<Vec<Cat
 }
 
 pub async fn stage(state: &AppState, id: Uuid) -> AppResult<Stage> {
-    sqlx::query_as("SELECT id, category_id, name, color, sort, semantics, sla_minutes, sla_escalate, required_fields FROM crm_stages WHERE id = $1")
-        .bind(id)
+    sqlx::query_as!(Stage, r#"SELECT id, category_id, name, color, sort, semantics, sla_minutes AS "sla_minutes?", sla_escalate, required_fields FROM crm_stages WHERE id = $1"#, id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| AppError::bad("unknown stage"))
@@ -93,12 +89,9 @@ pub async fn default_placement(state: &AppState, t: &EntityType) -> AppResult<(O
     if !t.has_stages {
         return Ok((None, None));
     }
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT c.id, s.id FROM crm_categories c JOIN crm_stages s ON s.category_id = c.id
+    let row: Option<(Uuid, Uuid)> = sqlx::query!(r#"SELECT c.id, s.id AS "c1" FROM crm_categories c JOIN crm_stages s ON s.category_id = c.id
          WHERE c.entity_type = $1 AND s.semantics = 'process'
-         ORDER BY c.is_default DESC, c.sort, s.sort LIMIT 1",
-    )
-    .bind(t.id)
+         ORDER BY c.is_default DESC, c.sort, s.sort LIMIT 1"#, t.id).map(|r| (r.id, r.c1))
     .fetch_optional(&state.db)
     .await?;
     Ok(row.map(|(c, s)| (Some(c), Some(s))).unwrap_or((None, None)))
@@ -131,13 +124,13 @@ async fn config(State(state): State<AppState>, auth: AuthUser, Query(_): Query<C
             "rights": rights(&state, &auth, t.id).await?,
         }));
     }
-    let own_sources: Vec<(String, String)> = sqlx::query_as("SELECT code, name FROM crm_traffic_sources ORDER BY lower(name)").fetch_all(&state.db).await?;
+    let own_sources: Vec<(String, String)> = sqlx::query!(r#"SELECT code, name FROM crm_traffic_sources ORDER BY lower(name)"#).map(|r| (r.code, r.name)).fetch_all(&state.db).await?;
     let mut options = system_options();
     if let Some(list) = options["source"].as_array_mut() {
         list.extend(own_sources.iter().map(|(c, _)| json!(c)));
     }
     let source_labels: serde_json::Map<String, Value> = own_sources.iter().map(|(c, n)| (c.clone(), json!(n))).collect();
-    let currencies: Vec<(String, String, bool)> = sqlx::query_as("SELECT code, rate::text, is_base FROM crm_currencies ORDER BY is_base DESC, sort, code")
+    let currencies: Vec<(String, String, bool)> = sqlx::query!(r#"SELECT code AS "code!", rate::text AS "c1!", is_base AS "is_base!" FROM crm_currencies ORDER BY is_base DESC, sort, code"#).map(|r| (r.code, r.c1, r.is_base))
         .fetch_all(&state.db)
         .await?;
     Ok(Json(json!({
@@ -179,20 +172,12 @@ async fn create_category(State(state): State<AppState>, auth: AuthUser, Path(cod
     }
     let name = required("name", &body.name, 100)?;
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_categories (entity_type, name, sort) VALUES ($1, $2, COALESCE((SELECT MAX(sort) FROM crm_categories WHERE entity_type = $1), 0) + 10) RETURNING id",
-    )
-    .bind(t.id)
-    .bind(&name)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_categories (entity_type, name, sort) VALUES ($1, $2, COALESCE((SELECT MAX(sort) FROM crm_categories WHERE entity_type = $1), 0) + 10) RETURNING id", t.id, &name)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query(
-        "INSERT INTO crm_stages (category_id, name, color, sort, semantics)
+    sqlx::query!("INSERT INTO crm_stages (category_id, name, color, sort, semantics)
          SELECT $1, s.name, s.color, s.sort, s.semantics FROM crm_stages s
-         JOIN crm_categories c ON c.id = s.category_id WHERE c.entity_type = $2 AND c.is_default",
-    )
-    .bind(id)
-    .bind(t.id)
+         JOIN crm_categories c ON c.id = s.category_id WHERE c.entity_type = $2 AND c.is_default", id, t.id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -200,8 +185,7 @@ async fn create_category(State(state): State<AppState>, auth: AuthUser, Path(cod
 }
 
 async fn category_type(state: &AppState, id: Uuid) -> AppResult<(i16, bool)> {
-    sqlx::query_as("SELECT entity_type, is_default FROM crm_categories WHERE id = $1")
-        .bind(id)
+    sqlx::query!(r#"SELECT entity_type, is_default FROM crm_categories WHERE id = $1"#, id).map(|r| (r.entity_type, r.is_default))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("pipeline"))
@@ -218,15 +202,15 @@ async fn update_category(State(state): State<AppState>, auth: AuthUser, Path(id)
     require_admin(&auth)?;
     let (t, _) = category_type(&state, id).await?;
     if let Some(n) = &body.name {
-        sqlx::query("UPDATE crm_categories SET name = $1 WHERE id = $2").bind(required("name", n, 100)?).bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_categories SET name = $1 WHERE id = $2", required("name", n, 100)?, id).execute(&state.db).await?;
     }
     if let Some(s) = body.sort {
-        sqlx::query("UPDATE crm_categories SET sort = $1 WHERE id = $2").bind(s).bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_categories SET sort = $1 WHERE id = $2", s, id).execute(&state.db).await?;
     }
     if body.is_default == Some(true) {
         let mut tx = state.db.begin().await?;
-        sqlx::query("UPDATE crm_categories SET is_default = FALSE WHERE entity_type = $1").bind(t).execute(&mut *tx).await?;
-        sqlx::query("UPDATE crm_categories SET is_default = TRUE WHERE id = $1").bind(id).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_categories SET is_default = FALSE WHERE entity_type = $1", t).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_categories SET is_default = TRUE WHERE id = $1", id).execute(&mut *tx).await?;
         tx.commit().await?;
     }
     Ok(Json(json!({ "categories": categories(&state, t).await? })))
@@ -238,14 +222,13 @@ async fn delete_category(State(state): State<AppState>, auth: AuthUser, Path(id)
     if is_default {
         return Err(AppError::bad("the default pipeline cannot be deleted; make another one the default first"));
     }
-    let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_items WHERE category_id = $1)")
-        .bind(id)
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_items WHERE category_id = $1) AS "v!""#, id)
         .fetch_one(&state.db)
         .await?;
     if used {
         return Err(AppError::bad("this pipeline still has records (including in the recycle bin); move them to another pipeline first"));
     }
-    sqlx::query("DELETE FROM crm_categories WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_categories WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "categories": categories(&state, t).await? })))
 }
 
@@ -265,14 +248,8 @@ async fn create_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
     let semantics = body.semantics.unwrap_or_else(|| "process".into());
     check_semantics(&semantics)?;
     // New open stages go after the last open stage; closing stages go at the end.
-    sqlx::query(
-        "INSERT INTO crm_stages (category_id, name, color, semantics, sort)
-         VALUES ($1, $2, $3, $4, COALESCE((SELECT MAX(sort) FROM crm_stages WHERE category_id = $1 AND (semantics = 'process' OR $4 <> 'process')), 0) + 5)",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(color)
-    .bind(semantics)
+    sqlx::query!("INSERT INTO crm_stages (category_id, name, color, semantics, sort)
+         VALUES ($1, $2, $3, $4, COALESCE((SELECT MAX(sort) FROM crm_stages WHERE category_id = $1 AND (semantics = 'process' OR $4 <> 'process')), 0) + 5)", id, name, color, semantics)
     .execute(&state.db)
     .await?;
     Ok(Json(json!({ "categories": categories(&state, t).await? })))
@@ -294,11 +271,11 @@ async fn update_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
     let s = stage(&state, id).await?;
     let (t, _) = category_type(&state, s.category_id).await?;
     if let Some(n) = &body.name {
-        sqlx::query("UPDATE crm_stages SET name = $1 WHERE id = $2").bind(required("name", n, 60)?).bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_stages SET name = $1 WHERE id = $2", required("name", n, 60)?, id).execute(&state.db).await?;
     }
     if let Some(c) = &body.color {
         check_color(c)?;
-        sqlx::query("UPDATE crm_stages SET color = $1 WHERE id = $2").bind(c).bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_stages SET color = $1 WHERE id = $2", c, id).execute(&state.db).await?;
     }
     if let Some(m) = body.sla_minutes {
         let m = m.filter(|m| *m != 0);
@@ -308,10 +285,10 @@ async fn update_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
         if m.is_some() && s.semantics != "process" {
             return Err(AppError::bad("only open stages can have a time limit"));
         }
-        sqlx::query("UPDATE crm_stages SET sla_minutes = $1 WHERE id = $2").bind(m).bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_stages SET sla_minutes = $1 WHERE id = $2", m, id).execute(&state.db).await?;
     }
     if let Some(e) = body.sla_escalate {
-        sqlx::query("UPDATE crm_stages SET sla_escalate = $1 WHERE id = $2").bind(e).bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_stages SET sla_escalate = $1 WHERE id = $2", e, id).execute(&state.db).await?;
     }
     if let Some(f) = &body.required_fields {
         let ok = |c: &str| super::items::REQUIRABLE.iter().any(|(k, _)| *k == c) || c.strip_prefix("uf.").is_some_and(|u| !u.is_empty() && u.len() <= 64 && u.chars().all(|x| x.is_ascii_alphanumeric() || x == '_'));
@@ -320,7 +297,7 @@ async fn update_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
         }
         let mut f = f.clone();
         f.dedup();
-        sqlx::query("UPDATE crm_stages SET required_fields = $1 WHERE id = $2").bind(&f).bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_stages SET required_fields = $1 WHERE id = $2", &f, id).execute(&state.db).await?;
     }
     Ok(Json(json!({ "categories": categories(&state, t).await? })))
 }
@@ -335,10 +312,7 @@ async fn order_stages(State(state): State<AppState>, auth: AuthUser, Path(id): P
     let (t, _) = category_type(&state, id).await?;
     let mut tx = state.db.begin().await?;
     for (i, sid) in body.ids.iter().enumerate() {
-        sqlx::query("UPDATE crm_stages SET sort = $1 WHERE id = $2 AND category_id = $3")
-            .bind((i as i32 + 1) * 10)
-            .bind(sid)
-            .bind(id)
+        sqlx::query!("UPDATE crm_stages SET sort = $1 WHERE id = $2 AND category_id = $3", (i as i32 + 1) * 10, sid, id)
             .execute(&mut *tx)
             .await?;
     }
@@ -357,9 +331,7 @@ async fn delete_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
     require_admin(&auth)?;
     let s = stage(&state, id).await?;
     let (t, _) = category_type(&state, s.category_id).await?;
-    let same: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_stages WHERE category_id = $1 AND semantics = $2")
-        .bind(s.category_id)
-        .bind(&s.semantics)
+    let same: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_stages WHERE category_id = $1 AND semantics = $2"#, s.category_id, &s.semantics)
         .fetch_one(&state.db)
         .await?;
     if same <= 1 {
@@ -378,10 +350,7 @@ async fn delete_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
             ts
         }
         None => {
-            let first: Uuid = sqlx::query_scalar("SELECT id FROM crm_stages WHERE category_id = $1 AND id <> $2 AND semantics = $3 ORDER BY sort LIMIT 1")
-                .bind(s.category_id)
-                .bind(id)
-                .bind(&s.semantics)
+            let first: Uuid = sqlx::query_scalar!("SELECT id FROM crm_stages WHERE category_id = $1 AND id <> $2 AND semantics = $3 ORDER BY sort LIMIT 1", s.category_id, id, &s.semantics)
                 .fetch_one(&state.db)
                 .await?;
             stage(&state, first).await?
@@ -389,22 +358,13 @@ async fn delete_stage(State(state): State<AppState>, auth: AuthUser, Path(id): P
     };
     let mut tx = state.db.begin().await?;
     // Records moved off the deleted stage enter the target stage (for the funnel).
-    sqlx::query(
-        "INSERT INTO crm_stage_history (item_id, category_id, stage_id, semantics) SELECT id, $2, $1, $3 FROM crm_items WHERE stage_id = $4",
-    )
-    .bind(target.id)
-    .bind(target.category_id)
-    .bind(&target.semantics)
-    .bind(id)
+    sqlx::query!("INSERT INTO crm_stage_history (item_id, category_id, stage_id, semantics) SELECT id, $2, $1, $3 FROM crm_items WHERE stage_id = $4", target.id, target.category_id, &target.semantics, id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE crm_items SET stage_id = $1, stage_semantics = $2, is_closed = ($2 <> 'process') WHERE stage_id = $3")
-        .bind(target.id)
-        .bind(&target.semantics)
-        .bind(id)
+    sqlx::query!("UPDATE crm_items SET stage_id = $1, stage_semantics = $2, is_closed = ($2 <> 'process') WHERE stage_id = $3", target.id, &target.semantics, id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM crm_stages WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM crm_stages WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(json!({ "categories": categories(&state, t).await? })))
 }
@@ -421,7 +381,7 @@ struct SourceInput {
 }
 
 async fn sources_json(state: &AppState) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, String, String, Vec<String>)> = sqlx::query_as("SELECT id, code, name, utm FROM crm_traffic_sources ORDER BY lower(name)").fetch_all(&state.db).await?;
+    let rows: Vec<(Uuid, String, String, Vec<String>)> = sqlx::query!(r#"SELECT id, code, name, utm FROM crm_traffic_sources ORDER BY lower(name)"#).map(|r| (r.id, r.code, r.name, r.utm)).fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, c, n, u)| json!({ "id": id, "code": c, "name": n, "utm": u })).collect::<Vec<_>>() })))
 }
 
@@ -447,10 +407,7 @@ async fn create_source(State(state): State<AppState>, auth: AuthUser, Json(b): J
     if system_options()["source"].as_array().is_some_and(|a| a.iter().any(|x| x == &json!(code))) {
         return Err(AppError::bad("that source is built in"));
     }
-    sqlx::query("INSERT INTO crm_traffic_sources (code, name, utm) VALUES ($1, $2, $3)")
-        .bind(&code)
-        .bind(&name)
-        .bind(clean_utm(&b.utm.unwrap_or_default())?)
+    sqlx::query!("INSERT INTO crm_traffic_sources (code, name, utm) VALUES ($1, $2, $3)", &code, &name, &(clean_utm(&b.utm.unwrap_or_default())?))
         .execute(&state.db)
         .await
         .map_err(|e| if crate::error::is_unique_violation(&e) { AppError::Conflict("a source with that name exists".into()) } else { e.into() })?;
@@ -461,7 +418,7 @@ async fn update_source(State(state): State<AppState>, auth: AuthUser, Path(id): 
     require_admin(&auth)?;
     let name = b.name.as_deref().map(|n| crate::routes::required("name", n, 60)).transpose()?;
     let utm = b.utm.as_deref().map(clean_utm).transpose()?;
-    let n = sqlx::query("UPDATE crm_traffic_sources SET name = COALESCE($2, name), utm = COALESCE($3, utm) WHERE id = $1").bind(id).bind(name).bind(utm).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("UPDATE crm_traffic_sources SET name = COALESCE($2, name), utm = COALESCE($3, utm) WHERE id = $1", id, name, utm.as_deref()).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("source"));
     }
@@ -471,6 +428,6 @@ async fn update_source(State(state): State<AppState>, auth: AuthUser, Path(id): 
 /// Records keep the source's code; it shows as the code once the source is gone.
 async fn delete_source(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    sqlx::query("DELETE FROM crm_traffic_sources WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_traffic_sources WHERE id = $1", id).execute(&state.db).await?;
     sources_json(&state).await
 }

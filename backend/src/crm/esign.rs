@@ -48,7 +48,7 @@ fn hash(s: &[u8]) -> String {
 }
 
 pub(crate) async fn company(state: &AppState) -> String {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().map(str::to_string)).filter(|s| !s.is_empty()).unwrap_or_else(|| "Our company".into())
 }
 
@@ -71,7 +71,7 @@ struct SendBody {
 /// Whether this person may send documents for signature at all: everyone with write access
 /// to the record, unless the company limits it to people with "Send for e-signature".
 pub(crate) async fn may_send(state: &AppState, auth: &AuthUser) -> AppResult<()> {
-    let restricted: bool = sqlx::query_scalar("SELECT value = 'true'::jsonb FROM settings WHERE key = 'esign_restricted'").fetch_optional(&state.db).await?.unwrap_or(false);
+    let restricted: bool = sqlx::query_scalar!(r#"SELECT value = 'true'::jsonb AS "v!" FROM settings WHERE key = 'esign_restricted'"#).fetch_optional(&state.db).await?.unwrap_or(false);
     if restricted && !auth.can(crate::auth::permissions::ESIGN) && !auth.can(crate::auth::permissions::CRM_ADMIN) {
         return Err(AppError::Forbidden);
     }
@@ -80,7 +80,7 @@ pub(crate) async fn may_send(state: &AppState, auth: &AuthUser) -> AppResult<()>
 
 async fn send(State(state): State<AppState>, auth: AuthUser, Path(doc): Path<Uuid>, Json(b): Json<SendBody>) -> AppResult<Json<Value>> {
     may_send(&state, &auth).await?;
-    let item: Uuid = sqlx::query_scalar("SELECT item_id FROM crm_documents WHERE id = $1").bind(doc).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("document"))?;
+    let item: Uuid = sqlx::query_scalar!("SELECT item_id FROM crm_documents WHERE id = $1", doc).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("document"))?;
     let row = load_row(&state, item, false).await?;
     require(&state, &auth, row.entity_type, "write", row.assigned_to).await?;
     let signers = b.signers.into_iter().map(|s| (s.name, s.email)).collect();
@@ -91,8 +91,7 @@ async fn send(State(state): State<AppState>, auth: AuthUser, Path(doc): Path<Uui
 /// Sends a ready document for signature (the caller checked the rights). Returns the request.
 pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers_in: Vec<(String, String)>, message: Option<String>, template: Option<Uuid>) -> AppResult<Uuid> {
     let (item, number, status, pdf): (Uuid, String, String, Option<Uuid>) =
-        sqlx::query_as("SELECT item_id, number, status, pdf_file_id FROM crm_documents WHERE id = $1")
-            .bind(doc)
+        sqlx::query!(r#"SELECT item_id, number, status, pdf_file_id FROM crm_documents WHERE id = $1"#, doc).map(|r| (r.item_id, r.number, r.status, r.pdf_file_id))
             .fetch_optional(&state.db)
             .await?
             .ok_or(AppError::NotFound("document"))?;
@@ -113,7 +112,7 @@ pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers
         }
         signers.push((name, email));
     }
-    let open: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sign_requests WHERE document_id = $1 AND status = 'sent')").bind(doc).fetch_one(&state.db).await?;
+    let open: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM sign_requests WHERE document_id = $1 AND status = 'sent') AS "v!""#, doc).fetch_one(&state.db).await?;
     let state = state.clone();
     if open {
         return Err(AppError::bad("this document is already out for signature; cancel that first"));
@@ -123,34 +122,19 @@ pub(crate) async fn send_document(state: &AppState, by: Uuid, doc: Uuid, signers
     let frozen = store_bytes(&state, Some(by), &format!("{number}.pdf"), "application/pdf", &bytes).await?;
     let message = message.map(|m| m.trim().chars().take(2000).collect::<String>()).filter(|m| !m.is_empty());
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO sign_requests (document_id, item_id, title, message, original_file_id, original_sha256, created_by, template_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-    )
-    .bind(doc)
-    .bind(item)
-    .bind(&number)
-    .bind(&message)
-    .bind(frozen)
-    .bind(hash(&bytes))
-    .bind(by)
-    .bind(template)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO sign_requests (document_id, item_id, title, message, original_file_id, original_sha256, created_by, template_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id", doc, item, &number, message.as_deref(), frozen, hash(&bytes), by, template)
     .fetch_one(&mut *tx)
     .await?;
     let mut links = Vec::new();
     for (i, (name, email)) in signers.iter().enumerate() {
         let token = random_token(24);
-        sqlx::query("INSERT INTO sign_signers (request_id, name, email, sort, token_hash) VALUES ($1, $2, $3, $4, $5)")
-            .bind(id)
-            .bind(name)
-            .bind(email)
-            .bind(i as i32)
-            .bind(hash(token.as_bytes()))
+        sqlx::query!("INSERT INTO sign_signers (request_id, name, email, sort, token_hash) VALUES ($1, $2, $3, $4, $5)", id, name, email, i as i32, hash(token.as_bytes()))
             .execute(&mut *tx)
             .await?;
         links.push((name.clone(), email.clone(), token));
     }
     tx.commit().await?;
-    let sender: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(by).fetch_one(&state.db).await?;
+    let sender: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, by).fetch_one(&state.db).await?;
     let company = company(&state).await;
     for (name, email, token) in &links {
         invite(&state, &company, &sender, &number, message.as_deref(), name, email, token).await;
@@ -210,8 +194,7 @@ const REQUEST_SELECT: &str = "SELECT r.id, r.document_id, r.item_id, r.title, r.
     FROM sign_requests r LEFT JOIN users u ON u.id = r.created_by";
 
 async fn signers_of(state: &AppState, id: Uuid) -> AppResult<Vec<SignerView>> {
-    Ok(sqlx::query_as("SELECT id, name, email, status, viewed_at, signed_at, decline_reason FROM sign_signers WHERE request_id = $1 ORDER BY sort")
-        .bind(id)
+    Ok(sqlx::query_as!(SignerView, r#"SELECT id, name, email, status, viewed_at AS "viewed_at?", signed_at AS "signed_at?", decline_reason AS "decline_reason?" FROM sign_signers WHERE request_id = $1 ORDER BY sort"#, id)
         .fetch_all(&state.db)
         .await?)
 }
@@ -230,7 +213,7 @@ async fn request_view(state: &AppState, id: Uuid) -> AppResult<Value> {
 async fn list(State(state): State<AppState>, auth: AuthUser, Path(item): Path<Uuid>) -> AppResult<Json<Value>> {
     let row = load_row(&state, item, false).await?;
     super::access::require_read(&state, &auth, row.entity_type, item, row.assigned_to).await?;
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sign_requests WHERE item_id = $1 ORDER BY created_at DESC").bind(item).fetch_all(&state.db).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM sign_requests WHERE item_id = $1 ORDER BY created_at DESC", item).fetch_all(&state.db).await?;
     let mut items = Vec::new();
     for id in ids {
         items.push(request_view(&state, id).await?);
@@ -240,8 +223,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(item): Path<Uu
 
 async fn writable(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(Uuid, i16, String, String)> {
     may_send(state, auth).await?;
-    let (item, status, title): (Uuid, String, String) = sqlx::query_as("SELECT item_id, CASE WHEN status = 'sent' AND expires_at < now() THEN 'expired' ELSE status END, title FROM sign_requests WHERE id = $1")
-        .bind(id)
+    let (item, status, title): (Uuid, String, String) = sqlx::query!(r#"SELECT item_id AS "item_id!", CASE WHEN status = 'sent' AND expires_at < now() THEN 'expired' ELSE status END AS "c1!", title AS "title!" FROM sign_requests WHERE id = $1"#, id).map(|r| (r.item_id, r.c1, r.title))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("signature request"))?;
@@ -255,7 +237,7 @@ async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if status != "sent" {
         return Err(AppError::bad("only a request still waiting for signatures can be cancelled"));
     }
-    sqlx::query("UPDATE sign_requests SET status = 'cancelled' WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE sign_requests SET status = 'cancelled' WHERE id = $1", id).execute(&state.db).await?;
     timeline(&state.db, item, "signature", Some(auth.id), None, json!({ "event": "cancelled", "request_id": id, "number": title })).await?;
     broadcast(&state, et, item, false).await;
     request_view(&state, id).await.map(Json)
@@ -267,13 +249,13 @@ async fn remind(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if status != "sent" {
         return Err(AppError::bad("this request is no longer waiting for signatures"));
     }
-    let message: Option<String> = sqlx::query_scalar("SELECT message FROM sign_requests WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    let waiting: Vec<(Uuid, String, String)> = sqlx::query_as("SELECT id, name, email FROM sign_signers WHERE request_id = $1 AND status IN ('pending', 'viewed')").bind(id).fetch_all(&state.db).await?;
-    let sender: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let message: Option<String> = sqlx::query_scalar!(r#"SELECT message AS "message?" FROM sign_requests WHERE id = $1"#, id).fetch_one(&state.db).await?;
+    let waiting: Vec<(Uuid, String, String)> = sqlx::query!(r#"SELECT id, name, email FROM sign_signers WHERE request_id = $1 AND status IN ('pending', 'viewed')"#, id).map(|r| (r.id, r.name, r.email)).fetch_all(&state.db).await?;
+    let sender: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     let company = company(&state).await;
     for (sid, name, email) in &waiting {
         let token = random_token(24);
-        sqlx::query("UPDATE sign_signers SET token_hash = $2 WHERE id = $1").bind(sid).bind(hash(token.as_bytes())).execute(&state.db).await?;
+        sqlx::query!("UPDATE sign_signers SET token_hash = $2 WHERE id = $1", sid, hash(token.as_bytes())).execute(&state.db).await?;
         invite(&state, &company, &sender, &title, message.as_deref(), name, email, &token).await;
     }
     let mut v = request_view(&state, id).await?;
@@ -302,13 +284,10 @@ struct Signer {
 }
 
 async fn signer(state: &AppState, token: &str) -> AppResult<Signer> {
-    sqlx::query_as(
-        "SELECT s.id, s.request_id, s.name, s.email, s.status,
-                CASE WHEN r.status = 'sent' AND r.expires_at < now() THEN 'expired' ELSE r.status END AS request_status,
-                r.title, r.message, r.original_file_id, r.original_sha256, r.signed_file_id, r.expires_at
-         FROM sign_signers s JOIN sign_requests r ON r.id = s.request_id WHERE s.token_hash = $1",
-    )
-    .bind(hash(token.as_bytes()))
+    sqlx::query_as!(Signer, r#"SELECT s.id AS "id!", s.request_id AS "request_id!", s.name AS "name!", s.email AS "email!", s.status AS "status!",
+                CASE WHEN r.status = 'sent' AND r.expires_at < now() THEN 'expired' ELSE r.status END AS "request_status!",
+                r.title AS "title!", r.message AS "message?", r.original_file_id AS "original_file_id?", r.original_sha256 AS "original_sha256!", r.signed_file_id AS "signed_file_id?", r.expires_at AS "expires_at!"
+         FROM sign_signers s JOIN sign_requests r ON r.id = s.request_id WHERE s.token_hash = $1"#, hash(token.as_bytes()))
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("signing link"))
@@ -317,11 +296,9 @@ async fn signer(state: &AppState, token: &str) -> AppResult<Signer> {
 async fn signer_view(State(state): State<AppState>, Path(token): Path<String>) -> AppResult<Json<Value>> {
     let s = signer(&state, &token).await?;
     if s.status == "pending" && s.request_status == "sent" {
-        sqlx::query("UPDATE sign_signers SET status = 'viewed', viewed_at = now() WHERE id = $1").bind(s.id).execute(&state.db).await?;
+        sqlx::query!("UPDATE sign_signers SET status = 'viewed', viewed_at = now() WHERE id = $1", s.id).execute(&state.db).await?;
     }
-    let others: Vec<(String, String)> = sqlx::query_as("SELECT name, status FROM sign_signers WHERE request_id = $1 AND id <> $2 ORDER BY sort")
-        .bind(s.request_id)
-        .bind(s.id)
+    let others: Vec<(String, String)> = sqlx::query!(r#"SELECT name, status FROM sign_signers WHERE request_id = $1 AND id <> $2 ORDER BY sort"#, s.request_id, s.id).map(|r| (r.name, r.status))
         .fetch_all(&state.db)
         .await?;
     Ok(Json(json!({
@@ -393,15 +370,8 @@ async fn sign(State(state): State<AppState>, ClientIp(ip): ClientIp, headers: He
     }
     let file = store_bytes(&state, None, &format!("signature-{}.png", s.id), "image/png", &png).await?;
     let ua: Option<String> = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(300).collect());
-    let n = sqlx::query(
-        "UPDATE sign_signers SET status = 'signed', signed_at = now(), signed_name = $2, signature_file_id = $3, ip = $4, user_agent = $5
-         WHERE id = $1 AND status IN ('pending', 'viewed')",
-    )
-    .bind(s.id)
-    .bind(&typed)
-    .bind(file)
-    .bind(&ip)
-    .bind(&ua)
+    let n = sqlx::query!("UPDATE sign_signers SET status = 'signed', signed_at = now(), signed_name = $2, signature_file_id = $3, ip = $4, user_agent = $5
+         WHERE id = $1 AND status IN ('pending', 'viewed')", s.id, &typed, file, ip.as_deref(), ua.as_deref())
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -409,13 +379,12 @@ async fn sign(State(state): State<AppState>, ClientIp(ip): ClientIp, headers: He
         delete_stored(&state, file).await;
         return Err(AppError::bad("you have already answered this request"));
     }
-    let (item, created_by): (Uuid, Option<Uuid>) = sqlx::query_as("SELECT item_id, created_by FROM sign_requests WHERE id = $1").bind(s.request_id).fetch_one(&state.db).await?;
+    let (item, created_by): (Uuid, Option<Uuid>) = sqlx::query!(r#"SELECT item_id, created_by FROM sign_requests WHERE id = $1"#, s.request_id).map(|r| (r.item_id, r.created_by)).fetch_one(&state.db).await?;
     timeline(&state.db, item, "signature", None, None, json!({ "event": "signed", "request_id": s.request_id, "number": s.title, "name": s.name })).await?;
     // The last signature completes it (once, even if two arrive together).
-    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sign_signers WHERE request_id = $1 AND status <> 'signed'").bind(s.request_id).fetch_one(&state.db).await?;
+    let left: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM sign_signers WHERE request_id = $1 AND status <> 'signed'"#, s.request_id).fetch_one(&state.db).await?;
     if left == 0 {
-        let claimed = sqlx::query("UPDATE sign_requests SET status = 'completed', completed_at = now() WHERE id = $1 AND status = 'sent'")
-            .bind(s.request_id)
+        let claimed = sqlx::query!("UPDATE sign_requests SET status = 'completed', completed_at = now() WHERE id = $1 AND status = 'sent'", s.request_id)
             .execute(&state.db)
             .await?
             .rows_affected();
@@ -438,20 +407,19 @@ async fn decline(State(state): State<AppState>, Path(token): Path<String>, Json(
     let s = signer(&state, &token).await?;
     open_for(&s)?;
     let reason = b.reason.map(|r| r.trim().chars().take(1000).collect::<String>()).filter(|r| !r.is_empty());
-    sqlx::query("UPDATE sign_signers SET status = 'declined', decline_reason = $2 WHERE id = $1").bind(s.id).bind(&reason).execute(&state.db).await?;
-    sqlx::query("UPDATE sign_requests SET status = 'declined' WHERE id = $1 AND status = 'sent'").bind(s.request_id).execute(&state.db).await?;
-    let (item, created_by): (Uuid, Option<Uuid>) = sqlx::query_as("SELECT item_id, created_by FROM sign_requests WHERE id = $1").bind(s.request_id).fetch_one(&state.db).await?;
+    sqlx::query!("UPDATE sign_signers SET status = 'declined', decline_reason = $2 WHERE id = $1", s.id, reason.as_deref()).execute(&state.db).await?;
+    sqlx::query!("UPDATE sign_requests SET status = 'declined' WHERE id = $1 AND status = 'sent'", s.request_id).execute(&state.db).await?;
+    let (item, created_by): (Uuid, Option<Uuid>) = sqlx::query!(r#"SELECT item_id, created_by FROM sign_requests WHERE id = $1"#, s.request_id).map(|r| (r.item_id, r.created_by)).fetch_one(&state.db).await?;
     timeline(&state.db, item, "signature", None, None, json!({ "event": "declined", "request_id": s.request_id, "number": s.title, "name": s.name, "reason": reason })).await?;
     tell(&state, created_by, format!("{} declined to sign {}", s.name, s.title), item).await;
-    let tpl: Option<Uuid> = sqlx::query_scalar("SELECT template_id FROM sign_requests WHERE id = $1").bind(s.request_id).fetch_one(&state.db).await?;
+    let tpl: Option<Uuid> = sqlx::query_scalar!(r#"SELECT template_id AS "template_id?" FROM sign_requests WHERE id = $1"#, s.request_id).fetch_one(&state.db).await?;
     super::automation::fire(&state, item, "signature_declined", |p| same_template(p, tpl)).await;
     signer_view(State(state), Path(token)).await
 }
 
 async fn tell(state: &AppState, who: Option<Uuid>, title: String, item: Uuid) {
     let Some(u) = who else { return };
-    let code: Option<(String, i16)> = sqlx::query_as("SELECT t.code, t.id FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1")
-        .bind(item)
+    let code: Option<(String, i16)> = sqlx::query!(r#"SELECT t.code, t.id FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1"#, item).map(|r| (r.code, r.id))
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -555,10 +523,7 @@ pub(crate) fn sha256_hex(b: &[u8]) -> String {
 
 async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
     let r: RequestRow = sqlx::query_as(sqlx::AssertSqlSafe(format!("{REQUEST_SELECT} WHERE r.id = $1"))).bind(id).fetch_one(&state.db).await?;
-    let rows: Vec<(String, String, Option<String>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT name, email, signed_name, signed_at, ip, user_agent, signature_file_id FROM sign_signers WHERE request_id = $1 ORDER BY sort",
-    )
-    .bind(id)
+    let rows: Vec<(String, String, Option<String>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<Uuid>)> = sqlx::query!(r#"SELECT name, email, signed_name, signed_at, ip, user_agent, signature_file_id FROM sign_signers WHERE request_id = $1 ORDER BY sort"#, id).map(|r| (r.name, r.email, r.signed_name, r.signed_at, r.ip, r.user_agent, r.signature_file_id))
     .fetch_all(&state.db)
     .await?;
     let list: Vec<CertSigner> = rows
@@ -569,7 +534,7 @@ async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
     let original = read_bytes(state, r.original_file_id.ok_or(AppError::NotFound("document"))?).await?.3;
     let signed = signed_copy(state, &r.title, &id.to_string(), &r.original_sha256, r.created_at, r.completed_at.unwrap_or_else(Utc::now), &list, &original).await?;
     let file = store_bytes(state, None, &format!("{} (signed).pdf", r.title), "application/pdf", &signed).await?;
-    sqlx::query("UPDATE sign_requests SET signed_file_id = $2, signed_sha256 = $3 WHERE id = $1").bind(id).bind(file).bind(hash(&signed)).execute(&state.db).await?;
+    sqlx::query!("UPDATE sign_requests SET signed_file_id = $2, signed_sha256 = $3 WHERE id = $1", id, file, hash(&signed)).execute(&state.db).await?;
     timeline(&state.db, r.item_id, "signature", None, None, json!({ "event": "completed", "request_id": id, "number": r.title, "file_id": file })).await?;
     // Everyone gets the signed copy.
     for (name, email, ..) in &rows {
@@ -585,7 +550,7 @@ async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
         mail.attachments = vec![file];
         let _ = crate::jobs::send_email(state, mail).await;
     }
-    let (created_by, tpl): (Option<Uuid>, Option<Uuid>) = sqlx::query_as("SELECT created_by, template_id FROM sign_requests WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (created_by, tpl): (Option<Uuid>, Option<Uuid>) = sqlx::query!(r#"SELECT created_by, template_id FROM sign_requests WHERE id = $1"#, id).map(|r| (r.created_by, r.template_id)).fetch_one(&state.db).await?;
     tell(state, created_by, format!("Everyone signed {}", r.title), r.item_id).await;
     super::automation::fire(state, r.item_id, "signature_completed", |p| same_template(p, tpl)).await;
     Ok(())

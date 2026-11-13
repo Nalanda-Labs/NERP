@@ -59,9 +59,12 @@ with few people to look after it.
 
 - **Rust (Axum, sqlx, Tokio) for the server.** One compiled binary, no runtime to install
   or patch, low memory use and steady performance on modest hardware. The compiler rules out
-  whole classes of crashes and memory bugs, and sqlx checks database queries against their
-  types. Database migrations are compiled into the binary, so an upgrade is replacing one
-  file and restarting.
+  whole classes of crashes and memory bugs. About 2,750 of the server's database queries are
+  checked by sqlx against the real database schema while the server is compiled: a misspelt
+  table or column, a wrong parameter type or a result read into the wrong Rust type stops the
+  build instead of failing in production. The queries assembled at run time (search filters,
+  user-defined fields) are covered by the tests. Database migrations are compiled into the
+  binary too, so an upgrade is replacing one file and restarting.
 - **PostgreSQL, and only PostgreSQL.** One mature, free database for everything:
   transactions across modules (an invoice, its stock movement and its ledger entry commit
   together), full-text and similarity search, JSON, point-in-time recovery through streamed

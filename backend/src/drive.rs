@@ -92,9 +92,7 @@ fn manager(auth: &AuthUser) -> bool {
 /// own, viewers (and everyone, for an open group) look.
 async fn group_level(state: &AppState, auth: &AuthUser, project: Uuid, created_by: Option<Uuid>) -> AppResult<Level> {
     let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT p.visibility, (SELECT role FROM project_members WHERE project_id = p.id AND user_id = $2) FROM projects p WHERE p.id = $1")
-            .bind(project)
-            .bind(auth.id)
+        sqlx::query!(r#"SELECT p.visibility, (SELECT role FROM project_members WHERE project_id = p.id AND user_id = $2) AS "c1" FROM projects p WHERE p.id = $1"#, project, auth.id).map(|r| (r.visibility, r.c1))
             .fetch_optional(&state.db)
             .await?;
     let Some((visibility, role)) = row else { return Ok(Level::None) };
@@ -117,7 +115,7 @@ async fn level_of(state: &AppState, auth: &AuthUser, n: &Node) -> AppResult<Leve
         if n.space != "group" {
             return Ok(Level::None);
         }
-        let member: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2)").bind(n.project_id).bind(auth.id).fetch_one(&state.db).await?;
+        let member: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2) AS "v!""#, n.project_id, auth.id).fetch_one(&state.db).await?;
         if !member {
             return Ok(Level::None);
         }
@@ -131,14 +129,10 @@ async fn level_of(state: &AppState, auth: &AuthUser, n: &Node) -> AppResult<Leve
     if n.owner_id == Some(auth.id) {
         return Ok(Level::Own);
     }
-    let levels: Vec<String> = sqlx::query_scalar(
-        "WITH RECURSIVE up AS (SELECT id, parent_id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id, d.parent_id FROM drive_nodes d JOIN up ON d.id = up.parent_id),
+    let levels: Vec<String> = sqlx::query_scalar!("WITH RECURSIVE up AS (SELECT id, parent_id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id, d.parent_id FROM drive_nodes d JOIN up ON d.id = up.parent_id),
               mine AS (SELECT department_id AS id FROM user_departments WHERE user_id = $2
                        UNION SELECT d.parent_id FROM departments d JOIN mine m ON d.id = m.id WHERE d.parent_id IS NOT NULL)
-         SELECT s.level FROM drive_shares s WHERE s.node_id IN (SELECT id FROM up) AND (s.user_id = $2 OR s.department_id IN (SELECT id FROM mine))",
-    )
-    .bind(n.id)
-    .bind(auth.id)
+         SELECT s.level FROM drive_shares s WHERE s.node_id IN (SELECT id FROM up) AND (s.user_id = $2 OR s.department_id IN (SELECT id FROM mine))", n.id, auth.id)
     .fetch_all(&state.db)
     .await?;
     Ok(if levels.iter().any(|l| l == "edit") { Level::Edit } else if levels.is_empty() { Level::None } else { Level::View })
@@ -182,24 +176,15 @@ pub(crate) async fn add_board_item(state: &AppState, auth: &AuthUser, space: Opt
         }
         name = format!("{base} ({i}).board");
     }
-    Ok(sqlx::query_scalar(
-        "INSERT INTO drive_nodes (kind, space, owner_id, parent_id, name, size_bytes, mime_type, created_by, updated_by, project_id, board_id)
-         VALUES ('file', $1, $2, $3, $4, 0, 'application/vnd.nerp.board', $5, $5, $6, $7) RETURNING id",
-    )
-    .bind(&at.space)
-    .bind(at.owner)
-    .bind(at.parent)
-    .bind(&name)
-    .bind(auth.id)
-    .bind(at.project)
-    .bind(board)
+    Ok(sqlx::query_scalar!("INSERT INTO drive_nodes (kind, space, owner_id, parent_id, name, size_bytes, mime_type, created_by, updated_by, project_id, board_id)
+         VALUES ('file', $1, $2, $3, $4, 0, 'application/vnd.nerp.board', $5, $5, $6, $7) RETURNING id", &at.space, at.owner, at.parent, &name, auth.id, at.project, board)
     .fetch_one(&state.db)
     .await?)
 }
 
 /// Files kept by the drive (any version) are readable by whoever can see the item.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM drive_nodes WHERE file_id = $1 UNION SELECT node_id FROM drive_versions WHERE file_id = $1 LIMIT 5").bind(file).fetch_all(&state.db).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT id AS "id!" FROM drive_nodes WHERE file_id = $1 UNION SELECT node_id FROM drive_versions WHERE file_id = $1 LIMIT 5"#, file).fetch_all(&state.db).await?;
     for id in ids {
         let n = node(state, id).await?;
         if n.deleted_at.is_none() && level_of(state, auth, &n).await? > Level::None {
@@ -250,7 +235,7 @@ async fn browse(State(state): State<AppState>, auth: AuthUser, Query(q): Query<B
     if auth.is_guest() && q.folder.is_none() {
         // A workgroup's files only, and only a group the guest is in.
         let member: bool = match (q.space.as_deref(), q.project_id) {
-            (Some("group"), Some(p)) => sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2)").bind(p).bind(auth.id).fetch_one(&state.db).await?,
+            (Some("group"), Some(p)) => sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2) AS "v!""#, p, auth.id).fetch_one(&state.db).await?,
             _ => false,
         };
         if !member {
@@ -270,12 +255,9 @@ async fn browse(State(state): State<AppState>, auth: AuthUser, Query(q): Query<B
                 .fetch_all(&state.db)
                 .await?;
             // The way up, as far as the user can see.
-            let up: Vec<(Uuid, String)> = sqlx::query_as(
-                "WITH RECURSIVE up AS (SELECT id, parent_id, name, 0 AS n FROM drive_nodes WHERE id = $1
+            let up: Vec<(Uuid, String)> = sqlx::query!(r#"WITH RECURSIVE up AS (SELECT id, parent_id, name, 0 AS n FROM drive_nodes WHERE id = $1
                                        UNION ALL SELECT d.id, d.parent_id, d.name, up.n + 1 FROM drive_nodes d JOIN up ON d.id = up.parent_id)
-                 SELECT id, name FROM up ORDER BY n DESC",
-            )
-            .bind(f)
+                 SELECT id AS "id!", name AS "name!" FROM up ORDER BY n DESC"#, f).map(|r| (r.id, r.name))
             .fetch_all(&state.db)
             .await?;
             let mut path = Vec::new();
@@ -338,7 +320,7 @@ async fn browse(State(state): State<AppState>, auth: AuthUser, Query(q): Query<B
     };
     // A workgroup's files: which group.
     let project = match group {
-        Some(g) => sqlx::query_scalar::<_, String>("SELECT name FROM projects WHERE id = $1").bind(g).fetch_optional(&state.db).await?.map(|n| json!({ "id": g, "name": n })),
+        Some(g) => sqlx::query_scalar!("SELECT name FROM projects WHERE id = $1", g).fetch_optional(&state.db).await?.map(|n| json!({ "id": g, "name": n })),
         None => None,
     };
     Ok(Json(json!({ "items": items, "path": path, "can_add": level >= Level::Edit, "can_manage": level == Level::Own, "project": project })))
@@ -391,16 +373,8 @@ fn clean_name(n: &str) -> AppResult<String> {
 
 /// A live item with this name in the same folder.
 async fn sibling(state: &AppState, at: &Place, name: &str, except: Option<Uuid>) -> AppResult<Option<(Uuid, String)>> {
-    Ok(sqlx::query_as(
-        "SELECT id, kind FROM drive_nodes WHERE space = $1 AND owner_id IS NOT DISTINCT FROM $2 AND parent_id IS NOT DISTINCT FROM $3
-           AND lower(name) = lower($4) AND deleted_at IS NULL AND id IS DISTINCT FROM $5 AND project_id IS NOT DISTINCT FROM $6 LIMIT 1",
-    )
-    .bind(&at.space)
-    .bind(at.owner)
-    .bind(at.parent)
-    .bind(name)
-    .bind(except)
-    .bind(at.project)
+    Ok(sqlx::query!(r#"SELECT id, kind FROM drive_nodes WHERE space = $1 AND owner_id IS NOT DISTINCT FROM $2 AND parent_id IS NOT DISTINCT FROM $3
+           AND lower(name) = lower($4) AND deleted_at IS NULL AND id IS DISTINCT FROM $5 AND project_id IS NOT DISTINCT FROM $6 LIMIT 1"#, &at.space, at.owner, at.parent, name, except, at.project).map(|r| (r.id, r.kind))
     .fetch_optional(&state.db)
     .await?)
 }
@@ -419,13 +393,7 @@ async fn create_folder(State(state): State<AppState>, auth: AuthUser, Json(b): J
     if sibling(&state, &at, &name, None).await?.is_some() {
         return Err(AppError::bad(format!("“{name}” is already here")));
     }
-    let id: Uuid = sqlx::query_scalar("INSERT INTO drive_nodes (kind, space, owner_id, parent_id, name, created_by, updated_by, project_id) VALUES ('folder', $1, $2, $3, $4, $5, $5, $6) RETURNING id")
-        .bind(&at.space)
-        .bind(at.owner)
-        .bind(at.parent)
-        .bind(&name)
-        .bind(auth.id)
-        .bind(at.project)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO drive_nodes (kind, space, owner_id, parent_id, name, created_by, updated_by, project_id) VALUES ('folder', $1, $2, $3, $4, $5, $5, $6) RETURNING id", &at.space, at.owner, at.parent, &name, auth.id, at.project)
         .fetch_one(&state.db)
         .await?;
     get_node(State(state), auth, Path(id)).await
@@ -443,15 +411,14 @@ struct FileInput {
 
 /// Adds an uploaded file; a file of the same name in the folder gets it as a new version.
 async fn add_file(State(state): State<AppState>, auth: AuthUser, Json(b): Json<FileInput>) -> AppResult<Json<Value>> {
-    let (fname, size, mime, owner): (String, i64, String, Option<Uuid>) = sqlx::query_as("SELECT original_name, size_bytes, mime_type, owner_id FROM files WHERE id = $1")
-        .bind(b.file_id)
+    let (fname, size, mime, owner): (String, i64, String, Option<Uuid>) = sqlx::query!(r#"SELECT original_name, size_bytes, mime_type, owner_id FROM files WHERE id = $1"#, b.file_id).map(|r| (r.original_name, r.size_bytes, r.mime_type, r.owner_id))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("file"))?;
     if owner != Some(auth.id) {
         return Err(AppError::bad("add a file you uploaded"));
     }
-    let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM drive_nodes WHERE file_id = $1) OR EXISTS (SELECT 1 FROM drive_versions WHERE file_id = $1)").bind(b.file_id).fetch_one(&state.db).await?;
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM drive_nodes WHERE file_id = $1) OR EXISTS (SELECT 1 FROM drive_versions WHERE file_id = $1) AS "v!""#, b.file_id).fetch_one(&state.db).await?;
     if used {
         return Err(AppError::bad("that upload is already in the drive"));
     }
@@ -462,36 +429,20 @@ async fn add_file(State(state): State<AppState>, auth: AuthUser, Json(b): Json<F
         Some((existing, _)) => {
             need(&state, &auth, existing, Level::Edit).await?;
             let mut tx = state.db.begin().await?;
-            let v: i32 = sqlx::query_scalar("UPDATE drive_nodes SET version = version + 1, file_id = $2, size_bytes = $3, mime_type = $4, updated_by = $5, updated_at = now() WHERE id = $1 RETURNING version")
-                .bind(existing)
-                .bind(b.file_id)
-                .bind(size)
-                .bind(&mime)
-                .bind(auth.id)
+            let v: i32 = sqlx::query_scalar!("UPDATE drive_nodes SET version = version + 1, file_id = $2, size_bytes = $3, mime_type = $4, updated_by = $5, updated_at = now() WHERE id = $1 RETURNING version", existing, b.file_id, size, &mime, auth.id)
                 .fetch_one(&mut *tx)
                 .await?;
-            sqlx::query("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, $2, $3, $4, $5)").bind(existing).bind(v).bind(b.file_id).bind(size).bind(auth.id).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, $2, $3, $4, $5)", existing, v, b.file_id, size, auth.id).execute(&mut *tx).await?;
             tx.commit().await?;
             existing
         }
         None => {
             let mut tx = state.db.begin().await?;
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO drive_nodes (kind, space, owner_id, parent_id, name, file_id, size_bytes, mime_type, created_by, updated_by, project_id)
-                 VALUES ('file', $1, $2, $3, $4, $5, $6, $7, $8, $8, $9) RETURNING id",
-            )
-            .bind(&at.space)
-            .bind(at.owner)
-            .bind(at.parent)
-            .bind(&name)
-            .bind(b.file_id)
-            .bind(size)
-            .bind(&mime)
-            .bind(auth.id)
-            .bind(at.project)
+            let id: Uuid = sqlx::query_scalar!("INSERT INTO drive_nodes (kind, space, owner_id, parent_id, name, file_id, size_bytes, mime_type, created_by, updated_by, project_id)
+                 VALUES ('file', $1, $2, $3, $4, $5, $6, $7, $8, $8, $9) RETURNING id", &at.space, at.owner, at.parent, &name, b.file_id, size, &mime, auth.id, at.project)
             .fetch_one(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, 1, $2, $3, $4)").bind(id).bind(b.file_id).bind(size).bind(auth.id).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, 1, $2, $3, $4)", id, b.file_id, size, auth.id).execute(&mut *tx).await?;
             tx.commit().await?;
             id
         }
@@ -506,25 +457,19 @@ async fn get_node(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
     v["level"] = json!(match l { Level::Own => "own", Level::Edit => "edit", _ => "view" });
     v["deleted"] = json!(n.deleted_at.is_some());
     if n.kind == "file" {
-        let versions: Vec<(i32, i64, Option<String>, DateTime<Utc>)> = sqlx::query_as(
-            "SELECT v.version, v.size_bytes, trim(u.first_name || ' ' || u.last_name), v.uploaded_at FROM drive_versions v LEFT JOIN users u ON u.id = v.uploaded_by WHERE v.node_id = $1 ORDER BY v.version DESC",
-        )
-        .bind(id)
+        let versions: Vec<(i32, i64, Option<String>, DateTime<Utc>)> = sqlx::query!(r#"SELECT v.version, v.size_bytes, trim(u.first_name || ' ' || u.last_name) AS "c2", v.uploaded_at FROM drive_versions v LEFT JOIN users u ON u.id = v.uploaded_by WHERE v.node_id = $1 ORDER BY v.version DESC"#, id).map(|r| (r.version, r.size_bytes, r.c2, r.uploaded_at))
         .fetch_all(&state.db)
         .await?;
         v["versions"] = json!(versions.into_iter().map(|(ver, sz, by, at)| json!({ "version": ver, "size_bytes": sz, "by": by, "at": at })).collect::<Vec<_>>());
     }
     if l == Level::Own {
-        let shares: Vec<(Option<Uuid>, Option<Uuid>, String, Option<String>)> = sqlx::query_as(
-            "SELECT s.user_id, s.department_id, s.level, COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) FROM drive_shares s
-             LEFT JOIN users u ON u.id = s.user_id LEFT JOIN departments d ON d.id = s.department_id WHERE s.node_id = $1",
-        )
-        .bind(id)
+        let shares: Vec<(Option<Uuid>, Option<Uuid>, String, Option<String>)> = sqlx::query!(r#"SELECT s.user_id, s.department_id, s.level, COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) AS "c3" FROM drive_shares s
+             LEFT JOIN users u ON u.id = s.user_id LEFT JOIN departments d ON d.id = s.department_id WHERE s.node_id = $1"#, id).map(|r| (r.user_id, r.department_id, r.level, r.c3))
         .fetch_all(&state.db)
         .await?;
         v["shares"] = json!(shares.into_iter().map(|(u, d, lv, name)| json!({ "user_id": u, "department_id": d, "level": lv, "name": name })).collect::<Vec<_>>());
         let links: Vec<(Uuid, Option<DateTime<Utc>>, i32, DateTime<Utc>, bool, bool)> =
-            sqlx::query_as("SELECT id, expires_at, downloads, created_at, password_hash IS NOT NULL, can_edit FROM drive_links WHERE node_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.db).await?;
+            sqlx::query!(r#"SELECT id AS "id!", expires_at AS "expires_at?", downloads AS "downloads!", created_at AS "created_at!", password_hash IS NOT NULL AS "c4!", can_edit AS "can_edit!" FROM drive_links WHERE node_id = $1 ORDER BY created_at"#, id).map(|r| (r.id, r.expires_at, r.downloads, r.created_at, r.c4, r.can_edit)).fetch_all(&state.db).await?;
         v["links"] = json!(links.into_iter().map(|(id, exp, d, at, pw, ed)| json!({ "id": id, "expires_at": exp, "downloads": d, "created_at": at, "password": pw, "can_edit": ed })).collect::<Vec<_>>());
     }
     Ok(Json(v))
@@ -552,12 +497,8 @@ async fn update_node(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
             if pn.kind != "folder" || pn.space != n.space || pn.owner_id != n.owner_id || pn.project_id != n.project_id {
                 return Err(AppError::bad("move within the same drive, into a folder"));
             }
-            let cycle: bool = sqlx::query_scalar(
-                "WITH RECURSIVE up AS (SELECT id, parent_id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id, d.parent_id FROM drive_nodes d JOIN up ON d.id = up.parent_id)
-                 SELECT EXISTS (SELECT 1 FROM up WHERE id = $2)",
-            )
-            .bind(p)
-            .bind(id)
+            let cycle: bool = sqlx::query_scalar!(r#"WITH RECURSIVE up AS (SELECT id, parent_id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id, d.parent_id FROM drive_nodes d JOIN up ON d.id = up.parent_id)
+                 SELECT EXISTS (SELECT 1 FROM up WHERE id = $2) AS "v!""#, p, id)
             .fetch_one(&state.db)
             .await?;
             if cycle {
@@ -569,19 +510,15 @@ async fn update_node(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if sibling(&state, &Place { space: n.space.clone(), owner: n.owner_id, project: n.project_id, parent }, &name, Some(id)).await?.is_some() {
         return Err(AppError::bad(format!("“{name}” is already there")));
     }
-    sqlx::query("UPDATE drive_nodes SET name = $2, parent_id = $3, updated_by = $4, updated_at = now() WHERE id = $1").bind(id).bind(&name).bind(parent).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("UPDATE drive_nodes SET name = $2, parent_id = $3, updated_by = $4, updated_at = now() WHERE id = $1", id, &name, parent, auth.id).execute(&state.db).await?;
     get_node(State(state), auth, Path(id)).await
 }
 
 /// To the trash, with everything inside.
 async fn remove_node(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need(&state, &auth, id, Level::Own).await?;
-    sqlx::query(
-        "WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id)
-         UPDATE drive_nodes SET deleted_at = now(), deleted_by = $2 WHERE id IN (SELECT id FROM down) AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .bind(auth.id)
+    sqlx::query!("WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id)
+         UPDATE drive_nodes SET deleted_at = now(), deleted_by = $2 WHERE id IN (SELECT id FROM down) AND deleted_at IS NULL", id, auth.id)
     .execute(&state.db)
     .await?;
     Ok(Json(json!({ "ok": true })))
@@ -592,13 +529,10 @@ async fn trash(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<
     if auth.is_guest() {
         return Err(AppError::Forbidden);
     }
-    let items: Vec<(Uuid, String, String, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT n.id, n.kind, n.name, n.space, n.deleted_at FROM drive_nodes n
+    let items: Vec<(Uuid, String, String, String, DateTime<Utc>)> = sqlx::query!(r#"SELECT n.id AS "id!", n.kind AS "kind!", n.name AS "name!", n.space AS "space!", n.deleted_at AS "deleted_at!" FROM drive_nodes n
          WHERE n.deleted_at IS NOT NULL AND n.deleted_by = $1
            AND NOT EXISTS (SELECT 1 FROM drive_nodes p WHERE p.id = n.parent_id AND p.deleted_at IS NOT NULL AND p.deleted_by = $1)
-         ORDER BY n.deleted_at DESC LIMIT 500",
-    )
-    .bind(auth.id)
+         ORDER BY n.deleted_at DESC LIMIT 500"#, auth.id).map(|r| (r.id, r.kind, r.name, r.space, r.deleted_at))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": items.into_iter().map(|(id, k, n, s, at)| json!({ "id": id, "kind": k, "name": n, "space": s, "deleted_at": at, "purged_on": at + Duration::days(30) })).collect::<Vec<_>>() })))
@@ -626,7 +560,7 @@ async fn restore_node(State(state): State<AppState>, auth: AuthUser, Path(id): P
     .bind(n.deleted_at)
     .execute(&state.db)
     .await?;
-    sqlx::query("UPDATE drive_nodes SET parent_id = $2, name = $3 WHERE id = $1").bind(id).bind(parent).bind(&name).execute(&state.db).await?;
+    sqlx::query!("UPDATE drive_nodes SET parent_id = $2, name = $3 WHERE id = $1", id, parent, &name).execute(&state.db).await?;
     get_node(State(state), auth, Path(id)).await
 }
 
@@ -636,14 +570,11 @@ pub(crate) async fn purge_node(state: &AppState, id: Uuid) -> AppResult<()> {
 }
 
 async fn purge(state: &AppState, id: Uuid) -> AppResult<()> {
-    let files: Vec<Uuid> = sqlx::query_scalar(
-        "WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id)
-         SELECT file_id FROM drive_versions WHERE node_id IN (SELECT id FROM down) AND file_id IS NOT NULL",
-    )
-    .bind(id)
+    let files: Vec<Uuid> = sqlx::query_scalar!(r#"WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id)
+         SELECT file_id AS "file_id!" FROM drive_versions WHERE node_id IN (SELECT id FROM down) AND file_id IS NOT NULL"#, id)
     .fetch_all(&state.db)
     .await?;
-    sqlx::query("DELETE FROM drive_nodes WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM drive_nodes WHERE id = $1", id).execute(&state.db).await?;
     for f in files {
         delete_stored(state, f).await;
     }
@@ -661,10 +592,8 @@ async fn destroy(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
 
 /// Daily: empties what has been in the trash for 30 days.
 pub async fn run_purge(state: &AppState) -> Result<()> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT n.id FROM drive_nodes n WHERE n.deleted_at < now() - interval '30 days'
-           AND NOT EXISTS (SELECT 1 FROM drive_nodes p WHERE p.id = n.parent_id AND p.deleted_at < now() - interval '30 days') LIMIT 1000",
-    )
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT n.id FROM drive_nodes n WHERE n.deleted_at < now() - interval '30 days'
+           AND NOT EXISTS (SELECT 1 FROM drive_nodes p WHERE p.id = n.parent_id AND p.deleted_at < now() - interval '30 days') LIMIT 1000")
     .fetch_all(&state.db)
     .await?;
     for id in ids {
@@ -683,7 +612,7 @@ struct DownloadQuery {
 async fn download(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Query(q): Query<DownloadQuery>, headers: axum::http::HeaderMap) -> AppResult<Response> {
     let (n, _) = need(&state, &auth, id, Level::View).await?;
     let file = match q.version {
-        Some(v) => sqlx::query_scalar::<_, Option<Uuid>>("SELECT file_id FROM drive_versions WHERE node_id = $1 AND version = $2").bind(id).bind(v).fetch_optional(&state.db).await?.flatten(),
+        Some(v) => sqlx::query_scalar!(r#"SELECT file_id AS "file_id?" FROM drive_versions WHERE node_id = $1 AND version = $2"#, id, v).fetch_optional(&state.db).await?.flatten(),
         None => n.file_id,
     }
     .ok_or(AppError::NotFound("file"))?;
@@ -694,24 +623,17 @@ async fn download(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 /// Brings an old version back as the newest one.
 async fn restore_version(State(state): State<AppState>, auth: AuthUser, Path((id, v)): Path<(Uuid, i32)>) -> AppResult<Json<Value>> {
     need(&state, &auth, id, Level::Edit).await?;
-    let (file, size): (Option<Uuid>, i64) = sqlx::query_as("SELECT file_id, size_bytes FROM drive_versions WHERE node_id = $1 AND version = $2")
-        .bind(id)
-        .bind(v)
+    let (file, size): (Option<Uuid>, i64) = sqlx::query!(r#"SELECT file_id, size_bytes FROM drive_versions WHERE node_id = $1 AND version = $2"#, id, v).map(|r| (r.file_id, r.size_bytes))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("version"))?;
     let file = file.ok_or(AppError::NotFound("file"))?;
-    let mime: String = sqlx::query_scalar("SELECT mime_type FROM files WHERE id = $1").bind(file).fetch_one(&state.db).await?;
+    let mime: String = sqlx::query_scalar!("SELECT mime_type FROM files WHERE id = $1", file).fetch_one(&state.db).await?;
     let mut tx = state.db.begin().await?;
-    let nv: i32 = sqlx::query_scalar("UPDATE drive_nodes SET version = version + 1, file_id = $2, size_bytes = $3, mime_type = $4, updated_by = $5, updated_at = now() WHERE id = $1 RETURNING version")
-        .bind(id)
-        .bind(file)
-        .bind(size)
-        .bind(&mime)
-        .bind(auth.id)
+    let nv: i32 = sqlx::query_scalar!("UPDATE drive_nodes SET version = version + 1, file_id = $2, size_bytes = $3, mime_type = $4, updated_by = $5, updated_at = now() WHERE id = $1 RETURNING version", id, file, size, &mime, auth.id)
         .fetch_one(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, $2, $3, $4, $5)").bind(id).bind(nv).bind(file).bind(size).bind(auth.id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, $2, $3, $4, $5)", id, nv, file, size, auth.id).execute(&mut *tx).await?;
     tx.commit().await?;
     get_node(State(state), auth, Path(id)).await
 }
@@ -736,16 +658,12 @@ async fn set_shares(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         return Err(AppError::bad("at most 200 shares"));
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM drive_shares WHERE node_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM drive_shares WHERE node_id = $1", id).execute(&mut *tx).await?;
     for s in &b {
         if !["view", "edit"].contains(&s.level.as_str()) || s.user_id.is_some() == s.department_id.is_some() || s.user_id == Some(auth.id) {
             return Err(AppError::bad("share with a person or a department, to view or to edit"));
         }
-        sqlx::query("INSERT INTO drive_shares (node_id, user_id, department_id, level) VALUES ($1, $2, $3, $4)")
-            .bind(id)
-            .bind(s.user_id)
-            .bind(s.department_id)
-            .bind(&s.level)
+        sqlx::query!("INSERT INTO drive_shares (node_id, user_id, department_id, level) VALUES ($1, $2, $3, $4)", id, s.user_id, s.department_id, &s.level)
             .execute(&mut *tx)
             .await
             .map_err(|e| match e {
@@ -756,7 +674,7 @@ async fn set_shares(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     tx.commit().await?;
     // People it is newly shared with hear about it.
     let who: Vec<Uuid> = b.iter().filter_map(|s| s.user_id).collect();
-    let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let me: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     crate::notify::notify(&state, &who, crate::notify::NewNotification { kind: "drive.shared", title: format!("{me} shared “{}” with you", n.name), body: None, link: Some(if n.kind == "folder" { format!("/drive?folder={id}") } else { format!("/drive?file={id}") }), actor: Some(auth.id) }).await;
     get_node(State(state), auth, Path(id)).await
 }
@@ -781,7 +699,7 @@ async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     }
     crate::routes::settings::require_public_links(&state).await?;
     need(&state, &auth, id, Level::Own).await?;
-    let board: Option<Uuid> = sqlx::query_scalar("SELECT board_id FROM drive_nodes WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let board: Option<Uuid> = sqlx::query_scalar!(r#"SELECT board_id AS "board_id?" FROM drive_nodes WHERE id = $1"#, id).fetch_one(&state.db).await?;
     if board.is_some() {
         return Err(AppError::bad("share a board with its own links (on the board)"));
     }
@@ -800,13 +718,7 @@ async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         }
     }
     let token = random_token(24);
-    sqlx::query("INSERT INTO drive_links (node_id, token_hash, expires_at, created_by, password_hash, can_edit) VALUES ($1, $2, $3, $4, $5, $6)")
-        .bind(id)
-        .bind(hash(&token))
-        .bind(b.expires_days.map(|d| Utc::now() + Duration::days(d)))
-        .bind(auth.id)
-        .bind(pw)
-        .bind(b.can_edit)
+    sqlx::query!("INSERT INTO drive_links (node_id, token_hash, expires_at, created_by, password_hash, can_edit) VALUES ($1, $2, $3, $4, $5, $6)", id, hash(&token), b.expires_days.map(|d| Utc::now() + Duration::days(d)), auth.id, pw, b.can_edit)
         .execute(&state.db)
         .await?;
     let mut v = get_node(State(state.clone()), auth, Path(id)).await?.0;
@@ -815,9 +727,9 @@ async fn create_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 }
 
 async fn delete_link(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let node_id: Uuid = sqlx::query_scalar("SELECT node_id FROM drive_links WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("link"))?;
+    let node_id: Uuid = sqlx::query_scalar!("SELECT node_id FROM drive_links WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("link"))?;
     need(&state, &auth, node_id, Level::Own).await?;
-    sqlx::query("DELETE FROM drive_links WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM drive_links WHERE id = $1", id).execute(&state.db).await?;
     get_node(State(state), auth, Path(node_id)).await
 }
 
@@ -828,8 +740,7 @@ async fn link_node(state: &AppState, token: &str, headers: &axum::http::HeaderMa
     if !crate::routes::settings::public_links_allowed(state).await? {
         return Err(AppError::NotFound("link"));
     }
-    let (lid, nid, pw): (Uuid, Uuid, Option<String>) = sqlx::query_as("SELECT id, node_id, password_hash FROM drive_links WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())")
-        .bind(hash(token))
+    let (lid, nid, pw): (Uuid, Uuid, Option<String>) = sqlx::query!(r#"SELECT id, node_id, password_hash FROM drive_links WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())"#, hash(token)).map(|r| (r.id, r.node_id, r.password_hash))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("link"))?;
@@ -864,18 +775,14 @@ pub(crate) async fn link_for_office(state: &AppState, token: &str, headers: &axu
     if n.kind != "file" {
         return Err(AppError::bad("open a file"));
     }
-    let (can_edit, by): (bool, Option<Uuid>) = sqlx::query_as("SELECT can_edit, created_by FROM drive_links WHERE id = $1").bind(lid).fetch_one(&state.db).await?;
+    let (can_edit, by): (bool, Option<Uuid>) = sqlx::query!(r#"SELECT can_edit, created_by FROM drive_links WHERE id = $1"#, lid).map(|r| (r.can_edit, r.created_by)).fetch_one(&state.db).await?;
     Ok((lid, n.id, can_edit, by))
 }
 
 /// Something inside a linked folder (any depth), not in the trash.
 async fn inside(state: &AppState, folder: Uuid, id: Uuid) -> AppResult<Node> {
-    let ok: bool = sqlx::query_scalar(
-        "WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id WHERE d.deleted_at IS NULL)
-         SELECT EXISTS (SELECT 1 FROM down WHERE id = $2)",
-    )
-    .bind(folder)
-    .bind(id)
+    let ok: bool = sqlx::query_scalar!(r#"WITH RECURSIVE down AS (SELECT id FROM drive_nodes WHERE id = $1 UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id WHERE d.deleted_at IS NULL)
+         SELECT EXISTS (SELECT 1 FROM down WHERE id = $2) AS "v!""#, folder, id)
     .fetch_one(&state.db)
     .await?;
     let n = node(state, id).await?;
@@ -898,20 +805,13 @@ async fn public_info(State(state): State<AppState>, ClientIp(ip): ClientIp, head
         _ => root.clone(),
     };
     if n.kind == "folder" {
-        let items: Vec<(Uuid, String, String, i64, Option<String>)> = sqlx::query_as(
-            "SELECT id, name, kind, size_bytes, mime_type FROM drive_nodes WHERE parent_id = $1 AND deleted_at IS NULL ORDER BY kind DESC, lower(name) LIMIT 2000",
-        )
-        .bind(n.id)
+        let items: Vec<(Uuid, String, String, i64, Option<String>)> = sqlx::query!(r#"SELECT id, name, kind, size_bytes, mime_type FROM drive_nodes WHERE parent_id = $1 AND deleted_at IS NULL ORDER BY kind DESC, lower(name) LIMIT 2000"#, n.id).map(|r| (r.id, r.name, r.kind, r.size_bytes, r.mime_type))
         .fetch_all(&state.db)
         .await?;
         // The way back up to the linked folder.
-        let path: Vec<(Uuid, String)> = sqlx::query_as(
-            "WITH RECURSIVE up AS (SELECT id, parent_id, name, 0 AS depth FROM drive_nodes WHERE id = $1
+        let path: Vec<(Uuid, String)> = sqlx::query!(r#"WITH RECURSIVE up AS (SELECT id, parent_id, name, 0 AS depth FROM drive_nodes WHERE id = $1
                 UNION ALL SELECT d.id, d.parent_id, d.name, up.depth + 1 FROM drive_nodes d JOIN up ON d.id = up.parent_id WHERE up.id <> $2)
-             SELECT id, name FROM up ORDER BY depth DESC",
-        )
-        .bind(n.id)
-        .bind(root.id)
+             SELECT id AS "id!", name AS "name!" FROM up ORDER BY depth DESC"#, n.id, root.id).map(|r| (r.id, r.name))
         .fetch_all(&state.db)
         .await?;
         return Ok(Json(json!({
@@ -920,8 +820,8 @@ async fn public_info(State(state): State<AppState>, ClientIp(ip): ClientIp, head
             "items": items.into_iter().map(|(id, name, kind, size, mime)| json!({ "id": id, "name": name, "kind": kind, "size_bytes": size, "mime_type": mime })).collect::<Vec<_>>(),
         })));
     }
-    let (size, mime): (i64, Option<String>) = sqlx::query_as("SELECT size_bytes, mime_type FROM drive_nodes WHERE id = $1").bind(n.id).fetch_one(&state.db).await?;
-    let can_edit: bool = q.item.is_none() && sqlx::query_scalar("SELECT can_edit FROM drive_links WHERE token_hash = $1").bind(hash(&token)).fetch_one(&state.db).await?;
+    let (size, mime): (i64, Option<String>) = sqlx::query!(r#"SELECT size_bytes, mime_type FROM drive_nodes WHERE id = $1"#, n.id).map(|r| (r.size_bytes, r.mime_type)).fetch_one(&state.db).await?;
+    let can_edit: bool = q.item.is_none() && sqlx::query_scalar!("SELECT can_edit FROM drive_links WHERE token_hash = $1", hash(&token)).fetch_one(&state.db).await?;
     Ok(Json(json!({ "kind": "file", "name": n.name, "size_bytes": size, "mime_type": mime, "can_edit": can_edit, "office": crate::office::link_office_status(&state, &n.name).await })))
 }
 
@@ -936,7 +836,7 @@ async fn public_download(State(state): State<AppState>, ClientIp(ip): ClientIp, 
     }
     // A download is counted once, not for every piece a player asks for.
     if headers.get(axum::http::header::RANGE).and_then(|v| v.to_str().ok()).is_none_or(|r| r.starts_with("bytes=0-")) {
-        sqlx::query("UPDATE drive_links SET downloads = downloads + 1 WHERE id = $1").bind(lid).execute(&state.db).await?;
+        sqlx::query!("UPDATE drive_links SET downloads = downloads + 1 WHERE id = $1", lid).execute(&state.db).await?;
     }
     crate::routes::files::stream_id(&state, n.file_id.ok_or(AppError::NotFound("file"))?, &n.name, &headers).await
 }
@@ -996,27 +896,21 @@ pub(crate) async fn office_file(state: &AppState, auth: &AuthUser, id: Uuid) -> 
     if n.kind != "file" || n.deleted_at.is_some() {
         return Err(AppError::NotFound("file"));
     }
-    let (size, version, updated_at): (i64, i32, DateTime<Utc>) = sqlx::query_as("SELECT size_bytes, version, updated_at FROM drive_nodes WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (size, version, updated_at): (i64, i32, DateTime<Utc>) = sqlx::query!(r#"SELECT size_bytes, version, updated_at FROM drive_nodes WHERE id = $1"#, id).map(|r| (r.size_bytes, r.version, r.updated_at)).fetch_one(&state.db).await?;
     Ok(OfficeFile { name: n.name, file_id: n.file_id.ok_or(AppError::NotFound("file"))?, size, version, updated_at, owner: n.owner_id.or(n.created_by), can_edit: l >= Level::Edit })
 }
 
 /// Saves edited content as the item's newest version.
 pub(crate) async fn save_version(state: &AppState, auth: &AuthUser, id: Uuid, bytes: &[u8]) -> AppResult<(i32, DateTime<Utc>)> {
     let (n, _) = need(state, auth, id, Level::Edit).await?;
-    let mime: Option<String> = sqlx::query_scalar("SELECT mime_type FROM drive_nodes WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let mime: Option<String> = sqlx::query_scalar!(r#"SELECT mime_type AS "mime_type?" FROM drive_nodes WHERE id = $1"#, id).fetch_one(&state.db).await?;
     let mime = mime.unwrap_or_else(|| "application/octet-stream".into());
     let file = crate::routes::files::store_bytes(state, Some(auth.id), &n.name, &mime, bytes).await?;
     let mut tx = state.db.begin().await?;
-    let (v, at): (i32, DateTime<Utc>) = sqlx::query_as(
-        "UPDATE drive_nodes SET version = version + 1, file_id = $2, size_bytes = $3, updated_by = $4, updated_at = now() WHERE id = $1 RETURNING version, updated_at",
-    )
-    .bind(id)
-    .bind(file)
-    .bind(bytes.len() as i64)
-    .bind(auth.id)
+    let (v, at): (i32, DateTime<Utc>) = sqlx::query!(r#"UPDATE drive_nodes SET version = version + 1, file_id = $2, size_bytes = $3, updated_by = $4, updated_at = now() WHERE id = $1 RETURNING version, updated_at"#, id, file, bytes.len() as i64, auth.id).map(|r| (r.version, r.updated_at))
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, $2, $3, $4, $5)").bind(id).bind(v).bind(file).bind(bytes.len() as i64).bind(auth.id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO drive_versions (node_id, version, file_id, size_bytes, uploaded_by) VALUES ($1, $2, $3, $4, $5)", id, v, file, bytes.len() as i64, auth.id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok((v, at))
 }

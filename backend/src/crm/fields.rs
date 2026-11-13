@@ -135,11 +135,8 @@ impl FieldDef {
 }
 
 pub async fn custom_fields(state: &AppState, entity_type: i16) -> AppResult<Vec<FieldDef>> {
-    Ok(sqlx::query_as(
-        "SELECT id, code, label, kind, is_multiple, is_required, show_in_list, settings, sort, visible_user_ids, visible_department_ids
-         FROM crm_field_defs WHERE entity_type = $1 ORDER BY sort, created_at",
-    )
-    .bind(entity_type)
+    Ok(sqlx::query_as!(FieldDef, "SELECT id, code, label, kind, is_multiple, is_required, show_in_list, settings, sort, visible_user_ids, visible_department_ids
+         FROM crm_field_defs WHERE entity_type = $1 ORDER BY sort, created_at", entity_type)
     .fetch_all(&state.db)
     .await?)
 }
@@ -156,13 +153,10 @@ pub async fn hidden_among(state: &AppState, auth: &AuthUser, defs: &[FieldDef]) 
         return Ok(vec![]);
     }
     // The person's departments and those above them.
-    let mine: Vec<Uuid> = sqlx::query_scalar(
-        "WITH RECURSIVE mine AS (
+    let mine: Vec<Uuid> = sqlx::query_scalar!(r#"WITH RECURSIVE mine AS (
              SELECT department_id AS id FROM user_departments WHERE user_id = $1
              UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
-         SELECT id FROM mine",
-    )
-    .bind(auth.id)
+         SELECT id AS "id!" FROM mine"#, auth.id)
     .fetch_all(&state.db)
     .await?;
     Ok(defs
@@ -303,7 +297,7 @@ pub async fn validate_uf(state: &AppState, entity_type: i16, uf: &Map<String, Va
     let existing: Vec<Uuid> = if user_refs.is_empty() {
         vec![]
     } else {
-        sqlx::query_scalar("SELECT id FROM users WHERE id = ANY($1)").bind(&user_refs).fetch_all(&state.db).await?
+        sqlx::query_scalar!("SELECT id FROM users WHERE id = ANY($1)", &user_refs).fetch_all(&state.db).await?
     };
 
     let mut out = Map::new();
@@ -374,8 +368,8 @@ async fn check_audience(state: &AppState, users: &mut Vec<Uuid>, deps: &mut Vec<
     if users.len() + deps.len() > 200 {
         return Err(AppError::bad("choose at most 200 people and departments"));
     }
-    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND NOT is_guest").bind(&*users).fetch_one(&state.db).await?;
-    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(&*deps).fetch_one(&state.db).await?;
+    let u: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND NOT is_guest"#, &*users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM departments WHERE id = ANY($1)"#, &*deps).fetch_one(&state.db).await?;
     if u as usize != users.len() || d as usize != deps.len() {
         return Err(AppError::bad("choose employees and existing departments"));
     }
@@ -441,9 +435,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
     let base = format!("uf_{}", slug(&label));
     let mut code = base.clone();
     for n in 2..1000 {
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_field_defs WHERE entity_type = $1 AND code = $2)")
-            .bind(t.id)
-            .bind(&code)
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_field_defs WHERE entity_type = $1 AND code = $2) AS "v!""#, t.id, &code)
             .fetch_one(&state.db)
             .await?;
         if !taken {
@@ -451,21 +443,9 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
         }
         code = format!("{base}_{n}");
     }
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_field_defs (entity_type, code, label, kind, is_multiple, is_required, show_in_list, settings, sort, visible_user_ids, visible_department_ids)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_field_defs (entity_type, code, label, kind, is_multiple, is_required, show_in_list, settings, sort, visible_user_ids, visible_department_ids)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-                 COALESCE((SELECT MAX(sort) FROM crm_field_defs WHERE entity_type = $1), 0) + 10, $9, $10) RETURNING id",
-    )
-    .bind(t.id)
-    .bind(&code)
-    .bind(&label)
-    .bind(&body.kind)
-    .bind(body.is_multiple)
-    .bind(body.is_required)
-    .bind(body.show_in_list)
-    .bind(settings)
-    .bind(&body.visible_user_ids)
-    .bind(&body.visible_department_ids)
+                 COALESCE((SELECT MAX(sort) FROM crm_field_defs WHERE entity_type = $1), 0) + 10, $9, $10) RETURNING id", t.id, &code, &label, &body.kind, body.is_multiple, body.is_required, body.show_in_list, settings, &body.visible_user_ids, &body.visible_department_ids)
     .fetch_one(&state.db)
     .await?;
     let def = custom_fields(&state, t.id).await?.into_iter().find(|d| d.id == id).unwrap();
@@ -480,9 +460,7 @@ pub async fn add_plain(state: &AppState, entity_type: i16, label: &str, kind: &s
     let base = format!("uf_{}", slug(&label));
     let mut code = base.clone();
     for n in 2..1000 {
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_field_defs WHERE entity_type = $1 AND code = $2)")
-            .bind(entity_type)
-            .bind(&code)
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_field_defs WHERE entity_type = $1 AND code = $2) AS "v!""#, entity_type, &code)
             .fetch_one(&state.db)
             .await?;
         if !taken {
@@ -490,14 +468,8 @@ pub async fn add_plain(state: &AppState, entity_type: i16, label: &str, kind: &s
         }
         code = format!("{base}_{n}");
     }
-    sqlx::query(
-        "INSERT INTO crm_field_defs (entity_type, code, label, kind, settings, sort)
-         VALUES ($1, $2, $3, $4, '{}', COALESCE((SELECT MAX(sort) FROM crm_field_defs WHERE entity_type = $1), 0) + 10)",
-    )
-    .bind(entity_type)
-    .bind(&code)
-    .bind(&label)
-    .bind(kind)
+    sqlx::query!("INSERT INTO crm_field_defs (entity_type, code, label, kind, settings, sort)
+         VALUES ($1, $2, $3, $4, '{}', COALESCE((SELECT MAX(sort) FROM crm_field_defs WHERE entity_type = $1), 0) + 10)", entity_type, &code, &label, kind)
     .execute(&state.db)
     .await?;
     Ok(code)
@@ -532,21 +504,11 @@ async fn update(
     let mut users = body.visible_user_ids.clone().unwrap_or(def.visible_user_ids.clone());
     let mut deps = body.visible_department_ids.clone().unwrap_or(def.visible_department_ids.clone());
     check_audience(&state, &mut users, &mut deps).await?;
-    sqlx::query(
-        "UPDATE crm_field_defs SET label = $1, is_required = $2, show_in_list = $3, settings = $4, sort = $5,
-             visible_user_ids = $7, visible_department_ids = $8 WHERE id = $6",
-    )
-    .bind(match &body.label {
+    sqlx::query!("UPDATE crm_field_defs SET label = $1, is_required = $2, show_in_list = $3, settings = $4, sort = $5,
+             visible_user_ids = $7, visible_department_ids = $8 WHERE id = $6", match &body.label {
         Some(l) => required("label", l, 100)?,
         None => def.label.clone(),
-    })
-    .bind(body.is_required.unwrap_or(def.is_required))
-    .bind(body.show_in_list.unwrap_or(def.show_in_list))
-    .bind(settings)
-    .bind(body.sort.unwrap_or(def.sort))
-    .bind(id)
-    .bind(&users)
-    .bind(&deps)
+    }, body.is_required.unwrap_or(def.is_required), body.show_in_list.unwrap_or(def.show_in_list), settings, body.sort.unwrap_or(def.sort), id, &users, &deps)
     .execute(&state.db)
     .await?;
     Ok(Json(custom_fields(&state, t.id).await?.into_iter().find(|d| d.id == id).unwrap()))
@@ -559,9 +521,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path((code, id)):
         return Err(AppError::Forbidden);
     }
     let t = entity_type(&state, &code).await?;
-    let n = sqlx::query("DELETE FROM crm_field_defs WHERE id = $1 AND entity_type = $2")
-        .bind(id)
-        .bind(t.id)
+    let n = sqlx::query!("DELETE FROM crm_field_defs WHERE id = $1 AND entity_type = $2", id, t.id)
         .execute(&state.db)
         .await?
         .rows_affected();

@@ -181,20 +181,13 @@ async fn install(State(state): State<AppState>, auth: AuthUser, Path(key): Path<
     let (fields, steps) = build(&key, &who).ok_or(AppError::NotFound("solution"))?;
     let name = crate::routes::required("name", b.name.as_deref().unwrap_or(sol.name), 120)?;
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO lists (name, description, to_all, created_by) VALUES ($1, $2, TRUE, $3) RETURNING id")
-        .bind(&name)
-        .bind(sol.description)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO lists (name, description, to_all, created_by) VALUES ($1, $2, TRUE, $3) RETURNING id", &name, sol.description, auth.id)
         .fetch_one(&mut *tx)
         .await?;
     save_fields(&mut tx, id, &fields).await?;
-    let saved: Vec<Field> = sqlx::query_as("SELECT id, code, label, kind, options, required FROM list_fields WHERE list_id = $1 ORDER BY sort").bind(id).fetch_all(&mut *tx).await?;
+    let saved: Vec<Field> = sqlx::query_as!(Field, r#"SELECT id AS "id?", code, label, kind, options, required FROM list_fields WHERE list_id = $1 ORDER BY sort"#, id).fetch_all(&mut *tx).await?;
     let steps = clean_steps(&steps, &saved, 0, &mut 0)?;
-    sqlx::query("INSERT INTO wf_templates (list_id, name, trigger, steps, is_active, created_by) VALUES ($1, $2, 'create', $3, TRUE, $4)")
-        .bind(id)
-        .bind(format!("{} approval", sol.name))
-        .bind(&steps)
-        .bind(auth.id)
+    sqlx::query!("INSERT INTO wf_templates (list_id, name, trigger, steps, is_active, created_by) VALUES ($1, $2, 'create', $3, TRUE, $4)", id, format!("{} approval", sol.name), &steps, auth.id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

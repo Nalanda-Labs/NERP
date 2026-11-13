@@ -154,9 +154,7 @@ pub fn normalize(input: &Layout, fields: &[CardField], strict: bool) -> AppResul
 }
 
 async fn stored(state: &AppState, t: i16, user: Option<uuid::Uuid>) -> AppResult<Option<Layout>> {
-    let v: Option<Value> = sqlx::query_scalar("SELECT layout FROM crm_card_layouts WHERE entity_type = $1 AND user_id IS NOT DISTINCT FROM $2")
-        .bind(t)
-        .bind(user)
+    let v: Option<Value> = sqlx::query_scalar!("SELECT layout FROM crm_card_layouts WHERE entity_type = $1 AND user_id IS NOT DISTINCT FROM $2", t, user)
         .fetch_optional(&state.db)
         .await?;
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
@@ -207,12 +205,8 @@ async fn put_layout(State(state): State<AppState>, auth: AuthUser, Path(code): P
     let layout = serde_json::to_value(normalize(&b.layout, &fields, true)?).unwrap();
     let user = if common { None } else { Some(auth.id) };
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM crm_card_layouts WHERE entity_type = $1 AND user_id IS NOT DISTINCT FROM $2").bind(t.id).bind(user).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO crm_card_layouts (entity_type, user_id, layout, updated_by) VALUES ($1, $2, $3, $4)")
-        .bind(t.id)
-        .bind(user)
-        .bind(layout)
-        .bind(auth.id)
+    sqlx::query!("DELETE FROM crm_card_layouts WHERE entity_type = $1 AND user_id IS NOT DISTINCT FROM $2", t.id, user).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO crm_card_layouts (entity_type, user_id, layout, updated_by) VALUES ($1, $2, $3, $4)", t.id, user, layout, auth.id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -237,7 +231,7 @@ async fn reset_layout(State(state): State<AppState>, auth: AuthUser, Path(code):
         "common" => return Err(AppError::Forbidden),
         _ => return Err(AppError::bad("scope must be mine or common")),
     };
-    sqlx::query("DELETE FROM crm_card_layouts WHERE entity_type = $1 AND user_id IS NOT DISTINCT FROM $2").bind(t.id).bind(user).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_card_layouts WHERE entity_type = $1 AND user_id IS NOT DISTINCT FROM $2", t.id, user).execute(&state.db).await?;
     Ok(Json(payload(&state, &auth, &t).await?))
 }
 

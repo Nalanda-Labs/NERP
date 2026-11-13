@@ -90,8 +90,7 @@ pub async fn authenticate(state: &AppState, parts: &Parts, token: &str) -> AppRe
     let entry: KeyEntry = match cached.and_then(|c| serde_json::from_str(&c).ok()) {
         Some(e) => e,
         None => {
-            let e: KeyEntry = sqlx::query_as("SELECT id, user_id, scopes, expires_at, revoked_at FROM api_keys WHERE secret_hash = $1")
-                .bind(&hash)
+            let e: KeyEntry = sqlx::query_as!(KeyEntry, r#"SELECT id, user_id, scopes, expires_at AS "expires_at?", revoked_at AS "revoked_at?" FROM api_keys WHERE secret_hash = $1"#, &hash)
                 .fetch_optional(&state.db)
                 .await?
                 .ok_or(AppError::Unauthorized)?;
@@ -123,7 +122,7 @@ pub async fn authenticate(state: &AppState, parts: &Parts, token: &str) -> AppRe
     let first: bool = redis::cmd("SET").arg(format!("api:used:{}", entry.id)).arg(1).arg("NX").arg("EX").arg(60).query_async::<Option<String>>(&mut redis).await?.is_some();
     if first {
         let ip = crate::auth::client_ip(parts, state);
-        sqlx::query("UPDATE api_keys SET last_used_at = now(), last_used_ip = $2 WHERE id = $1").bind(entry.id).bind(ip).execute(&state.db).await?;
+        sqlx::query!("UPDATE api_keys SET last_used_at = now(), last_used_ip = $2 WHERE id = $1", entry.id, ip).execute(&state.db).await?;
     }
     Ok(AuthUser { id: user.id, session_id: entry.id, permissions: user.permissions })
 }
@@ -132,8 +131,7 @@ pub async fn authenticate(state: &AppState, parts: &Parts, token: &str) -> AppRe
 /// the API), for callers that authenticate keys themselves (the MCP server).
 pub async fn key_scopes(state: &AppState, token: &str) -> AppResult<Vec<String>> {
     let hash = tokens::hash_token(token);
-    let e: KeyEntry = sqlx::query_as("SELECT id, user_id, scopes, expires_at, revoked_at FROM api_keys WHERE secret_hash = $1")
-        .bind(&hash)
+    let e: KeyEntry = sqlx::query_as!(KeyEntry, r#"SELECT id, user_id, scopes, expires_at AS "expires_at?", revoked_at AS "revoked_at?" FROM api_keys WHERE secret_hash = $1"#, &hash)
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::Unauthorized)?;
@@ -209,19 +207,13 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Cre
         Some(_) => return Err(AppError::bad("a key can last from 1 day to 2 years")),
         None => None,
     };
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL").bind(auth.id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL"#, auth.id).fetch_one(&state.db).await?;
     if n >= 20 {
         return Err(AppError::bad("at most 20 keys at a time; revoke one you no longer use"));
     }
     let token = format!("{PREFIX}{}", tokens::random_token(30));
     let prefix: String = token.chars().take(PREFIX.len() + 6).collect();
-    let id: Uuid = sqlx::query_scalar("INSERT INTO api_keys (user_id, name, prefix, secret_hash, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id")
-        .bind(auth.id)
-        .bind(&name)
-        .bind(&prefix)
-        .bind(tokens::hash_token(&token))
-        .bind(&scopes)
-        .bind(expires)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO api_keys (user_id, name, prefix, secret_hash, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", auth.id, &name, &prefix, tokens::hash_token(&token), &scopes, expires)
         .fetch_one(&state.db)
         .await?;
     crate::audit::record(&state.db, Some(auth.id), "api.key.create", "api_key", Some(id.to_string()), json!({ "name": name, "scopes": scopes }), None).await;
@@ -232,12 +224,12 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Cre
 
 /// Revokes one's own key, or anyone's with "Manage employees".
 async fn revoke(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let row: Option<(Uuid, String)> = sqlx::query_as("SELECT user_id, secret_hash FROM api_keys WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let row: Option<(Uuid, String)> = sqlx::query!(r#"SELECT user_id, secret_hash FROM api_keys WHERE id = $1"#, id).map(|r| (r.user_id, r.secret_hash)).fetch_optional(&state.db).await?;
     let Some((owner, hash)) = row else { return Err(AppError::NotFound("API key")) };
     if owner != auth.id && !auth.can(perm::USERS_MANAGE) {
         return Err(AppError::NotFound("API key"));
     }
-    sqlx::query("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now()) WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now()) WHERE id = $1", id).execute(&state.db).await?;
     let mut redis = state.redis.clone();
     let _: () = redis.del(cache_key(&hash)).await?;
     crate::audit::record(&state.db, Some(auth.id), "api.key.revoke", "api_key", Some(id.to_string()), json!({}), None).await;

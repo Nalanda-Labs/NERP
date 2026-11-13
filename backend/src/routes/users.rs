@@ -115,20 +115,14 @@ pub struct User {
 async fn hydrate(state: &AppState, rows: Vec<UserRow>) -> AppResult<Vec<User>> {
     let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
 
-    let dept_rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT ud.user_id, d.id, d.name FROM user_departments ud
+    let dept_rows: Vec<(Uuid, Uuid, String)> = sqlx::query!(r#"SELECT ud.user_id, d.id, d.name FROM user_departments ud
          JOIN departments d ON d.id = ud.department_id
-         WHERE ud.user_id = ANY($1) ORDER BY d.sort, d.name",
-    )
-    .bind(&ids)
+         WHERE ud.user_id = ANY($1) ORDER BY d.sort, d.name"#, &ids).map(|r| (r.user_id, r.id, r.name))
     .fetch_all(&state.db)
     .await?;
-    let role_rows: Vec<(Uuid, Uuid, String, String)> = sqlx::query_as(
-        "SELECT ur.user_id, r.id, r.code, r.name FROM user_roles ur
+    let role_rows: Vec<(Uuid, Uuid, String, String)> = sqlx::query!(r#"SELECT ur.user_id, r.id, r.code, r.name FROM user_roles ur
          JOIN roles r ON r.id = ur.role_id
-         WHERE ur.user_id = ANY($1) ORDER BY r.name",
-    )
-    .bind(&ids)
+         WHERE ur.user_id = ANY($1) ORDER BY r.name"#, &ids).map(|r| (r.user_id, r.id, r.code, r.name))
     .fetch_all(&state.db)
     .await?;
 
@@ -358,11 +352,7 @@ async fn push_profile_fields(
     if let Some(v) = f.avatar_file_id {
         if let Some(file_id) = v {
             // Avatars must be public images the caller uploaded.
-            let ok: Option<bool> = sqlx::query_scalar(
-                "SELECT is_public AND mime_type LIKE 'image/%' AND owner_id = ANY($2) FROM files WHERE id = $1",
-            )
-            .bind(file_id)
-            .bind(allowed_owners)
+            let ok: Option<bool> = sqlx::query_scalar!(r#"SELECT is_public AND mime_type LIKE 'image/%' AND owner_id = ANY($2) AS "v!" FROM files WHERE id = $1"#, file_id, allowed_owners)
             .fetch_optional(&state.db)
             .await?;
             if ok != Some(true) {
@@ -430,19 +420,8 @@ async fn create_user(
     };
 
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (email, password_hash, first_name, last_name, middle_name, position, phone, mobile, invite_pending)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-    )
-    .bind(&email)
-    .bind(hash)
-    .bind(&first_name)
-    .bind(last_name)
-    .bind(opt_text(body.middle_name, "middle name", 100)?)
-    .bind(opt_text(body.position, "position", 200)?)
-    .bind(opt_text(body.phone, "phone", 50)?)
-    .bind(opt_text(body.mobile, "mobile", 50)?)
-    .bind(invite)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO users (email, password_hash, first_name, last_name, middle_name, position, phone, mobile, invite_pending)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", &email, hash, &first_name, last_name, opt_text(body.middle_name, "middle name", 100)?, opt_text(body.position, "position", 200)?, opt_text(body.phone, "phone", 50)?, opt_text(body.mobile, "mobile", 50)?, invite)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -453,12 +432,8 @@ async fn create_user(
         }
     })?;
 
-    sqlx::query(
-        "INSERT INTO user_roles (user_id, role_id)
-         SELECT $1, id FROM roles WHERE code = 'employee' OR id = ANY($2)",
-    )
-    .bind(id)
-    .bind(&body.role_ids)
+    sqlx::query!("INSERT INTO user_roles (user_id, role_id)
+         SELECT $1, id FROM roles WHERE code = 'employee' OR id = ANY($2)", id, &body.role_ids)
     .execute(&mut *tx)
     .await?;
 
@@ -493,8 +468,7 @@ async fn notify_departments_joined(state: &AppState, user: Uuid, before: &[Uuid]
     if added.is_empty() {
         return;
     }
-    let names: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM departments WHERE id = ANY($1)")
-        .bind(&added)
+    let names: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id, name FROM departments WHERE id = ANY($1)"#, &added).map(|r| (r.id, r.name))
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -519,19 +493,14 @@ async fn set_departments(
     user_id: Uuid,
     department_ids: &[Uuid],
 ) -> AppResult<()> {
-    sqlx::query("DELETE FROM user_departments WHERE user_id = $1")
-        .bind(user_id)
+    sqlx::query!("DELETE FROM user_departments WHERE user_id = $1", user_id)
         .execute(&mut **tx)
         .await?;
     if department_ids.is_empty() {
         return Ok(());
     }
-    let inserted = sqlx::query(
-        "INSERT INTO user_departments (user_id, department_id)
-         SELECT $1, id FROM departments WHERE id = ANY($2)",
-    )
-    .bind(user_id)
-    .bind(department_ids)
+    let inserted = sqlx::query!("INSERT INTO user_departments (user_id, department_id)
+         SELECT $1, id FROM departments WHERE id = ANY($2)", user_id, department_ids)
     .execute(&mut **tx)
     .await?
     .rows_affected();
@@ -625,13 +594,10 @@ async fn update_user(
 
 /// Refuses an operation that would leave the company without an active administrator.
 pub async fn ensure_not_last_admin(state: &AppState, losing_user: Uuid) -> AppResult<()> {
-    let others: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT u.id) FROM users u
+    let others: i64 = sqlx::query_scalar!(r#"SELECT COUNT(DISTINCT u.id) AS "v!" FROM users u
          JOIN user_roles ur ON ur.user_id = u.id
          JOIN role_permissions rp ON rp.role_id = ur.role_id AND rp.permission = '*'
-         WHERE u.is_active AND u.id <> $1",
-    )
-    .bind(losing_user)
+         WHERE u.is_active AND u.id <> $1"#, losing_user)
     .fetch_one(&state.db)
     .await?;
     if others == 0 {
@@ -658,23 +624,17 @@ async fn set_roles(
     let user = fetch_user(&state, id).await?;
 
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM user_roles WHERE user_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM user_roles WHERE user_id = $1", id).execute(&mut *tx).await?;
     // Every user keeps the default employee role.
-    sqlx::query(
-        "INSERT INTO user_roles (user_id, role_id)
-         SELECT $1, id FROM roles WHERE code = 'employee' OR id = ANY($2)",
-    )
-    .bind(id)
-    .bind(&body.role_ids)
+    sqlx::query!("INSERT INTO user_roles (user_id, role_id)
+         SELECT $1, id FROM roles WHERE code = 'employee' OR id = ANY($2)", id, &body.role_ids)
     .execute(&mut *tx)
     .await?;
 
-    let admins_left: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT u.id) FROM users u
+    let admins_left: i64 = sqlx::query_scalar!(r#"SELECT COUNT(DISTINCT u.id) AS "v!" FROM users u
          JOIN user_roles ur ON ur.user_id = u.id
          JOIN role_permissions rp ON rp.role_id = ur.role_id AND rp.permission = '*'
-         WHERE u.is_active",
-    )
+         WHERE u.is_active"#)
     .fetch_one(&mut *tx)
     .await?;
     if admins_left == 0 {
@@ -733,11 +693,7 @@ async fn reset_password(
     auth.require(perm::USERS_MANAGE)?;
     password::validate_password(&body.password)?;
     let hash = password::hash_password(body.password).await?;
-    let updated = sqlx::query(
-        "UPDATE users SET password_hash = $1, password_changed_at = now(), updated_at = now() WHERE id = $2",
-    )
-    .bind(hash)
-    .bind(id)
+    let updated = sqlx::query!("UPDATE users SET password_hash = $1, password_changed_at = now(), updated_at = now() WHERE id = $2", hash, id)
     .execute(&state.db)
     .await?
     .rows_affected();

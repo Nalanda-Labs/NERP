@@ -83,7 +83,7 @@ async fn present(state: &AppState, page: Uuid) -> Vec<(Uuid, String, String)> {
 }
 
 async fn may_edit(state: &AppState, auth: &AuthUser, page: Uuid) -> AppResult<()> {
-    let space: Uuid = sqlx::query_scalar("SELECT space_id FROM kb_pages WHERE id = $1").bind(page).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("page"))?;
+    let space: Uuid = sqlx::query_scalar!("SELECT space_id FROM kb_pages WHERE id = $1", page).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("page"))?;
     crate::kb::editable(state, auth, space).await
 }
 
@@ -102,7 +102,7 @@ struct JoinBody {
 }
 
 async fn mark_present(state: &AppState, auth: &AuthUser, page: Uuid, client: &str) -> AppResult<String> {
-    let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     let mut r = state.redis.clone();
     let _: () = r.hset(people_key(page), client, json!({ "user": auth.id, "name": name, "at": Utc::now().timestamp() }).to_string()).await?;
     let _: () = r.expire(people_key(page), TTL as i64).await?;

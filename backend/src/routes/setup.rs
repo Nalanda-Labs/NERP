@@ -19,7 +19,7 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn needs_setup(state: &AppState) -> AppResult<bool> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE NOT is_system)")
+    let exists: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE NOT is_system) AS "v!""#)
         .fetch_one(&state.db)
         .await?;
     Ok(!exists)
@@ -28,7 +28,7 @@ async fn needs_setup(state: &AppState) -> AppResult<bool> {
 /// Public: tells the login page whether to show setup, and which company this is.
 async fn status(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let company: Option<Value> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'")
+        sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'")
             .fetch_optional(&state.db)
             .await?;
     Ok(Json(json!({
@@ -93,40 +93,24 @@ async fn do_setup(
     let hash = password::hash_password(password_plain).await?;
 
     let mut tx = state.db.begin().await?;
-    let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (email, password_hash, first_name, last_name, position, last_login_at)
-         VALUES ($1, $2, $3, $4, 'Administrator', now()) RETURNING id",
-    )
-    .bind(&email)
-    .bind(hash)
-    .bind(&first_name)
-    .bind(&last_name)
+    let user_id: Uuid = sqlx::query_scalar!("INSERT INTO users (email, password_hash, first_name, last_name, position, last_login_at)
+         VALUES ($1, $2, $3, $4, 'Administrator', now()) RETURNING id", &email, hash, &first_name, &last_name)
     .fetch_one(&mut *tx)
     .await?;
 
-    sqlx::query("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code IN ('admin', 'employee')")
-        .bind(user_id)
+    sqlx::query!("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code IN ('admin', 'employee')", user_id)
         .execute(&mut *tx)
         .await?;
 
-    let dept_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO departments (name, head_user_id, sort) VALUES ($1, $2, 0) RETURNING id",
-    )
-    .bind(&company)
-    .bind(user_id)
+    let dept_id: Uuid = sqlx::query_scalar!("INSERT INTO departments (name, head_user_id, sort) VALUES ($1, $2, 0) RETURNING id", &company, user_id)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2)")
-        .bind(user_id)
-        .bind(dept_id)
+    sqlx::query!("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2)", user_id, dept_id)
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query(
-        "INSERT INTO settings (key, value) VALUES ('company_name', $1)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
-    )
-    .bind(Value::String(company.clone()))
+    sqlx::query!("INSERT INTO settings (key, value) VALUES ('company_name', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", Value::String(company.clone()))
     .execute(&mut *tx)
     .await?;
 

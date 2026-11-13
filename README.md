@@ -930,7 +930,8 @@ start (or create it yourself and grant the user ownership).
 # backend: creates the `nerp` database on first run and applies migrations
 cd backend
 cp .env.example .env      # set DATABASE_URL, JWT_SECRET; COOKIE_SECURE=false for http://localhost
-cargo run                 # http://127.0.0.1:8080
+cargo run --bin nerp-migrate   # migrate first: queries are checked against the schema at compile time
+cargo run --bin nerp      # http://127.0.0.1:8080
 
 # frontend: proxies /api to the backend
 cd frontend
@@ -940,6 +941,20 @@ npm run check             # type checking
 ```
 
 Open the app. The first visit shows the setup screen.
+
+### Queries are checked at compile time
+
+The backend's SQL is written with sqlx's `query!`, `query_as!` and `query_scalar!` macros, which
+check each query against the database in `DATABASE_URL` while compiling: tables, columns,
+parameter types and the Rust types results are read into. So:
+
+- Run `cargo run --bin nerp-migrate` before building whenever migrations change (a new
+  migration's tables must exist before code using them compiles). `nerp-migrate` itself has no
+  checked queries and builds without a database.
+- Write new queries with the macros. Use the runtime functions (`sqlx::query(...)` with
+  `AssertSqlSafe`, or `QueryBuilder`) only for SQL assembled at run time, such as filters.
+- sqlx guesses whether a column can be NULL, and it can guess wrong after outer joins. Say
+  so in the column's name: `AS "name?"` (may be NULL) or `AS "name!"` (never NULL).
 
 ## Tests
 
@@ -970,7 +985,7 @@ LaTeX/LibreOffice, server settings) is listed in `tests/e2e/README.md`.
 
 ```sh
 cd frontend && npm ci && npm run build          # -> frontend/build
-cd backend  && cargo build --release            # -> backend/target/release/nerp
+cd backend  && cargo run --release --bin nerp-migrate && cargo build --release   # -> backend/target/release/nerp
 ```
 
 Run the binary with `STATIC_DIR` pointing at `frontend/build`. One process then serves both the API

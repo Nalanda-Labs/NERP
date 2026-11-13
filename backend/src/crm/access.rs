@@ -52,13 +52,8 @@ pub async fn scope(state: &AppState, auth: &AuthUser, entity_type: i16, action: 
     if is_crm_admin(auth) {
         return Ok(Scope::All);
     }
-    let scopes: Vec<String> = sqlx::query_scalar(
-        "SELECT p.scope FROM crm_role_permissions p JOIN user_roles ur ON ur.role_id = p.role_id
-         WHERE ur.user_id = $1 AND p.entity_type = $2 AND p.action = $3",
-    )
-    .bind(auth.id)
-    .bind(entity_type)
-    .bind(action)
+    let scopes: Vec<String> = sqlx::query_scalar!("SELECT p.scope FROM crm_role_permissions p JOIN user_roles ur ON ur.role_id = p.role_id
+         WHERE ur.user_id = $1 AND p.entity_type = $2 AND p.action = $3", auth.id, entity_type, action)
     .fetch_all(&state.db)
     .await?;
     Ok(scopes.iter().filter_map(|s| Scope::parse(s)).max().unwrap_or(Scope::None))
@@ -66,13 +61,12 @@ pub async fn scope(state: &AppState, auth: &AuthUser, entity_type: i16, action: 
 
 /// Users whose records fall inside a department-based scope (including the caller).
 pub async fn team(state: &AppState, user: Uuid, scope: Scope) -> AppResult<Vec<Uuid>> {
-    let mine: Vec<Uuid> = sqlx::query_scalar("SELECT department_id FROM user_departments WHERE user_id = $1")
-        .bind(user)
+    let mine: Vec<Uuid> = sqlx::query_scalar!("SELECT department_id FROM user_departments WHERE user_id = $1", user)
         .fetch_all(&state.db)
         .await?;
     let mut depts: HashSet<Uuid> = mine.iter().copied().collect();
     if scope == Scope::Subdepartments && !mine.is_empty() {
-        let edges: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as("SELECT id, parent_id FROM departments")
+        let edges: Vec<(Uuid, Option<Uuid>)> = sqlx::query!(r#"SELECT id, parent_id FROM departments"#).map(|r| (r.id, r.parent_id))
             .fetch_all(&state.db)
             .await?;
         let mut children: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
@@ -91,8 +85,7 @@ pub async fn team(state: &AppState, user: Uuid, scope: Scope) -> AppResult<Vec<U
         }
     }
     let ids: Vec<Uuid> = depts.into_iter().collect();
-    let mut users: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT user_id FROM user_departments WHERE department_id = ANY($1)")
-        .bind(&ids)
+    let mut users: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT user_id FROM user_departments WHERE department_id = ANY($1)", &ids)
         .fetch_all(&state.db)
         .await?;
     if !users.contains(&user) {
@@ -159,9 +152,7 @@ pub async fn require(state: &AppState, auth: &AuthUser, entity_type: i16, action
 }
 
 pub async fn is_observer(state: &AppState, item: Uuid, user: Uuid) -> AppResult<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_item_observers WHERE item_id = $1 AND user_id = $2)")
-        .bind(item)
-        .bind(user)
+    Ok(sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_item_observers WHERE item_id = $1 AND user_id = $2) AS "v!""#, item, user)
         .fetch_one(&state.db)
         .await?)
 }

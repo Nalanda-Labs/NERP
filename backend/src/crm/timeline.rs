@@ -119,20 +119,16 @@ async fn add_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if b.file_ids.len() > 20 {
         return Err(AppError::bad("attach at most 20 files"));
     }
-    let mine: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE id = ANY($1) AND owner_id = $2").bind(&b.file_ids).bind(auth.id).fetch_one(&state.db).await?;
+    let mine: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM files WHERE id = ANY($1) AND owner_id = $2"#, &b.file_ids, auth.id).fetch_one(&state.db).await?;
     if mine != b.file_ids.len() as i64 {
         return Err(AppError::bad("upload the files first"));
     }
     let body = if b.file_ids.is_empty() { required("comment", &b.body, 20_000)? } else { b.body.trim().chars().take(20_000).collect::<String>() };
-    sqlx::query("INSERT INTO crm_timeline (item_id, kind, author_id, body, data, file_ids) VALUES ($1, 'comment', $2, $3, '{}', $4)")
-        .bind(id)
-        .bind(auth.id)
-        .bind(&body)
-        .bind(&b.file_ids)
+    sqlx::query!("INSERT INTO crm_timeline (item_id, kind, author_id, body, data, file_ids) VALUES ($1, 'comment', $2, $3, '{}', $4)", id, auth.id, &body, &b.file_ids)
         .execute(&state.db)
         .await?;
     super::collab::tell_followers(&state, id, auth.id, true, "New comment on {record}".into(), Some(body.chars().take(200).collect())).await;
-    sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", id).execute(&state.db).await?;
     broadcast(&state, t, id, false).await;
     super::automation::fire(&state, id, "comment_added", |_| true).await;
     Ok(Json(json!({ "ok": true })))
@@ -145,8 +141,7 @@ struct EditEntry {
 }
 
 async fn entry(state: &AppState, auth: &AuthUser, e: Uuid) -> AppResult<(Uuid, String, Option<Uuid>, i16)> {
-    let (item, kind, author): (Uuid, String, Option<Uuid>) = sqlx::query_as("SELECT item_id, kind, author_id FROM crm_timeline WHERE id = $1")
-        .bind(e)
+    let (item, kind, author): (Uuid, String, Option<Uuid>) = sqlx::query!(r#"SELECT item_id, kind, author_id FROM crm_timeline WHERE id = $1"#, e).map(|r| (r.item_id, r.kind, r.author_id))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("timeline entry"))?;
@@ -161,14 +156,12 @@ async fn edit(State(state): State<AppState>, auth: AuthUser, Path(e): Path<Uuid>
         if kind != "comment" || author != Some(auth.id) {
             return Err(AppError::bad("you can only edit your own comments"));
         }
-        sqlx::query("UPDATE crm_timeline SET body = $1, edited_at = now() WHERE id = $2")
-            .bind(required("comment", body, 20_000)?)
-            .bind(e)
+        sqlx::query!("UPDATE crm_timeline SET body = $1, edited_at = now() WHERE id = $2", required("comment", body, 20_000)?, e)
             .execute(&state.db)
             .await?;
     }
     if let Some(p) = b.is_pinned {
-        sqlx::query("UPDATE crm_timeline SET is_pinned = $1 WHERE id = $2").bind(p).bind(e).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_timeline SET is_pinned = $1 WHERE id = $2", p, e).execute(&state.db).await?;
     }
     broadcast(&state, t, item, false).await;
     Ok(Json(json!({ "ok": true })))
@@ -179,7 +172,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(e): Path<Uui
     if kind != "comment" || (author != Some(auth.id) && !super::access::is_crm_admin(&auth)) {
         return Err(AppError::bad("only comments can be deleted, by their author"));
     }
-    let files: Vec<Uuid> = sqlx::query_scalar("DELETE FROM crm_timeline WHERE id = $1 RETURNING file_ids").bind(e).fetch_one(&state.db).await?;
+    let files: Vec<Uuid> = sqlx::query_scalar!("DELETE FROM crm_timeline WHERE id = $1 RETURNING file_ids", e).fetch_one(&state.db).await?;
     for f in files {
         crate::routes::files::delete_stored(&state, f).await;
     }
@@ -189,7 +182,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(e): Path<Uui
 
 /// Files attached to timeline comments: readable by whoever can see the record.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
-    let item: Option<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_timeline WHERE file_ids <> '{}' AND file_ids @> ARRAY[$1]::uuid[] LIMIT 1").bind(file).fetch_optional(&state.db).await?;
+    let item: Option<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_timeline WHERE file_ids <> '{}' AND file_ids @> ARRAY[$1]::uuid[] LIMIT 1", file).fetch_optional(&state.db).await?;
     match item {
         Some(i) => Ok(readable(state, auth, i).await.is_ok()),
         None => Ok(false),

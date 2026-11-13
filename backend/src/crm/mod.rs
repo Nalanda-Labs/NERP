@@ -157,12 +157,7 @@ pub async fn timeline<'e, E: sqlx::PgExecutor<'e>>(
     body: Option<String>,
     data: Value,
 ) -> sqlx::Result<()> {
-    sqlx::query("INSERT INTO crm_timeline (item_id, kind, author_id, body, data) VALUES ($1, $2, $3, $4, $5)")
-        .bind(item)
-        .bind(kind)
-        .bind(author)
-        .bind(body)
-        .bind(data)
+    sqlx::query!("INSERT INTO crm_timeline (item_id, kind, author_id, body, data) VALUES ($1, $2, $3, $4, $5)", item, kind, author, body, data)
         .execute(executor)
         .await?;
     Ok(())

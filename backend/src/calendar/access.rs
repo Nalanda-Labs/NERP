@@ -59,14 +59,10 @@ pub async fn level(state: &AppState, viewer: Uuid, owner: Uuid) -> AppResult<Lev
     if viewer == owner {
         return Ok(Level::Edit);
     }
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT grantee_kind, level FROM cal_access
+    let rows: Vec<(String, String)> = sqlx::query!(r#"SELECT grantee_kind, level FROM cal_access
          WHERE owner_id = $1 AND (grantee_kind = 'everyone'
             OR (grantee_kind = 'user' AND grantee_id = $2)
-            OR (grantee_kind = 'department' AND grantee_id IN (SELECT department_id FROM user_departments WHERE user_id = $2)))",
-    )
-    .bind(owner)
-    .bind(viewer)
+            OR (grantee_kind = 'department' AND grantee_id IN (SELECT department_id FROM user_departments WHERE user_id = $2)))"#, owner, viewer).map(|r| (r.grantee_kind, r.level))
     .fetch_all(&state.db)
     .await?;
     let best = |kind: &str| rows.iter().filter(|(k, _)| k == kind).filter_map(|(_, l)| Level::parse(l)).max();
@@ -78,13 +74,10 @@ async fn get_access(State(state): State<AppState>, auth: AuthUser) -> AppResult<
 }
 
 async fn access_json(state: &AppState, owner: Uuid) -> AppResult<Value> {
-    let rows: Vec<(String, Option<Uuid>, String, Option<String>)> = sqlx::query_as(
-        "SELECT a.grantee_kind, a.grantee_id, a.level,
+    let rows: Vec<(String, Option<Uuid>, String, Option<String>)> = sqlx::query!(r#"SELECT a.grantee_kind, a.grantee_id, a.level,
                 CASE a.grantee_kind WHEN 'user' THEN (SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = a.grantee_id)
-                                    WHEN 'department' THEN (SELECT name FROM departments WHERE id = a.grantee_id) END
-         FROM cal_access a WHERE a.owner_id = $1 ORDER BY a.grantee_kind, 4",
-    )
-    .bind(owner)
+                                    WHEN 'department' THEN (SELECT name FROM departments WHERE id = a.grantee_id) END AS "c3"
+         FROM cal_access a WHERE a.owner_id = $1 ORDER BY a.grantee_kind, 4"#, owner).map(|r| (r.grantee_kind, r.grantee_id, r.level, r.c3))
     .fetch_all(&state.db)
     .await?;
     let everyone = rows.iter().find(|r| r.0 == "everyone").map(|r| r.2.clone()).unwrap_or_else(|| "read".into());
@@ -120,8 +113,8 @@ async fn put_access(State(state): State<AppState>, auth: AuthUser, Json(b): Json
         }
         let exists: bool = match g.kind.as_str() {
             "user" if g.id == auth.id => return Err(AppError::bad("you always have your own calendar")),
-            "user" => sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)").bind(g.id).fetch_one(&state.db).await?,
-            "department" => sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM departments WHERE id = $1)").bind(g.id).fetch_one(&state.db).await?,
+            "user" => sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1) AS "v!""#, g.id).fetch_one(&state.db).await?,
+            "department" => sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM departments WHERE id = $1) AS "v!""#, g.id).fetch_one(&state.db).await?,
             _ => return Err(AppError::bad("share with a user or a department")),
         };
         if !exists {
@@ -129,16 +122,12 @@ async fn put_access(State(state): State<AppState>, auth: AuthUser, Json(b): Json
         }
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM cal_access WHERE owner_id = $1").bind(auth.id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM cal_access WHERE owner_id = $1", auth.id).execute(&mut *tx).await?;
     if everyone != Level::Read {
-        sqlx::query("INSERT INTO cal_access (owner_id, grantee_kind, level) VALUES ($1, 'everyone', $2)").bind(auth.id).bind(everyone.name()).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO cal_access (owner_id, grantee_kind, level) VALUES ($1, 'everyone', $2)", auth.id, everyone.name()).execute(&mut *tx).await?;
     }
     for g in &b.grants {
-        sqlx::query("INSERT INTO cal_access (owner_id, grantee_kind, grantee_id, level) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING")
-            .bind(auth.id)
-            .bind(&g.kind)
-            .bind(g.id)
-            .bind(&g.level)
+        sqlx::query!("INSERT INTO cal_access (owner_id, grantee_kind, grantee_id, level) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING", auth.id, &g.kind, g.id, &g.level)
             .execute(&mut *tx)
             .await?;
     }
@@ -148,13 +137,10 @@ async fn put_access(State(state): State<AppState>, auth: AuthUser, Json(b): Json
 
 /// Colleagues who gave me (or my departments) access beyond the default, with my level.
 async fn shared_with_me(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let owners: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT DISTINCT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id FROM cal_access a JOIN users u ON u.id = a.owner_id
+    let owners: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query!(r#"SELECT DISTINCT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.avatar_file_id AS "avatar_file_id?" FROM cal_access a JOIN users u ON u.id = a.owner_id
          WHERE u.is_active AND ((a.grantee_kind = 'user' AND a.grantee_id = $1)
             OR (a.grantee_kind = 'department' AND a.grantee_id IN (SELECT department_id FROM user_departments WHERE user_id = $1)))
-         ORDER BY 2",
-    )
-    .bind(auth.id)
+         ORDER BY 2"#, auth.id).map(|r| (r.id, r.c1, r.avatar_file_id))
     .fetch_all(&state.db)
     .await?;
     let mut out = Vec::new();

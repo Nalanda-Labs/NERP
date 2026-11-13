@@ -62,13 +62,10 @@ pub async fn price(state: &AppState, subtotal: Decimal, email: Option<&str>, cou
     let mut q = Quote { subtotal, needs_address: true, ..Default::default() };
     // Loyalty: what this email bought before (orders not cancelled).
     if let Some(email) = email.map(|e| e.trim().to_lowercase()).filter(|e| e.contains('@')) {
-        let tiers: Value = sqlx::query_scalar("SELECT loyalty FROM shop_settings").fetch_one(&state.db).await?;
+        let tiers: Value = sqlx::query_scalar!("SELECT loyalty FROM shop_settings").fetch_one(&state.db).await?;
         if tiers.as_array().is_some_and(|t| !t.is_empty()) {
-            let before: Decimal = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(i.opportunity), 0) FROM shop_orders o JOIN crm_items i ON i.id = o.item_id
-                 WHERE lower(o.email) = $1 AND i.deleted_at IS NULL AND i.stage_semantics <> 'failure'",
-            )
-            .bind(&email)
+            let before: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(i.opportunity), 0) AS "v!" FROM shop_orders o JOIN crm_items i ON i.id = o.item_id
+                 WHERE lower(o.email) = $1 AND i.deleted_at IS NULL AND i.stage_semantics <> 'failure'"#, &email)
             .fetch_one(&state.db)
             .await?;
             let pct = tiers
@@ -88,8 +85,7 @@ pub async fn price(state: &AppState, subtotal: Decimal, email: Option<&str>, cou
     // A coupon.
     if let Some(code) = coupon.map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()) {
         type C = (Uuid, String, Decimal, Option<Decimal>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<i32>, i32, bool, bool);
-        let c: Option<C> = sqlx::query_as("SELECT id, kind, value, min_total, starts_at, ends_at, max_uses, uses, once_per_customer, active FROM shop_coupons WHERE code = $1")
-            .bind(&code)
+        let c: Option<C> = sqlx::query!(r#"SELECT id, kind, value, min_total, starts_at, ends_at, max_uses, uses, once_per_customer, active FROM shop_coupons WHERE code = $1"#, &code).map(|r| (r.id, r.kind, r.value, r.min_total, r.starts_at, r.ends_at, r.max_uses, r.uses, r.once_per_customer, r.active))
             .fetch_optional(&state.db)
             .await?;
         let (id, kind, value, min_total, starts, ends, max, uses, once, active) = c.filter(|c| c.9).ok_or_else(|| AppError::bad(format!("there is no coupon “{code}”")))?;
@@ -109,7 +105,7 @@ pub async fn price(state: &AppState, subtotal: Decimal, email: Option<&str>, cou
         }
         if once {
             if let Some(email) = email.map(|e| e.trim().to_lowercase()) {
-                let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shop_coupon_uses WHERE coupon_id = $1 AND email = $2)").bind(id).bind(&email).fetch_one(&state.db).await?;
+                let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM shop_coupon_uses WHERE coupon_id = $1 AND email = $2) AS "v!""#, id, &email).fetch_one(&state.db).await?;
                 if used {
                     return Err(AppError::bad(format!("you have already used coupon “{code}”")));
                 }
@@ -134,7 +130,7 @@ pub async fn price(state: &AppState, subtotal: Decimal, email: Option<&str>, cou
     let after = subtotal - q.discount;
     // Delivery: one of the ways, when the shop has any.
     let ways: Vec<(Uuid, String, Decimal, Option<Decimal>, bool)> =
-        sqlx::query_as("SELECT id, name, price, free_from, needs_address FROM shop_delivery WHERE active ORDER BY sort, name").fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT id, name, price, free_from, needs_address FROM shop_delivery WHERE active ORDER BY sort, name"#).map(|r| (r.id, r.name, r.price, r.free_from, r.needs_address)).fetch_all(&state.db).await?;
     if !ways.is_empty() {
         let (id, name, price, free, needs) = match delivery {
             Some(d) => ways.into_iter().find(|w| w.0 == d).ok_or_else(|| AppError::bad("choose a way of delivery"))?,
@@ -151,7 +147,7 @@ pub async fn price(state: &AppState, subtotal: Decimal, email: Option<&str>, cou
 
 /// Whether the shop has ways of delivery (then a way must be chosen).
 pub async fn has_delivery(state: &AppState) -> AppResult<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shop_delivery WHERE active)").fetch_one(&state.db).await?)
+    Ok(sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM shop_delivery WHERE active) AS "v!""#).fetch_one(&state.db).await?)
 }
 
 /// Takes one use of a coupon (all or nothing), for this email.
@@ -160,28 +156,26 @@ pub async fn use_coupon(state: &AppState, id: Uuid, email: &str) -> AppResult<()
     let mut tx = state.db.begin().await?;
     // Orders from one customer at the same moment take turns, so "once per customer" holds.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('coupon:' || $1::text || ':' || $2, 0))").bind(id).bind(&email).execute(&mut *tx).await?;
-    let once: bool = sqlx::query_scalar("SELECT once_per_customer FROM shop_coupons WHERE id = $1").bind(id).fetch_one(&mut *tx).await?;
+    let once: bool = sqlx::query_scalar!("SELECT once_per_customer FROM shop_coupons WHERE id = $1", id).fetch_one(&mut *tx).await?;
     if once {
-        let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shop_coupon_uses WHERE coupon_id = $1 AND email = $2)").bind(id).bind(&email).fetch_one(&mut *tx).await?;
+        let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM shop_coupon_uses WHERE coupon_id = $1 AND email = $2) AS "v!""#, id, &email).fetch_one(&mut *tx).await?;
         if used {
             return Err(AppError::bad("you have already used this coupon"));
         }
     }
-    let n = sqlx::query("UPDATE shop_coupons SET uses = uses + 1 WHERE id = $1 AND (max_uses IS NULL OR uses < max_uses)").bind(id).execute(&mut *tx).await?.rows_affected();
+    let n = sqlx::query!("UPDATE shop_coupons SET uses = uses + 1 WHERE id = $1 AND (max_uses IS NULL OR uses < max_uses)", id).execute(&mut *tx).await?.rows_affected();
     if n == 0 {
         return Err(AppError::bad("the coupon has just been used up"));
     }
-    sqlx::query("INSERT INTO shop_coupon_uses (coupon_id, email) VALUES ($1, $2)").bind(id).bind(&email).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO shop_coupon_uses (coupon_id, email) VALUES ($1, $2)", id, &email).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
 /// Gives a use back when the order did not go through.
 pub async fn unuse_coupon(state: &AppState, id: Uuid, email: &str) {
-    let _ = sqlx::query("UPDATE shop_coupons SET uses = GREATEST(uses - 1, 0) WHERE id = $1").bind(id).execute(&state.db).await;
-    let _ = sqlx::query("DELETE FROM shop_coupon_uses WHERE ctid IN (SELECT ctid FROM shop_coupon_uses WHERE coupon_id = $1 AND email = $2 AND item_id IS NULL LIMIT 1)")
-        .bind(id)
-        .bind(email.to_lowercase())
+    let _ = sqlx::query!("UPDATE shop_coupons SET uses = GREATEST(uses - 1, 0) WHERE id = $1", id).execute(&state.db).await;
+    let _ = sqlx::query!("DELETE FROM shop_coupon_uses WHERE ctid IN (SELECT ctid FROM shop_coupon_uses WHERE coupon_id = $1 AND email = $2 AND item_id IS NULL LIMIT 1)", id, email.to_lowercase())
         .execute(&state.db)
         .await;
 }
@@ -243,18 +237,7 @@ async fn new_coupon(State(state): State<AppState>, auth: AuthUser, Json(b): Json
     let kind = b.kind.unwrap_or_else(|| "percent".into());
     let value = b.value.ok_or_else(|| AppError::bad("how much off?"))?;
     check_coupon(&kind, value, b.max_uses.flatten(), b.min_total.flatten())?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO shop_coupons (code, kind, value, min_total, starts_at, ends_at, max_uses, once_per_customer, active) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-    )
-    .bind(&code)
-    .bind(&kind)
-    .bind(value)
-    .bind(b.min_total.flatten())
-    .bind(b.starts_at.flatten())
-    .bind(b.ends_at.flatten())
-    .bind(b.max_uses.flatten())
-    .bind(b.once_per_customer.unwrap_or(false))
-    .bind(b.active.unwrap_or(true))
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO shop_coupons (code, kind, value, min_total, starts_at, ends_at, max_uses, once_per_customer, active) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", &code, &kind, value, b.min_total.flatten(), b.starts_at.flatten(), b.ends_at.flatten(), b.max_uses.flatten(), b.once_per_customer.unwrap_or(false), b.active.unwrap_or(true))
     .fetch_one(&state.db)
     .await
     .map_err(|e| match e {
@@ -273,18 +256,7 @@ async fn change_coupon(State(state): State<AppState>, auth: AuthUser, Path(id): 
     let min = b.min_total.unwrap_or(old.4);
     let max = b.max_uses.unwrap_or(old.7);
     check_coupon(&kind, value, max, min)?;
-    sqlx::query(
-        "UPDATE shop_coupons SET kind = $2, value = $3, min_total = $4, starts_at = $5, ends_at = $6, max_uses = $7, once_per_customer = $8, active = $9 WHERE id = $1",
-    )
-    .bind(id)
-    .bind(kind)
-    .bind(value)
-    .bind(min)
-    .bind(b.starts_at.unwrap_or(old.5))
-    .bind(b.ends_at.unwrap_or(old.6))
-    .bind(max)
-    .bind(b.once_per_customer.unwrap_or(old.9))
-    .bind(b.active.unwrap_or(old.10))
+    sqlx::query!("UPDATE shop_coupons SET kind = $2, value = $3, min_total = $4, starts_at = $5, ends_at = $6, max_uses = $7, once_per_customer = $8, active = $9 WHERE id = $1", id, kind, value, min, b.starts_at.unwrap_or(old.5), b.ends_at.unwrap_or(old.6), max, b.once_per_customer.unwrap_or(old.9), b.active.unwrap_or(old.10))
     .execute(&state.db)
     .await?;
     let r: CouponRow = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COUPON_COLS} FROM shop_coupons WHERE id = $1"))).bind(id).fetch_one(&state.db).await?;
@@ -293,7 +265,7 @@ async fn change_coupon(State(state): State<AppState>, auth: AuthUser, Path(id): 
 
 async fn drop_coupon(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    sqlx::query("DELETE FROM shop_coupons WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM shop_coupons WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -340,14 +312,7 @@ async fn new_delivery(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     if price < Decimal::ZERO || b.free_from.flatten().is_some_and(|f| f < Decimal::ZERO) {
         return Err(AppError::bad("prices are 0 or more"));
     }
-    sqlx::query("INSERT INTO shop_delivery (name, description, price, free_from, needs_address, sort, active) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-        .bind(name)
-        .bind(b.description.flatten().map(|d| d.chars().take(500).collect::<String>()))
-        .bind(price)
-        .bind(b.free_from.flatten())
-        .bind(b.needs_address.unwrap_or(true))
-        .bind(b.sort.unwrap_or(0))
-        .bind(b.active.unwrap_or(true))
+    sqlx::query!("INSERT INTO shop_delivery (name, description, price, free_from, needs_address, sort, active) VALUES ($1, $2, $3, $4, $5, $6, $7)", name, b.description.flatten().map(|d| d.chars().take(500).collect::<String>()), price, b.free_from.flatten(), b.needs_address.unwrap_or(true), b.sort.unwrap_or(0), b.active.unwrap_or(true))
         .execute(&state.db)
         .await?;
     deliveries(State(state), auth).await
@@ -365,15 +330,7 @@ async fn change_delivery(State(state): State<AppState>, auth: AuthUser, Path(id)
     if price < Decimal::ZERO || free.is_some_and(|f| f < Decimal::ZERO) {
         return Err(AppError::bad("prices are 0 or more"));
     }
-    sqlx::query("UPDATE shop_delivery SET name = $2, description = $3, price = $4, free_from = $5, needs_address = $6, sort = $7, active = $8 WHERE id = $1")
-        .bind(id)
-        .bind(name)
-        .bind(b.description.unwrap_or(o.2))
-        .bind(price)
-        .bind(free)
-        .bind(b.needs_address.unwrap_or(o.5))
-        .bind(b.sort.unwrap_or(o.6))
-        .bind(b.active.unwrap_or(o.7))
+    sqlx::query!("UPDATE shop_delivery SET name = $2, description = $3, price = $4, free_from = $5, needs_address = $6, sort = $7, active = $8 WHERE id = $1", id, name, b.description.unwrap_or(o.2), price, free, b.needs_address.unwrap_or(o.5), b.sort.unwrap_or(o.6), b.active.unwrap_or(o.7))
         .execute(&state.db)
         .await?;
     deliveries(State(state), auth).await
@@ -381,7 +338,7 @@ async fn change_delivery(State(state): State<AppState>, auth: AuthUser, Path(id)
 
 async fn drop_delivery(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    sqlx::query("DELETE FROM shop_delivery WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM shop_delivery WHERE id = $1", id).execute(&state.db).await?;
     deliveries(State(state), auth).await
 }
 
@@ -391,7 +348,7 @@ async fn drop_delivery(State(state): State<AppState>, auth: AuthUser, Path(id): 
 
 async fn get_loyalty(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let v: Value = sqlx::query_scalar("SELECT loyalty FROM shop_settings").fetch_one(&state.db).await?;
+    let v: Value = sqlx::query_scalar!("SELECT loyalty FROM shop_settings").fetch_one(&state.db).await?;
     Ok(Json(json!({ "tiers": v })))
 }
 
@@ -413,7 +370,7 @@ async fn put_loyalty(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
     }
     let mut tiers: Vec<Value> = b.tiers.iter().map(|t| json!({ "from": t.from, "percent": t.percent })).collect();
     tiers.sort_by(|a, b| a["from"].as_f64().partial_cmp(&b["from"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
-    sqlx::query("UPDATE shop_settings SET loyalty = $1").bind(json!(tiers)).execute(&state.db).await?;
+    sqlx::query!("UPDATE shop_settings SET loyalty = $1", json!(tiers)).execute(&state.db).await?;
     get_loyalty(State(state), auth).await
 }
 
@@ -426,8 +383,8 @@ const FORMAT: &str = "nerp-shop/1";
 async fn export(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require(&auth)?;
     let s = super::settings(&state).await?;
-    let loyalty: Value = sqlx::query_scalar("SELECT loyalty FROM shop_settings").fetch_one(&state.db).await?;
-    let cats: Vec<(String, String, i32)> = sqlx::query_as("SELECT name, slug, sort FROM shop_categories ORDER BY sort, name").fetch_all(&state.db).await?;
+    let loyalty: Value = sqlx::query_scalar!("SELECT loyalty FROM shop_settings").fetch_one(&state.db).await?;
+    let cats: Vec<(String, String, i32)> = sqlx::query!(r#"SELECT name, slug, sort FROM shop_categories ORDER BY sort, name"#).map(|r| (r.name, r.slug, r.sort)).fetch_all(&state.db).await?;
     let del: Vec<DeliveryRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {DELIVERY_COLS} FROM shop_delivery ORDER BY sort, name"))).fetch_all(&state.db).await?;
     let cps: Vec<CouponRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COUPON_COLS} FROM shop_coupons ORDER BY code"))).fetch_all(&state.db).await?;
     Ok(Json(json!({
@@ -451,23 +408,16 @@ async fn import(State(state): State<AppState>, auth: AuthUser, Json(d): Json<Val
     let st = &d["settings"];
     let text = |k: &str, max: usize| st[k].as_str().map(|s| s.chars().take(max).collect::<String>());
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE shop_settings SET name = COALESCE($1, name), intro = $2, payment_instructions = COALESCE($3, payment_instructions), terms = $4, updated_at = now()")
-        .bind(text("name", 120))
-        .bind(text("intro", 2000))
-        .bind(text("payment_instructions", 4000))
-        .bind(text("terms", 20000))
+    sqlx::query!("UPDATE shop_settings SET name = COALESCE($1, name), intro = $2, payment_instructions = COALESCE($3, payment_instructions), terms = $4, updated_at = now()", text("name", 120), text("intro", 2000), text("payment_instructions", 4000), text("terms", 20000))
         .execute(&mut *tx)
         .await?;
     if d["loyalty"].is_array() {
-        sqlx::query("UPDATE shop_settings SET loyalty = $1").bind(&d["loyalty"]).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE shop_settings SET loyalty = $1", &d["loyalty"]).execute(&mut *tx).await?;
     }
     let mut counts = (0, 0, 0);
     for c in d["categories"].as_array().cloned().unwrap_or_default().iter().take(500) {
         let (Some(n), Some(sl)) = (c["name"].as_str(), c["slug"].as_str()) else { continue };
-        sqlx::query("INSERT INTO shop_categories (name, slug, sort) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET name = $1, sort = $3")
-            .bind(n.chars().take(120).collect::<String>())
-            .bind(sl.chars().take(80).collect::<String>())
-            .bind(c["sort"].as_i64().unwrap_or(0) as i32)
+        sqlx::query!("INSERT INTO shop_categories (name, slug, sort) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET name = $1, sort = $3", n.chars().take(120).collect::<String>(), sl.chars().take(80).collect::<String>(), c["sort"].as_i64().unwrap_or(0) as i32)
             .execute(&mut *tx)
             .await?;
         counts.0 += 1;
@@ -476,15 +426,8 @@ async fn import(State(state): State<AppState>, auth: AuthUser, Json(d): Json<Val
         let Some(n) = w["name"].as_str() else { continue };
         let price = w["price"].as_str().and_then(|p| p.parse::<Decimal>().ok()).or_else(|| w["price"].as_f64().and_then(Decimal::from_f64_retain)).unwrap_or_default();
         let free = w["free_from"].as_str().and_then(|p| p.parse::<Decimal>().ok()).or_else(|| w["free_from"].as_f64().and_then(Decimal::from_f64_retain));
-        sqlx::query("DELETE FROM shop_delivery WHERE name = $1").bind(n).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO shop_delivery (name, description, price, free_from, needs_address, sort, active) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-            .bind(n)
-            .bind(w["description"].as_str())
-            .bind(price.max(Decimal::ZERO))
-            .bind(free)
-            .bind(w["needs_address"].as_bool().unwrap_or(true))
-            .bind(w["sort"].as_i64().unwrap_or(0) as i32)
-            .bind(w["active"].as_bool().unwrap_or(true))
+        sqlx::query!("DELETE FROM shop_delivery WHERE name = $1", n).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO shop_delivery (name, description, price, free_from, needs_address, sort, active) VALUES ($1, $2, $3, $4, $5, $6, $7)", n, w["description"].as_str(), price.max(Decimal::ZERO), free, w["needs_address"].as_bool().unwrap_or(true), w["sort"].as_i64().unwrap_or(0) as i32, w["active"].as_bool().unwrap_or(true))
             .execute(&mut *tx)
             .await?;
         counts.1 += 1;

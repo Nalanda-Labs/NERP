@@ -139,7 +139,7 @@ const CONTEXT_ONLY: &[&str] = &["contact", "client_email", "assigned_email", "am
 async fn start(state: &AppState, s: &Schedule) -> AppResult<i64> {
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(ROW_SELECT);
     qb.push(" AND i.deleted_at IS NULL AND i.category_id = ").push_bind(s.category_id);
-    let test_mode: bool = sqlx::query_scalar("SELECT automation_test_mode FROM crm_categories WHERE id = $1").bind(s.category_id).fetch_one(&state.db).await?;
+    let test_mode: bool = sqlx::query_scalar!("SELECT automation_test_mode FROM crm_categories WHERE id = $1", s.category_id).fetch_one(&state.db).await?;
     if s.stage_ids.is_empty() {
         qb.push(" AND NOT i.is_closed");
     } else {
@@ -175,22 +175,11 @@ async fn start(state: &AppState, s: &Schedule) -> AppResult<i64> {
         return Ok(0);
     }
     let mut tx = state.db.begin().await?;
-    let runs: Vec<Uuid> = sqlx::query_scalar(
-        "INSERT INTO crm_robot_runs (schedule_id, robot_name, item_id, stage_id, category_id, action, run_at, is_test)
-         SELECT $1, $2, x.item, x.stage, $3, $4, now(), $7 FROM unnest($5::uuid[], $6::uuid[]) AS x(item, stage) RETURNING id",
-    )
-    .bind(s.id)
-    .bind(&s.name)
-    .bind(s.category_id)
-    .bind(&s.action)
-    .bind(&items)
-    .bind(&stages)
-    .bind(test_mode)
+    let runs: Vec<Uuid> = sqlx::query_scalar!("INSERT INTO crm_robot_runs (schedule_id, robot_name, item_id, stage_id, category_id, action, run_at, is_test)
+         SELECT $1, $2, x.item, x.stage, $3, $4, now(), $7 FROM unnest($5::uuid[], $6::uuid[]) AS x(item, stage) RETURNING id", s.id, &s.name, s.category_id, &s.action, &items, &stages, test_mode)
     .fetch_all(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO jobs (kind, payload, run_at) SELECT $1, jsonb_build_object('run_id', r), now() FROM unnest($2::uuid[]) AS r")
-        .bind(super::JOB)
-        .bind(&runs)
+    sqlx::query!("INSERT INTO jobs (kind, payload, run_at) SELECT $1, jsonb_build_object('run_id', r), now() FROM unnest($2::uuid[]) AS r", super::JOB, &runs)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -209,10 +198,7 @@ pub async fn run_due(state: &AppState) -> anyhow::Result<()> {
     for s in due {
         let next = next_run(&s.frequency, &s.weekdays, s.month_day, s.at_time, tz_of(&s), Utc::now());
         // Claim this occurrence, so only one instance starts it.
-        let claimed = sqlx::query("UPDATE crm_schedules SET next_run_at = $2, last_run_at = now() WHERE id = $1 AND next_run_at = $3")
-            .bind(s.id)
-            .bind(next)
-            .bind(s.next_run_at)
+        let claimed = sqlx::query!("UPDATE crm_schedules SET next_run_at = $2, last_run_at = now() WHERE id = $1 AND next_run_at = $3", s.id, next, s.next_run_at)
             .execute(&state.db)
             .await?
             .rows_affected()
@@ -222,7 +208,7 @@ pub async fn run_due(state: &AppState) -> anyhow::Result<()> {
         }
         match start(state, &s).await {
             Ok(n) => {
-                sqlx::query("UPDATE crm_schedules SET last_count = $2 WHERE id = $1").bind(s.id).bind(n as i32).execute(&state.db).await?;
+                sqlx::query!("UPDATE crm_schedules SET last_count = $2 WHERE id = $1", s.id, n as i32).execute(&state.db).await?;
             }
             Err(e) => tracing::warn!(schedule = %s.id, error = ?ae(e), "schedule failed to start"),
         }
@@ -303,7 +289,7 @@ async fn check(state: &AppState, category: Uuid, b: &Body, cur: Option<&Schedule
         return Err(AppError::bad("too many stages"));
     }
     if !stage_ids.is_empty() {
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_stages WHERE category_id = $1 AND id = ANY($2)").bind(category).bind(&stage_ids).fetch_one(&state.db).await?;
+        let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_stages WHERE category_id = $1 AND id = ANY($2)"#, category, &stage_ids).fetch_one(&state.db).await?;
         if n != stage_ids.len() as i64 {
             return Err(AppError::bad("choose stages of this pipeline"));
         }
@@ -321,8 +307,7 @@ fn next_of(c: &Checked, active: bool) -> Option<DateTime<Utc>> {
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(mut b): Json<Body>) -> AppResult<Json<Schedule>> {
     require_admin(&auth)?;
     let category = b.category_id.ok_or_else(|| AppError::bad("category_id is required"))?;
-    let et: i16 = sqlx::query_scalar("SELECT c.entity_type FROM crm_categories c JOIN crm_entity_types t ON t.id = c.entity_type WHERE c.id = $1 AND t.has_stages")
-        .bind(category)
+    let et: i16 = sqlx::query_scalar!("SELECT c.entity_type FROM crm_categories c JOIN crm_entity_types t ON t.id = c.entity_type WHERE c.id = $1 AND t.has_stages", category)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| AppError::bad("choose a pipeline"))?;
@@ -333,25 +318,8 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(mut b): Json
     let action = b.action.clone().unwrap_or_default();
     let params = actions::validate(&state, et, category, &action, b.params.clone().unwrap_or_else(|| json!({}))).await?;
     let active = b.is_active.unwrap_or(true);
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_schedules (entity_type, category_id, name, frequency, weekdays, month_day, at_time, timezone, stage_ids, conditions, action, params, is_active, next_run_at, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id",
-    )
-    .bind(et)
-    .bind(category)
-    .bind(required("name", b.name.as_deref().unwrap_or(actions::label(&action)), 200)?)
-    .bind(&c.frequency)
-    .bind(&c.weekdays)
-    .bind(c.month_day)
-    .bind(c.at_time)
-    .bind(&c.timezone)
-    .bind(&c.stage_ids)
-    .bind(check_conditions(&b.conditions.clone().unwrap_or_else(|| json!([])))?)
-    .bind(&action)
-    .bind(params)
-    .bind(active)
-    .bind(next_of(&c, active))
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_schedules (entity_type, category_id, name, frequency, weekdays, month_day, at_time, timezone, stage_ids, conditions, action, params, is_active, next_run_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id", et, category, required("name", b.name.as_deref().unwrap_or(actions::label(&action)), 200)?, &c.frequency, &c.weekdays, c.month_day, c.at_time, &c.timezone, &c.stage_ids, check_conditions(&b.conditions.clone().unwrap_or_else(|| json!([])))?, &action, params, active, next_of(&c, active), auth.id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(load(&state, id).await?))
@@ -364,23 +332,8 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     let action = b.action.clone().unwrap_or(cur.action.clone());
     let params = actions::validate(&state, cur.entity_type, cur.category_id, &action, b.params.clone().unwrap_or(cur.params.clone())).await?;
     let active = b.is_active.unwrap_or(cur.is_active);
-    sqlx::query(
-        "UPDATE crm_schedules SET name = $2, frequency = $3, weekdays = $4, month_day = $5, at_time = $6, timezone = $7, stage_ids = $8,
-                conditions = $9, action = $10, params = $11, is_active = $12, next_run_at = $13, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(match &b.name { Some(n) => required("name", n, 200)?, None => cur.name.clone() })
-    .bind(&c.frequency)
-    .bind(&c.weekdays)
-    .bind(c.month_day)
-    .bind(c.at_time)
-    .bind(&c.timezone)
-    .bind(&c.stage_ids)
-    .bind(match &b.conditions { Some(x) => check_conditions(x)?, None => cur.conditions.clone() })
-    .bind(&action)
-    .bind(params)
-    .bind(active)
-    .bind(next_of(&c, active))
+    sqlx::query!("UPDATE crm_schedules SET name = $2, frequency = $3, weekdays = $4, month_day = $5, at_time = $6, timezone = $7, stage_ids = $8,
+                conditions = $9, action = $10, params = $11, is_active = $12, next_run_at = $13, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 200)?, None => cur.name.clone() }, &c.frequency, &c.weekdays, c.month_day, c.at_time, &c.timezone, &c.stage_ids, match &b.conditions { Some(x) => check_conditions(x)?, None => cur.conditions.clone() }, &action, params, active, next_of(&c, active))
     .execute(&state.db)
     .await?;
     Ok(Json(load(&state, id).await?))
@@ -388,7 +341,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn delete(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    let n = sqlx::query("DELETE FROM crm_schedules WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM crm_schedules WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("schedule"));
     }
@@ -400,7 +353,7 @@ async fn run_now(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
     require_admin(&auth)?;
     let s = load(&state, id).await?;
     let n = start(&state, &s).await?;
-    sqlx::query("UPDATE crm_schedules SET last_run_at = now(), last_count = $2 WHERE id = $1").bind(id).bind(n as i32).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_schedules SET last_run_at = now(), last_count = $2 WHERE id = $1", id, n as i32).execute(&state.db).await?;
     Ok(Json(json!({ "count": n })))
 }
 

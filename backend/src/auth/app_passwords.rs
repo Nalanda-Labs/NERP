@@ -45,12 +45,8 @@ fn normalise(p: &str) -> String {
 /// The active user an email and app password belong to.
 pub async fn verify(state: &AppState, email: &str, password: &str, ip: Option<&str>) -> AppResult<Option<Uuid>> {
     let hash = hash_token(&normalise(password));
-    let row: Option<(Uuid, Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT a.id, u.id, a.last_used_at FROM app_passwords a JOIN users u ON u.id = a.user_id
-         WHERE a.token_hash = $1 AND lower(u.email) = lower($2) AND u.is_active",
-    )
-    .bind(&hash)
-    .bind(email.trim())
+    let row: Option<(Uuid, Uuid, Option<DateTime<Utc>>)> = sqlx::query!(r#"SELECT a.id, u.id AS "c1", a.last_used_at FROM app_passwords a JOIN users u ON u.id = a.user_id
+         WHERE a.token_hash = $1 AND lower(u.email) = lower($2) AND u.is_active"#, &hash, email.trim()).map(|r| (r.id, r.c1, r.last_used_at))
     .fetch_optional(&state.db)
     .await?;
     let Some((id, user, last)) = row else {
@@ -58,14 +54,14 @@ pub async fn verify(state: &AppState, email: &str, password: &str, ip: Option<&s
     };
     // Note the use at most once a minute.
     if last.is_none_or(|l| Utc::now() - l > chrono::Duration::minutes(1)) {
-        sqlx::query("UPDATE app_passwords SET last_used_at = now(), last_used_ip = $2 WHERE id = $1").bind(id).bind(ip).execute(&state.db).await?;
+        sqlx::query!("UPDATE app_passwords SET last_used_at = now(), last_used_ip = $2 WHERE id = $1", id, ip).execute(&state.db).await?;
     }
     Ok(Some(user))
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     let rows: Vec<(Uuid, String, DateTime<Utc>, Option<DateTime<Utc>>, Option<String>)> =
-        sqlx::query_as("SELECT id, name, created_at, last_used_at, last_used_ip FROM app_passwords WHERE user_id = $1 ORDER BY created_at DESC").bind(auth.id).fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT id, name, created_at, last_used_at, last_used_ip FROM app_passwords WHERE user_id = $1 ORDER BY created_at DESC"#, auth.id).map(|r| (r.id, r.name, r.created_at, r.last_used_at, r.last_used_ip)).fetch_all(&state.db).await?;
     Ok(Json(json!({
         "items": rows.into_iter().map(|(id, name, created, used, ip)| json!({ "id": id, "name": name, "created_at": created, "last_used_at": used, "last_used_ip": ip })).collect::<Vec<_>>(),
     })))
@@ -79,15 +75,12 @@ struct NewPassword {
 /// Makes one; the password is in this answer only.
 async fn create(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Json(b): Json<NewPassword>) -> AppResult<Json<Value>> {
     let name = required("name", &b.name, 100)?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_passwords WHERE user_id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM app_passwords WHERE user_id = $1"#, auth.id).fetch_one(&state.db).await?;
     if n >= 20 {
         return Err(AppError::bad("at most 20 app passwords; revoke one you don't use"));
     }
     let password = new_password();
-    let id: Uuid = sqlx::query_scalar("INSERT INTO app_passwords (user_id, name, token_hash) VALUES ($1, $2, $3) RETURNING id")
-        .bind(auth.id)
-        .bind(&name)
-        .bind(hash_token(&normalise(&password)))
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO app_passwords (user_id, name, token_hash) VALUES ($1, $2, $3) RETURNING id", auth.id, &name, hash_token(&normalise(&password)))
         .fetch_one(&state.db)
         .await?;
     audit::record(&state.db, Some(auth.id), "auth.app_password_created", "user", Some(auth.id.to_string()), json!({ "name": name }), ip.as_deref()).await;
@@ -95,7 +88,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cli
 }
 
 async fn revoke(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let name: Option<String> = sqlx::query_scalar("DELETE FROM app_passwords WHERE id = $1 AND user_id = $2 RETURNING name").bind(id).bind(auth.id).fetch_optional(&state.db).await?;
+    let name: Option<String> = sqlx::query_scalar!("DELETE FROM app_passwords WHERE id = $1 AND user_id = $2 RETURNING name", id, auth.id).fetch_optional(&state.db).await?;
     let name = name.ok_or(AppError::NotFound("app password"))?;
     audit::record(&state.db, Some(auth.id), "auth.app_password_revoked", "user", Some(auth.id.to_string()), json!({ "name": name }), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))

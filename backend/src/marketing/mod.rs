@@ -191,11 +191,7 @@ async fn create_segment(State(state): State<AppState>, auth: AuthUser, Json(b): 
     segment_type(&state, et).await?;
     let filter = b.filter.unwrap_or_else(|| json!({}));
     parse_filter(&filter)?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO mkt_segments (name, entity_type, filter, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(required("name", b.name.as_deref().unwrap_or(""), 120)?)
-        .bind(et)
-        .bind(&filter)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO mkt_segments (name, entity_type, filter, created_by) VALUES ($1, $2, $3, $4) RETURNING id", required("name", b.name.as_deref().unwrap_or(""), 120)?, et, &filter, auth.id)
         .fetch_one(&state.db)
         .await?;
     Ok(Json(describe_segment(&state, &load_segment(&state, id).await?).await?))
@@ -248,12 +244,8 @@ async fn import_segment(State(state): State<AppState>, auth: AuthUser, Json(b): 
         if !seen.insert(email.clone()) {
             continue;
         }
-        let found: Option<Uuid> = sqlx::query_scalar(
-            "SELECT i.id FROM crm_items i JOIN crm_multifields m ON m.item_id = i.id
-             WHERE i.entity_type = $1 AND m.kind = 'email' AND lower(m.value) = $2 ORDER BY i.created_at LIMIT 1",
-        )
-        .bind(et)
-        .bind(&email)
+        let found: Option<Uuid> = sqlx::query_scalar!("SELECT i.id FROM crm_items i JOIN crm_multifields m ON m.item_id = i.id
+             WHERE i.entity_type = $1 AND m.kind = 'email' AND lower(m.value) = $2 ORDER BY i.created_at LIMIT 1", et, &email)
         .fetch_optional(&state.db)
         .await?;
         let id = match found {
@@ -283,11 +275,7 @@ async fn import_segment(State(state): State<AppState>, auth: AuthUser, Json(b): 
             ids.push(id);
         }
     }
-    let id: Uuid = sqlx::query_scalar("INSERT INTO mkt_segments (name, entity_type, filter, item_ids, created_by) VALUES ($1, $2, '{}', $3, $4) RETURNING id")
-        .bind(name)
-        .bind(et)
-        .bind(&ids)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO mkt_segments (name, entity_type, filter, item_ids, created_by) VALUES ($1, $2, '{}', $3, $4) RETURNING id", name, et, &ids, auth.id)
         .fetch_one(&state.db)
         .await?;
     let mut out = describe_segment(&state, &load_segment(&state, id).await?).await?;
@@ -305,11 +293,7 @@ async fn update_segment(State(state): State<AppState>, auth: AuthUser, Path(id):
     }
     let filter = b.filter.unwrap_or(cur.filter);
     parse_filter(&filter)?;
-    sqlx::query("UPDATE mkt_segments SET name = $2, entity_type = $3, filter = $4, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(match &b.name { Some(n) => required("name", n, 120)?, None => cur.name })
-        .bind(et)
-        .bind(&filter)
+    sqlx::query!("UPDATE mkt_segments SET name = $2, entity_type = $3, filter = $4, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 120)?, None => cur.name }, et, &filter)
         .execute(&state.db)
         .await?;
     Ok(Json(describe_segment(&state, &load_segment(&state, id).await?).await?))
@@ -317,14 +301,13 @@ async fn update_segment(State(state): State<AppState>, auth: AuthUser, Path(id):
 
 async fn delete_segment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mkt_campaigns WHERE $1 = ANY(segment_ids) AND status IN ('draft', 'scheduled', 'sending'))")
-        .bind(id)
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM mkt_campaigns WHERE $1 = ANY(segment_ids) AND status IN ('draft', 'scheduled', 'sending')) AS "v!""#, id)
         .fetch_one(&state.db)
         .await?;
     if used {
         return Err(AppError::bad("a campaign that has not been sent yet uses this segment"));
     }
-    let n = sqlx::query("DELETE FROM mkt_segments WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM mkt_segments WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("segment"));
     }
@@ -436,7 +419,7 @@ async fn checked_design(state: &AppState, auth: &AuthUser, d: &Value) -> AppResu
     let me = auth.id;
     let db = state.db.clone();
     let clean = design::clean(d, async move |f: Uuid| {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM files WHERE id = $1 AND owner_id = $2)").bind(f).bind(me).fetch_one(&db).await.unwrap_or(false)
+        sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM files WHERE id = $1 AND owner_id = $2) AS "v!""#, f, me).fetch_one(&db).await.unwrap_or(false)
     })
     .await?;
     let (_, text) = design::render(state, &clean, &|t| t.to_string(), &|u| u.to_string(), ("", ""));
@@ -467,7 +450,7 @@ async fn unique_slug(state: &AppState, name: &str) -> AppResult<String> {
     let base = slugify(name);
     for i in 1..1000 {
         let s = if i == 1 { base.clone() } else { format!("{base}-{i}") };
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mkt_campaigns WHERE slug = $1)").bind(&s).fetch_one(&state.db).await?;
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM mkt_campaigns WHERE slug = $1) AS "v!""#, &s).fetch_one(&state.db).await?;
         if !taken {
             return Ok(s);
         }
@@ -482,7 +465,7 @@ async fn check_segments(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<Uuid>> 
     if v.len() > 20 {
         return Err(AppError::bad("at most 20 segments"));
     }
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mkt_segments WHERE id = ANY($1)").bind(&v).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM mkt_segments WHERE id = ANY($1)"#, &v).fetch_one(&state.db).await?;
     if n != v.len() as i64 {
         return Err(AppError::bad("unknown segment"));
     }
@@ -517,18 +500,7 @@ async fn create_campaign(State(state): State<AppState>, auth: AuthUser, Json(b):
         Some((_, text)) => Some(text.clone()),
         None => b.body.clone(),
     };
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO mkt_campaigns (name, slug, segment_ids, subject, body, from_name, reply_to, created_by, design) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-    )
-    .bind(&name)
-    .bind(unique_slug(&state, &name).await?)
-    .bind(check_segments(&state, &b.segment_ids.unwrap_or_default()).await?)
-    .bind(text(b.subject.as_deref(), "subject", 300)?)
-    .bind(text(body.as_deref(), "message", 100_000)?)
-    .bind(b.from_name.flatten().map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()))
-    .bind(check_reply_to(b.reply_to.flatten())?)
-    .bind(auth.id)
-    .bind(design.map(|d| d.0))
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO mkt_campaigns (name, slug, segment_ids, subject, body, from_name, reply_to, created_by, design) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", &name, unique_slug(&state, &name).await?, &(check_segments(&state, &b.segment_ids.unwrap_or_default()).await?), text(b.subject.as_deref(), "subject", 300)?, text(body.as_deref(), "message", 100_000)?, b.from_name.flatten().map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), check_reply_to(b.reply_to.flatten())?, auth.id, design.map(|d| d.0))
     .fetch_one(&state.db)
     .await?;
     Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))
@@ -549,15 +521,7 @@ async fn update_campaign(State(state): State<AppState>, auth: AuthUser, Path(id)
         }
     };
     let body = designed_body.or_else(|| b.body.clone());
-    sqlx::query("UPDATE mkt_campaigns SET name = $2, segment_ids = $3, subject = $4, body = $5, from_name = $6, reply_to = $7, design = $8, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(match &b.name { Some(n) => required("name", n, 120)?, None => cur.name })
-        .bind(match &b.segment_ids { Some(s) => check_segments(&state, s).await?, None => cur.segment_ids })
-        .bind(match &b.subject { Some(s) => text(Some(s), "subject", 300)?, None => cur.subject })
-        .bind(match &body { Some(s) => text(Some(s), "message", 100_000)?, None => cur.body })
-        .bind(match b.from_name { Some(f) => f.map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), None => cur.from_name })
-        .bind(match b.reply_to { Some(r) => check_reply_to(r)?, None => cur.reply_to })
-        .bind(design)
+    sqlx::query!("UPDATE mkt_campaigns SET name = $2, segment_ids = $3, subject = $4, body = $5, from_name = $6, reply_to = $7, design = $8, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 120)?, None => cur.name }, &(match &b.segment_ids { Some(s) => check_segments(&state, s).await?, None => cur.segment_ids }), match &b.subject { Some(s) => text(Some(s), "subject", 300)?, None => cur.subject }, match &body { Some(s) => text(Some(s), "message", 100_000)?, None => cur.body }, match b.from_name { Some(f) => f.map(|s| s.trim().chars().take(100).collect::<String>()).filter(|s| !s.is_empty()), None => cur.from_name }, match b.reply_to { Some(r) => check_reply_to(r)?, None => cur.reply_to }, design)
         .execute(&state.db)
         .await?;
     Ok(Json(describe(&state, &load_campaign(&state, id).await?).await?))
@@ -569,7 +533,7 @@ async fn delete_campaign(State(state): State<AppState>, auth: AuthUser, Path(id)
     if c.status == "sending" {
         return Err(AppError::bad("the campaign is being sent; cancel it first"));
     }
-    sqlx::query("DELETE FROM mkt_campaigns WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM mkt_campaigns WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -579,30 +543,21 @@ async fn stats(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     require(&auth)?;
     let c = load_campaign(&state, id).await?;
     let counts = counts(&state, id).await?;
-    let links: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT k.url, COUNT(*)::int8, COUNT(DISTINCT k.recipient_id)::int8 FROM mkt_clicks k JOIN mkt_recipients r ON r.id = k.recipient_id
-         WHERE r.campaign_id = $1 GROUP BY k.url ORDER BY 2 DESC LIMIT 50",
-    )
-    .bind(id)
+    let links: Vec<(String, i64, i64)> = sqlx::query!(r#"SELECT k.url AS "url!", COUNT(*)::int8 AS "c1!", COUNT(DISTINCT k.recipient_id)::int8 AS "c2!" FROM mkt_clicks k JOIN mkt_recipients r ON r.id = k.recipient_id
+         WHERE r.campaign_id = $1 GROUP BY k.url ORDER BY 2 DESC LIMIT 50"#, id).map(|r| (r.url, r.c1, r.c2))
     .fetch_all(&state.db)
     .await?;
     // First opens and clicks per hour since sending started (up to a week).
-    let activity: Vec<(DateTime<Utc>, i64, i64)> = sqlx::query_as(
-        "SELECT h, SUM(o)::int8, SUM(c)::int8 FROM (
+    let activity: Vec<(DateTime<Utc>, i64, i64)> = sqlx::query!(r#"SELECT h AS "h!", SUM(o)::int8 AS "c1!", SUM(c)::int8 AS "c2!" FROM (
              SELECT date_trunc('hour', opened_at) AS h, 1 AS o, 0 AS c FROM mkt_recipients WHERE campaign_id = $1 AND opened_at IS NOT NULL
              UNION ALL
              SELECT date_trunc('hour', clicked_at), 0, 1 FROM mkt_recipients WHERE campaign_id = $1 AND clicked_at IS NOT NULL
-         ) x GROUP BY h ORDER BY h LIMIT 168",
-    )
-    .bind(id)
+         ) x GROUP BY h ORDER BY h LIMIT 168"#, id).map(|r| (r.h, r.c1, r.c2))
     .fetch_all(&state.db)
     .await?;
-    let brought: Vec<(String, i64, Option<rust_decimal::Decimal>)> = sqlx::query_as(
-        "SELECT t.code, COUNT(*)::int8, SUM(i.opportunity_base) FILTER (WHERE i.stage_semantics = 'success')
+    let brought: Vec<(String, i64, Option<rust_decimal::Decimal>)> = sqlx::query!(r#"SELECT t.code AS "code!", COUNT(*)::int8 AS "c1!", SUM(i.opportunity_base) FILTER (WHERE i.stage_semantics = 'success') AS "c2?"
          FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
-         WHERE i.deleted_at IS NULL AND i.utm->>'campaign' = $1 GROUP BY t.code",
-    )
-    .bind(&c.slug)
+         WHERE i.deleted_at IS NULL AND i.utm->>'campaign' = $1 GROUP BY t.code"#, &c.slug).map(|r| (r.code, r.c1, r.c2))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -672,14 +627,11 @@ struct OptoutQuery {
 async fn list_optouts(State(state): State<AppState>, auth: AuthUser, Query(q): Query<OptoutQuery>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let like = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| format!("%{}%", s.to_lowercase()));
-    let rows: Vec<(String, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT o.email, o.source, c.name, o.created_at FROM mkt_optouts o LEFT JOIN mkt_campaigns c ON c.id = o.campaign_id
-         WHERE ($1::text IS NULL OR o.email LIKE $1) ORDER BY o.created_at DESC LIMIT 500",
-    )
-    .bind(like)
+    let rows: Vec<(String, String, Option<String>, DateTime<Utc>)> = sqlx::query!(r#"SELECT o.email AS "email!", o.source AS "source!", c.name AS "name?", o.created_at AS "created_at!" FROM mkt_optouts o LEFT JOIN mkt_campaigns c ON c.id = o.campaign_id
+         WHERE ($1::text IS NULL OR o.email LIKE $1) ORDER BY o.created_at DESC LIMIT 500"#, like).map(|r| (r.email, r.source, r.name, r.created_at))
     .fetch_all(&state.db)
     .await?;
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mkt_optouts").fetch_one(&state.db).await?;
+    let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM mkt_optouts"#).fetch_one(&state.db).await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(email, source, campaign, at)| json!({ "email": email, "source": source, "campaign": campaign, "created_at": at })).collect::<Vec<_>>(), "total": total })))
 }
 
@@ -694,14 +646,14 @@ async fn add_optout(State(state): State<AppState>, auth: AuthUser, Json(b): Json
     if email.parse::<lettre::Address>().is_err() {
         return Err(AppError::bad("enter a valid email address"));
     }
-    sqlx::query("INSERT INTO mkt_optouts (email, source, created_by) VALUES ($1, 'added', $2) ON CONFLICT DO NOTHING").bind(&email).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO mkt_optouts (email, source, created_by) VALUES ($1, 'added', $2) ON CONFLICT DO NOTHING", &email, auth.id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// Takes an address off the list (it was added by mistake, or the person asked again).
 async fn remove_optout(State(state): State<AppState>, auth: AuthUser, Path(email): Path<String>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let n = sqlx::query("DELETE FROM mkt_optouts WHERE email = $1").bind(email.trim().to_lowercase()).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM mkt_optouts WHERE email = $1", email.trim().to_lowercase()).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("address"));
     }

@@ -82,8 +82,7 @@ pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> App
 
 /// Everyone a post goes to (for notifications and live updates).
 async fn audience(state: &AppState, post: Uuid) -> AppResult<Vec<Uuid>> {
-    Ok(sqlx::query_scalar(
-        "WITH RECURSIVE p AS (SELECT * FROM feed_posts WHERE id = $1),
+    Ok(sqlx::query_scalar!("WITH RECURSIVE p AS (SELECT * FROM feed_posts WHERE id = $1),
          depts AS (
              SELECT a.department_id AS id FROM feed_audience a WHERE a.post_id = $1 AND a.department_id IS NOT NULL
              UNION SELECT d.id FROM departments d JOIN depts x ON d.parent_id = x.id
@@ -92,9 +91,7 @@ async fn audience(state: &AppState, post: Uuid) -> AppResult<Vec<Uuid>> {
              p.to_all OR u.id = p.author_id
              OR u.id IN (SELECT user_id FROM feed_audience WHERE post_id = $1 AND user_id IS NOT NULL)
              OR u.id IN (SELECT user_id FROM project_members WHERE project_id = p.project_id)
-             OR u.id IN (SELECT user_id FROM user_departments WHERE department_id IN (SELECT id FROM depts)))",
-    )
-    .bind(post)
+             OR u.id IN (SELECT user_id FROM user_departments WHERE department_id IN (SELECT id FROM depts)))", post)
     .fetch_all(&state.db)
     .await?)
 }
@@ -233,13 +230,8 @@ async fn get_post(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
     let mut v = serde_json::to_value(&p).unwrap();
     // Who has confirmed an important post: for its author.
     if p.important && p.author_id == Some(auth.id) {
-        let who: Vec<(Uuid, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT u.id, trim(u.first_name || ' ' || u.last_name), r.read_at FROM users u LEFT JOIN feed_reads r ON r.user_id = u.id AND r.post_id = $1
-             WHERE u.id = ANY($2) AND u.id <> $3 ORDER BY r.read_at NULLS LAST, u.first_name",
-        )
-        .bind(id)
-        .bind(audience(&state, id).await?)
-        .bind(auth.id)
+        let who: Vec<(Uuid, String, Option<DateTime<Utc>>)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", r.read_at AS "read_at?" FROM users u LEFT JOIN feed_reads r ON r.user_id = u.id AND r.post_id = $1
+             WHERE u.id = ANY($2) AND u.id <> $3 ORDER BY r.read_at NULLS LAST, u.first_name"#, id, &(audience(&state, id).await?), auth.id).map(|r| (r.id, r.c1, r.read_at))
         .fetch_all(&state.db)
         .await?;
         v["readers"] = json!(who.into_iter().map(|(id, name, at)| json!({ "id": id, "name": name, "read_at": at })).collect::<Vec<_>>());
@@ -310,7 +302,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
     if b.file_ids.len() > 20 {
         return Err(AppError::bad("at most 20 files"));
     }
-    let own: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE id = ANY($1) AND owner_id = $2").bind(&b.file_ids).bind(auth.id).fetch_one(&state.db).await?;
+    let own: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM files WHERE id = ANY($1) AND owner_id = $2"#, &b.file_ids, auth.id).fetch_one(&state.db).await?;
     if own as usize != b.file_ids.len() {
         return Err(AppError::bad("attach files you uploaded"));
     }
@@ -324,7 +316,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
         b.badge_user_ids.retain(|u| *u != auth.id);
         b.badge_user_ids.sort();
         b.badge_user_ids.dedup();
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&b.badge_user_ids).fetch_one(&state.db).await?;
+        let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &b.badge_user_ids).fetch_one(&state.db).await?;
         if b.badge_user_ids.is_empty() || b.badge_user_ids.len() > 50 || n as usize != b.badge_user_ids.len() {
             return Err(AppError::bad("give the badge to one to 50 colleagues"));
         }
@@ -340,15 +332,15 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
         if b.users.is_empty() && b.departments.is_empty() {
             return Err(AppError::bad("choose who the post is for"));
         }
-        let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&b.users).fetch_one(&state.db).await?;
-        let depts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(&b.departments).fetch_one(&state.db).await?;
+        let users: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &b.users).fetch_one(&state.db).await?;
+        let depts: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM departments WHERE id = ANY($1)"#, &b.departments).fetch_one(&state.db).await?;
         if users as usize != b.users.len() || depts as usize != b.departments.len() {
             return Err(AppError::bad("some of the people or departments don't exist"));
         }
     }
     // A board: the author's own, not on another post yet.
     if let Some(bid) = b.board_id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM boards WHERE id = $1 AND owner_id = $2 AND post_id IS NULL)").bind(bid).bind(auth.id).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM boards WHERE id = $1 AND owner_id = $2 AND post_id IS NULL) AS "v!""#, bid, auth.id).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("attach a board of your own"));
         }
@@ -357,34 +349,26 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Pos
         }
     }
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO feed_posts (author_id, body, file_ids, to_all, important, poll, project_id, badge) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id")
-        .bind(auth.id)
-        .bind(&body)
-        .bind(&b.file_ids)
-        .bind(b.to_all)
-        .bind(b.important)
-        .bind(poll)
-        .bind(b.project_id)
-        .bind(&b.badge)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO feed_posts (author_id, body, file_ids, to_all, important, poll, project_id, badge) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id", auth.id, &body, &b.file_ids, b.to_all, b.important, poll, b.project_id, b.badge.as_deref())
         .fetch_one(&mut *tx)
         .await?;
     for u in &b.badge_user_ids {
-        sqlx::query("INSERT INTO feed_badges (post_id, user_id) VALUES ($1, $2)").bind(id).bind(u).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO feed_badges (post_id, user_id) VALUES ($1, $2)", id, u).execute(&mut *tx).await?;
     }
     if !b.to_all {
         for u in &b.users {
-            sqlx::query("INSERT INTO feed_audience (post_id, user_id) VALUES ($1, $2)").bind(id).bind(u).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO feed_audience (post_id, user_id) VALUES ($1, $2)", id, u).execute(&mut *tx).await?;
         }
         for d in &b.departments {
-            sqlx::query("INSERT INTO feed_audience (post_id, department_id) VALUES ($1, $2)").bind(id).bind(d).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO feed_audience (post_id, department_id) VALUES ($1, $2)", id, d).execute(&mut *tx).await?;
         }
     }
     if let Some(bid) = b.board_id {
-        sqlx::query("UPDATE boards SET post_id = $2, post_level = $3 WHERE id = $1").bind(bid).bind(id).bind(b.board_level.as_deref().unwrap_or("edit")).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE boards SET post_id = $2, post_level = $3 WHERE id = $1", bid, id, b.board_level.as_deref().unwrap_or("edit")).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     let who = audience(&state, id).await?;
-    let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     if b.important {
         notify(&state, &who, NewNotification {
             kind: "feed.important",
@@ -415,15 +399,11 @@ pub const BADGES: &[(&str, &str)] = &[
 
 /// Someone's badges: how many of each, and the latest.
 async fn badges_of(State(state): State<AppState>, _auth: AuthUser, Path(user): Path<Uuid>) -> AppResult<Json<Value>> {
-    let counts: Vec<(String, i64)> = sqlx::query_as("SELECT p.badge, COUNT(*) FROM feed_badges b JOIN feed_posts p ON p.id = b.post_id WHERE b.user_id = $1 GROUP BY p.badge ORDER BY 2 DESC")
-        .bind(user)
+    let counts: Vec<(String, i64)> = sqlx::query!(r#"SELECT p.badge AS "badge!", COUNT(*) AS "c1!" FROM feed_badges b JOIN feed_posts p ON p.id = b.post_id WHERE b.user_id = $1 GROUP BY p.badge ORDER BY 2 DESC"#, user).map(|r| (r.badge, r.c1))
         .fetch_all(&state.db)
         .await?;
-    let recent: Vec<(Uuid, String, Option<String>, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT p.id, p.badge, trim(a.first_name || ' ' || a.last_name), p.body, p.created_at FROM feed_badges b JOIN feed_posts p ON p.id = b.post_id
-         LEFT JOIN users a ON a.id = p.author_id WHERE b.user_id = $1 ORDER BY p.created_at DESC LIMIT 20",
-    )
-    .bind(user)
+    let recent: Vec<(Uuid, String, Option<String>, String, DateTime<Utc>)> = sqlx::query!(r#"SELECT p.id AS "id!", p.badge AS "badge!", trim(a.first_name || ' ' || a.last_name) AS "c2?", p.body AS "body!", p.created_at AS "created_at!" FROM feed_badges b JOIN feed_posts p ON p.id = b.post_id
+         LEFT JOIN users a ON a.id = p.author_id WHERE b.user_id = $1 ORDER BY p.created_at DESC LIMIT 20"#, user).map(|r| (r.id, r.badge, r.c2, r.body, r.created_at))
     .fetch_all(&state.db)
     .await?;
     let label = |k: &str| BADGES.iter().find(|(c, _)| *c == k).map(|(_, l)| *l).unwrap_or(k).to_string();
@@ -451,7 +431,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     }
     if let Some(body) = b.body {
         let body = required("post", &body, 20_000)?;
-        sqlx::query("UPDATE feed_posts SET body = $2, edited_at = now() WHERE id = $1").bind(id).bind(body).execute(&state.db).await?;
+        sqlx::query!("UPDATE feed_posts SET body = $2, edited_at = now() WHERE id = $1", id, body).execute(&state.db).await?;
     }
     get_post(State(state), auth, Path(id)).await
 }
@@ -466,7 +446,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if p.author_id != Some(auth.id) && !moderator(&auth) && !group_owner {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("DELETE FROM feed_posts WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM feed_posts WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -482,11 +462,8 @@ struct CommentRow {
 
 async fn comments(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     post_row(&state, &auth, id).await?;
-    let items: Vec<CommentRow> = sqlx::query_as(
-        "SELECT c.id, c.author_id, trim(u.first_name || ' ' || u.last_name) AS author_name, u.avatar_file_id AS author_avatar, c.body, c.created_at
-         FROM feed_comments c LEFT JOIN users u ON u.id = c.author_id WHERE c.post_id = $1 ORDER BY c.created_at LIMIT 500",
-    )
-    .bind(id)
+    let items: Vec<CommentRow> = sqlx::query_as!(CommentRow, r#"SELECT c.id, c.author_id AS "author_id?", trim(u.first_name || ' ' || u.last_name) AS "author_name?", u.avatar_file_id AS "author_avatar?", c.body, c.created_at
+         FROM feed_comments c LEFT JOIN users u ON u.id = c.author_id WHERE c.post_id = $1 ORDER BY c.created_at LIMIT 500"#, id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": items })))
@@ -500,13 +477,13 @@ struct CommentBody {
 async fn comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<CommentBody>) -> AppResult<Json<Value>> {
     let p = post_row(&state, &auth, id).await?;
     let body = required("comment", &b.body, 5000)?;
-    sqlx::query("INSERT INTO feed_comments (post_id, author_id, body) VALUES ($1, $2, $3)").bind(id).bind(auth.id).bind(&body).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO feed_comments (post_id, author_id, body) VALUES ($1, $2, $3)", id, auth.id, &body).execute(&state.db).await?;
     // The author, and others who commented, hear about it.
-    let mut who: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT author_id FROM feed_comments WHERE post_id = $1 AND author_id IS NOT NULL").bind(id).fetch_all(&state.db).await?;
+    let mut who: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT DISTINCT author_id AS "author_id!" FROM feed_comments WHERE post_id = $1 AND author_id IS NOT NULL"#, id).fetch_all(&state.db).await?;
     who.extend(p.author_id);
     who.sort();
     who.dedup();
-    let name: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let name: String = sqlx::query_scalar!("SELECT first_name FROM users WHERE id = $1", auth.id).fetch_one(&state.db).await?;
     notify(&state, &who, NewNotification {
         kind: "feed.comment",
         title: format!("{name} commented: {}", body.chars().take(80).collect::<String>()),
@@ -526,8 +503,7 @@ struct CommentPatch {
 
 /// Its author, or a moderator, changes a comment.
 async fn edit_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<CommentPatch>) -> AppResult<Json<Value>> {
-    let (post, author): (Uuid, Option<Uuid>) = sqlx::query_as("SELECT post_id, author_id FROM feed_comments WHERE id = $1")
-        .bind(id)
+    let (post, author): (Uuid, Option<Uuid>) = sqlx::query!(r#"SELECT post_id, author_id FROM feed_comments WHERE id = $1"#, id).map(|r| (r.post_id, r.author_id))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("comment"))?;
@@ -536,13 +512,12 @@ async fn edit_comment(State(state): State<AppState>, auth: AuthUser, Path(id): P
         return Err(AppError::Forbidden);
     }
     let body = required("comment", &b.body, 10_000)?;
-    sqlx::query("UPDATE feed_comments SET body = $2 WHERE id = $1").bind(id).bind(body).execute(&state.db).await?;
+    sqlx::query!("UPDATE feed_comments SET body = $2 WHERE id = $1", id, body).execute(&state.db).await?;
     comments(State(state), auth, Path(post)).await
 }
 
 async fn remove_comment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let (post, author): (Uuid, Option<Uuid>) = sqlx::query_as("SELECT post_id, author_id FROM feed_comments WHERE id = $1")
-        .bind(id)
+    let (post, author): (Uuid, Option<Uuid>) = sqlx::query!(r#"SELECT post_id, author_id FROM feed_comments WHERE id = $1"#, id).map(|r| (r.post_id, r.author_id))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("comment"))?;
@@ -550,7 +525,7 @@ async fn remove_comment(State(state): State<AppState>, auth: AuthUser, Path(id):
     if author != Some(auth.id) && !moderator(&auth) {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("DELETE FROM feed_comments WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM feed_comments WHERE id = $1", id).execute(&state.db).await?;
     comments(State(state), auth, Path(post)).await
 }
 
@@ -561,13 +536,13 @@ async fn like(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     if !["like", "love", "laugh", "wow", "sad", "clap"].contains(&reaction.as_str()) {
         return Err(AppError::bad("react with like, love, laugh, wow, sad or clap"));
     }
-    sqlx::query("INSERT INTO feed_likes (post_id, user_id, reaction) VALUES ($1, $2, $3) ON CONFLICT (post_id, user_id) DO UPDATE SET reaction = $3").bind(id).bind(auth.id).bind(&reaction).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO feed_likes (post_id, user_id, reaction) VALUES ($1, $2, $3) ON CONFLICT (post_id, user_id) DO UPDATE SET reaction = $3", id, auth.id, &reaction).execute(&state.db).await?;
     get_post(State(state), auth, Path(id)).await
 }
 
 async fn unlike(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     post_row(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM feed_likes WHERE post_id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM feed_likes WHERE post_id = $1 AND user_id = $2", id, auth.id).execute(&state.db).await?;
     get_post(State(state), auth, Path(id)).await
 }
 
@@ -576,7 +551,7 @@ async fn read(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     if !p.important {
         return Err(AppError::bad("only important posts are confirmed"));
     }
-    sqlx::query("INSERT INTO feed_reads (post_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO feed_reads (post_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, auth.id).execute(&state.db).await?;
     get_post(State(state), auth, Path(id)).await
 }
 
@@ -592,10 +567,7 @@ async fn vote(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     if b.option < 0 || b.option as usize >= n {
         return Err(AppError::bad("no such answer"));
     }
-    sqlx::query("INSERT INTO feed_votes (post_id, user_id, option) VALUES ($1, $2, $3) ON CONFLICT (post_id, user_id) DO UPDATE SET option = $3")
-        .bind(id)
-        .bind(auth.id)
-        .bind(b.option)
+    sqlx::query!("INSERT INTO feed_votes (post_id, user_id, option) VALUES ($1, $2, $3) ON CONFLICT (post_id, user_id) DO UPDATE SET option = $3", id, auth.id, b.option)
         .execute(&state.db)
         .await?;
     get_post(State(state), auth, Path(id)).await
@@ -610,13 +582,10 @@ async fn processes(State(state): State<AppState>, auth: AuthUser) -> AppResult<J
     if auth.is_guest() {
         return Ok(Json(json!({ "items": [] })));
     }
-    let lists: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
-        "SELECT l.id, l.name, l.description FROM lists l
+    let lists: Vec<(Uuid, String, Option<String>)> = sqlx::query!(r#"SELECT l.id, l.name, l.description FROM lists l
          WHERE EXISTS (SELECT 1 FROM wf_templates t WHERE t.list_id = l.id AND t.trigger = 'create' AND t.is_active
                        AND (cardinality(t.test_users) = 0 OR $1 = ANY(t.test_users)))
-         ORDER BY lower(l.name)",
-    )
-    .bind(auth.id)
+         ORDER BY lower(l.name)"#, auth.id).map(|r| (r.id, r.name, r.description))
     .fetch_all(&state.db)
     .await?;
     let mut items = Vec::new();
@@ -647,25 +616,19 @@ async fn new_request(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
     let note = b.note.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(|n| n.chars().take(2000).collect::<String>());
     let item = crate::lists::add_item(&state, auth.clone(), b.list_id, b.title, b.values).await?;
     let item_id = item["id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::Internal(anyhow::anyhow!("no item id")))?;
-    let list_name: String = sqlx::query_scalar("SELECT name FROM lists WHERE id = $1").bind(b.list_id).fetch_one(&state.db).await?;
+    let list_name: String = sqlx::query_scalar!("SELECT name FROM lists WHERE id = $1", b.list_id).fetch_one(&state.db).await?;
     let body = match note {
         Some(n) => n,
         None => format!("New request: {list_name}"),
     };
-    let post: Uuid = sqlx::query_scalar("INSERT INTO feed_posts (author_id, body, to_all, list_item_id) VALUES ($1, $2, FALSE, $3) RETURNING id")
-        .bind(auth.id)
-        .bind(&body)
-        .bind(item_id)
+    let post: Uuid = sqlx::query_scalar!("INSERT INTO feed_posts (author_id, body, to_all, list_item_id) VALUES ($1, $2, FALSE, $3) RETURNING id", auth.id, &body, item_id)
         .fetch_one(&state.db)
         .await?;
-    let approvers: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT u FROM wf_approvals a JOIN wf_instances w ON w.id = a.instance_id, UNNEST(a.approvers) u WHERE w.item_id = $1 AND a.status = 'pending'",
-    )
-    .bind(item_id)
+    let approvers: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT DISTINCT u AS "u!" FROM wf_approvals a JOIN wf_instances w ON w.id = a.instance_id, UNNEST(a.approvers) u WHERE w.item_id = $1 AND a.status = 'pending'"#, item_id)
     .fetch_all(&state.db)
     .await?;
     for u in std::iter::once(auth.id).chain(approvers) {
-        sqlx::query("INSERT INTO feed_audience (post_id, user_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM feed_audience WHERE post_id = $1 AND user_id = $2)").bind(post).bind(u).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO feed_audience (post_id, user_id) SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM feed_audience WHERE post_id = $1 AND user_id = $2)", post, u).execute(&state.db).await?;
     }
     get_post(State(state), auth, Path(post)).await
 }

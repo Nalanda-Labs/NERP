@@ -131,9 +131,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
-      - name: Build backend
+      - name: Build backend (migrate first: queries are checked against the schema)
         working-directory: backend
-        run: cargo build --locked
+        env:
+          DATABASE_URL: postgres://nerp:nerp-ci@127.0.0.1:5432/nerp
+        run: cargo run --locked --bin nerp-migrate && cargo build --locked
 
       - uses: actions/setup-node@v7
         with:

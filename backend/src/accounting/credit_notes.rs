@@ -50,10 +50,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(item): Path<
     let date = b.date.unwrap_or_else(|| Utc::now().date_naive());
     let s = super::settings(&state).await?;
     let mut tx = state.db.begin().await?;
-    let row: Option<(Uuid, Decimal, Decimal, String, String, Option<Uuid>, i64)> = sqlx::query_as(
-        "SELECT a.entry_id, a.total, a.credited, a.status, a.currency, a.party_id, i.number FROM acc_invoices a JOIN crm_items i ON i.id = a.item_id WHERE a.item_id = $1 FOR UPDATE OF a",
-    )
-    .bind(item)
+    let row: Option<(Uuid, Decimal, Decimal, String, String, Option<Uuid>, i64)> = sqlx::query!(r#"SELECT a.entry_id, a.total, a.credited, a.status, a.currency, a.party_id, i.number FROM acc_invoices a JOIN crm_items i ON i.id = a.item_id WHERE a.item_id = $1 FOR UPDATE OF a"#, item).map(|r| (r.entry_id, r.total, r.credited, r.status, r.currency, r.party_id, r.number))
     .fetch_optional(&mut *tx)
     .await?;
     let (entry, total, credited, status, currency, party, number) = row.ok_or(AppError::NotFound("invoice in the books"))?;
@@ -92,17 +89,10 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(item): Path<
     let n = ledger::next_number(&mut tx, "credit_note").await?;
     let memo = format!("Credit note {n} for invoice {number}{}", b.reason.as_deref().map(|r| format!(" · {r}")).unwrap_or_default());
     let entry_id = ledger::post(&mut tx, date, Some(&memo), "credit_note", Some(item), &out, Some(auth.id)).await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO acc_credit_notes (number, invoice_id, date, amount, reason, entry_id, created_by) VALUES ($1, $2, $3, $4, NULLIF(trim($5), ''), $6, $7) RETURNING id")
-        .bind(n)
-        .bind(item)
-        .bind(date)
-        .bind(amount)
-        .bind(&b.reason)
-        .bind(entry_id)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_credit_notes (number, invoice_id, date, amount, reason, entry_id, created_by) VALUES ($1, $2, $3, $4, NULLIF(trim($5), ''), $6, $7) RETURNING id", n, item, date, amount, b.reason.as_deref(), entry_id, auth.id)
         .fetch_one(&mut *tx)
         .await?;
-    sqlx::query("UPDATE acc_invoices SET credited = credited + $2 WHERE item_id = $1").bind(item).bind(amount).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_invoices SET credited = credited + $2 WHERE item_id = $1", item, amount).execute(&mut *tx).await?;
     super::invoices::refresh(&mut tx, item).await?;
     tx.commit().await?;
     let _ = crate::crm::timeline(&state.db, item, "accounting", Some(auth.id), None, json!({ "event": "credited", "amount": amount, "currency": currency, "number": n })).await;
@@ -119,8 +109,7 @@ struct VoidInput {
 async fn void(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, body: Option<Json<VoidInput>>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
     let mut tx = state.db.begin().await?;
-    let row: Option<(Uuid, Uuid, Decimal, String, NaiveDate, i64)> = sqlx::query_as("SELECT invoice_id, entry_id, amount, status, date, number FROM acc_credit_notes WHERE id = $1 FOR UPDATE")
-        .bind(id)
+    let row: Option<(Uuid, Uuid, Decimal, String, NaiveDate, i64)> = sqlx::query!(r#"SELECT invoice_id, entry_id, amount, status, date, number FROM acc_credit_notes WHERE id = $1 FOR UPDATE"#, id).map(|r| (r.invoice_id, r.entry_id, r.amount, r.status, r.date, r.number))
         .fetch_optional(&mut *tx)
         .await?;
     let (item, entry, amount, status, date, n) = row.ok_or(AppError::NotFound("credit note"))?;
@@ -133,8 +122,8 @@ async fn void(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
         None => super::invoices::void_date(&state, date).await?,
     };
     ledger::reverse(&mut tx, entry, when, Some(auth.id)).await?;
-    sqlx::query("UPDATE acc_credit_notes SET status = 'void' WHERE id = $1").bind(id).execute(&mut *tx).await?;
-    sqlx::query("UPDATE acc_invoices SET credited = credited - $2 WHERE item_id = $1").bind(item).bind(amount).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_credit_notes SET status = 'void' WHERE id = $1", id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_invoices SET credited = credited - $2 WHERE item_id = $1", item, amount).execute(&mut *tx).await?;
     super::invoices::refresh(&mut tx, item).await?;
     tx.commit().await?;
     let _ = crate::crm::timeline(&state.db, item, "accounting", Some(auth.id), None, json!({ "event": "credit_voided", "number": n })).await;

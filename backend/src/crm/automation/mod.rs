@@ -106,24 +106,18 @@ pub(crate) async fn context(state: &AppState, item: Uuid) -> AppResult<Ctx> {
     let t = entity_type_by_id(state, row.entity_type).await?;
     let mut v = serde_json::to_value(&row).unwrap_or_else(|_| json!({}));
     let assigned_email: Option<String> = match row.assigned_to {
-        Some(u) => sqlx::query_scalar("SELECT email FROM users WHERE id = $1").bind(u).fetch_optional(&state.db).await?,
+        Some(u) => sqlx::query_scalar!("SELECT email FROM users WHERE id = $1", u).fetch_optional(&state.db).await?,
         None => None,
     };
     // The client's email: the record's own, else its primary contact's, else its company's.
-    let email: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM crm_multifields WHERE kind = 'email' AND item_id = ANY(ARRAY[
+    let email: Option<String> = sqlx::query_scalar!("SELECT value FROM crm_multifields WHERE kind = 'email' AND item_id = ANY(ARRAY[
              $1,
              (SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort LIMIT 1),
              (SELECT company_id FROM crm_items WHERE id = $1)
-         ]) ORDER BY item_id = $1 DESC, sort LIMIT 1",
-    )
-    .bind(item)
+         ]) ORDER BY item_id = $1 DESC, sort LIMIT 1", item)
     .fetch_optional(&state.db)
     .await?;
-    let contact: Option<String> = sqlx::query_scalar(
-        "SELECT i.title FROM crm_item_contacts l JOIN crm_items i ON i.id = l.contact_id WHERE l.item_id = $1 ORDER BY l.is_primary DESC, l.sort LIMIT 1",
-    )
-    .bind(item)
+    let contact: Option<String> = sqlx::query_scalar!("SELECT i.title FROM crm_item_contacts l JOIN crm_items i ON i.id = l.contact_id WHERE l.item_id = $1 ORDER BY l.is_primary DESC, l.sort LIMIT 1", item)
     .fetch_optional(&state.db)
     .await?;
     let amount = match &row.currency {
@@ -311,7 +305,7 @@ fn due(r: &Robot, record: &Value, tz: Tz, now: DateTime<Utc>) -> Option<DateTime
 /// The time zone dates of a record are read in: its responsible person's, else UTC.
 async fn record_tz(state: &AppState, assigned: Option<Uuid>) -> Tz {
     let Some(u) = assigned else { return Tz::UTC };
-    let name: Option<String> = sqlx::query_scalar("SELECT timezone FROM users WHERE id = $1").bind(u).fetch_optional(&state.db).await.ok().flatten();
+    let name: Option<String> = sqlx::query_scalar!("SELECT timezone FROM users WHERE id = $1", u).fetch_optional(&state.db).await.ok().flatten();
     name.and_then(|n| n.parse::<Tz>().ok()).unwrap_or(Tz::UTC)
 }
 
@@ -327,8 +321,7 @@ async fn enqueue_run(state: &AppState, run: Uuid, at: DateTime<Utc>, timeout: bo
 /// Test mode of a pipeline's automation: `None` when the record is left alone (test mode is on
 /// and its responsible person isn't a tester), otherwise whether the run is a test run.
 pub async fn test_gate(state: &AppState, category: Uuid, assigned: Option<Uuid>) -> AppResult<Option<bool>> {
-    let mode: Option<(bool, Vec<Uuid>)> = sqlx::query_as("SELECT automation_test_mode, automation_testers FROM crm_categories WHERE id = $1")
-        .bind(category)
+    let mode: Option<(bool, Vec<Uuid>)> = sqlx::query!(r#"SELECT automation_test_mode, automation_testers FROM crm_categories WHERE id = $1"#, category).map(|r| (r.automation_test_mode, r.automation_testers))
         .fetch_optional(&state.db)
         .await?;
     Ok(match mode {
@@ -348,12 +341,8 @@ pub async fn stage_entered(state: &AppState, item: Uuid, stage: Uuid) {
 
 async fn schedule(state: &AppState, item: Uuid, stage: Uuid) -> AppResult<()> {
     // Robots still waiting in the stage the record left will never run.
-    sqlx::query(
-        "UPDATE crm_robot_runs SET status = 'skipped', result = 'the record left the stage', finished_at = now()
-         WHERE item_id = $1 AND status IN ('pending', 'scheduled', 'waiting') AND schedule_id IS NULL AND stage_id <> $2",
-    )
-    .bind(item)
-    .bind(stage)
+    sqlx::query!("UPDATE crm_robot_runs SET status = 'skipped', result = 'the record left the stage', finished_at = now()
+         WHERE item_id = $1 AND status IN ('pending', 'scheduled', 'waiting') AND schedule_id IS NULL AND stage_id <> $2", item, stage)
     .execute(&state.db)
     .await?;
     let robots: Vec<Robot> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -396,22 +385,8 @@ async fn schedule(state: &AppState, item: Uuid, stage: Uuid) -> AppResult<()> {
                 None => ("skipped", now, Some("the date field is empty")),
             },
         };
-        let run: Uuid = sqlx::query_scalar(
-            "INSERT INTO crm_robot_runs (robot_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, status, result, after_run, finished_at, is_test)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CASE WHEN $9 = 'skipped' THEN now() END, $12) RETURNING id",
-        )
-        .bind(r.id)
-        .bind(&r.name)
-        .bind(item)
-        .bind(stage)
-        .bind(r.category_id)
-        .bind(&r.action)
-        .bind(run_at)
-        .bind(d as i32)
-        .bind(status)
-        .bind(result)
-        .bind(if status == "pending" { previous } else { None })
-        .bind(is_test)
+        let run: Uuid = sqlx::query_scalar!("INSERT INTO crm_robot_runs (robot_id, robot_name, item_id, stage_id, category_id, action, run_at, depth, status, result, after_run, finished_at, is_test)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CASE WHEN $9 = 'skipped' THEN now() END, $12) RETURNING id", r.id, &r.name, item, stage, r.category_id, &r.action, run_at, d as i32, status, result, if status == "pending" { previous } else { None }, is_test)
         .fetch_one(&state.db)
         .await?;
         if status == "scheduled" {
@@ -430,8 +405,7 @@ async fn schedule(state: &AppState, item: Uuid, stage: Uuid) -> AppResult<()> {
 async fn release_next(state: &AppState, finished: Uuid) -> AppResult<()> {
     let mut queue = vec![finished];
     while let Some(done) = queue.pop() {
-        let next: Vec<(Uuid, Option<Uuid>, Uuid)> = sqlx::query_as("SELECT id, robot_id, item_id FROM crm_robot_runs WHERE after_run = $1 AND status = 'pending'")
-            .bind(done)
+        let next: Vec<(Uuid, Option<Uuid>, Uuid)> = sqlx::query!(r#"SELECT id, robot_id, item_id FROM crm_robot_runs WHERE after_run = $1 AND status = 'pending'"#, done).map(|r| (r.id, r.robot_id, r.item_id))
             .fetch_all(&state.db)
             .await?;
         for (run, robot_id, item) in next {
@@ -448,13 +422,13 @@ async fn release_next(state: &AppState, finished: Uuid) -> AppResult<()> {
             };
             match at {
                 Some(at) => {
-                    let n = sqlx::query("UPDATE crm_robot_runs SET status = 'scheduled', run_at = $2 WHERE id = $1 AND status = 'pending'").bind(run).bind(at).execute(&state.db).await?.rows_affected();
+                    let n = sqlx::query!("UPDATE crm_robot_runs SET status = 'scheduled', run_at = $2 WHERE id = $1 AND status = 'pending'", run, at).execute(&state.db).await?.rows_affected();
                     if n == 1 {
                         enqueue_run(state, run, at, false).await?;
                     }
                 }
                 None => {
-                    sqlx::query("UPDATE crm_robot_runs SET status = 'skipped', result = 'the date field is empty', finished_at = now() WHERE id = $1 AND status = 'pending'").bind(run).execute(&state.db).await?;
+                    sqlx::query!("UPDATE crm_robot_runs SET status = 'skipped', result = 'the date field is empty', finished_at = now() WHERE id = $1 AND status = 'pending'", run).execute(&state.db).await?;
                     queue.push(run);
                 }
             }
@@ -464,10 +438,7 @@ async fn release_next(state: &AppState, finished: Uuid) -> AppResult<()> {
 }
 
 async fn finish_run(state: &AppState, run: Uuid, status: &str, result: &str) -> AppResult<()> {
-    sqlx::query("UPDATE crm_robot_runs SET status = $2, result = $3, finished_at = now(), wait_until = NULL WHERE id = $1")
-        .bind(run)
-        .bind(status)
-        .bind(result.chars().take(2000).collect::<String>())
+    sqlx::query!("UPDATE crm_robot_runs SET status = $2, result = $3, finished_at = now(), wait_until = NULL WHERE id = $1", run, status, result.chars().take(2000).collect::<String>())
         .execute(&state.db)
         .await?;
     release_next(state, run).await
@@ -476,10 +447,7 @@ async fn finish_run(state: &AppState, run: Uuid, status: &str, result: &str) -> 
 /// Puts a run to sleep until something happens or `minutes` pass.
 async fn enter_wait(state: &AppState, run: Uuid, minutes: i64, data: Value) -> AppResult<()> {
     let until = Utc::now() + Duration::minutes(minutes.max(1));
-    sqlx::query("UPDATE crm_robot_runs SET status = 'waiting', wait_until = $2, data = data || $3 WHERE id = $1")
-        .bind(run)
-        .bind(until)
-        .bind(data)
+    sqlx::query!("UPDATE crm_robot_runs SET status = 'waiting', wait_until = $2, data = data || $3 WHERE id = $1", run, until, data)
         .execute(&state.db)
         .await?;
     enqueue_run(state, run, until, true).await
@@ -488,8 +456,7 @@ async fn enter_wait(state: &AppState, run: Uuid, minutes: i64, data: Value) -> A
 /// Wakes waiting runs: they run now and do not wait again.
 async fn resume(state: &AppState, runs: &[Uuid]) -> AppResult<()> {
     for &run in runs {
-        let n = sqlx::query("UPDATE crm_robot_runs SET status = 'scheduled', run_at = now(), wait_until = NULL, data = data || '{\"waited\": true}' WHERE id = $1 AND status = 'waiting'")
-            .bind(run)
+        let n = sqlx::query!("UPDATE crm_robot_runs SET status = 'scheduled', run_at = now(), wait_until = NULL, data = data || '{\"waited\": true}' WHERE id = $1 AND status = 'waiting'", run)
             .execute(&state.db)
             .await?
             .rows_affected();
@@ -509,12 +476,9 @@ pub async fn record_changed(state: &AppState, item: Uuid) {
 }
 
 async fn try_record_changed(state: &AppState, item: Uuid) -> AppResult<()> {
-    let open: Vec<(Uuid, String, DateTime<Utc>, Uuid)> = sqlx::query_as(
-        "SELECT r.id, r.status, r.run_at, b.id FROM crm_robot_runs r JOIN crm_robots b ON b.id = r.robot_id
+    let open: Vec<(Uuid, String, DateTime<Utc>, Uuid)> = sqlx::query!(r#"SELECT r.id, r.status, r.run_at, b.id AS "c3" FROM crm_robot_runs r JOIN crm_robots b ON b.id = r.robot_id
          WHERE r.item_id = $1 AND ((r.status = 'scheduled' AND b.timing = 'field')
-            OR (r.status = 'waiting' AND b.wait->>'until' = 'conditions' AND NOT (r.data ? 'document_id')))",
-    )
-    .bind(item)
+            OR (r.status = 'waiting' AND b.wait->>'until' = 'conditions' AND NOT (r.data ? 'document_id')))"#, item).map(|r| (r.id, r.status, r.run_at, r.c3))
     .fetch_all(&state.db)
     .await?;
     if open.is_empty() {
@@ -540,7 +504,7 @@ async fn try_record_changed(state: &AppState, item: Uuid) -> AppResult<()> {
         match due(&robot, &record, tz, Utc::now()) {
             Some(at) if (at - run_at).num_seconds().abs() >= 1 => {
                 // The old job finds the run not yet due and leaves it; the new one runs it.
-                sqlx::query("UPDATE crm_robot_runs SET run_at = $2 WHERE id = $1 AND status = 'scheduled'").bind(run).bind(at).execute(&state.db).await?;
+                sqlx::query!("UPDATE crm_robot_runs SET run_at = $2 WHERE id = $1 AND status = 'scheduled'", run, at).execute(&state.db).await?;
                 enqueue_run(state, run, at, false).await?;
             }
             Some(_) => {}
@@ -553,9 +517,7 @@ async fn try_record_changed(state: &AppState, item: Uuid) -> AppResult<()> {
 /// A document finished rendering: an email robot waiting to attach it carries on.
 pub async fn document_finished(state: &AppState, item: Uuid, document: Uuid) {
     crate::crm::sign_templates::document_ready(state, document).await;
-    let runs: Result<Vec<Uuid>, _> = sqlx::query_scalar("SELECT id FROM crm_robot_runs WHERE item_id = $1 AND status = 'waiting' AND data->>'document_id' = $2")
-        .bind(item)
-        .bind(document.to_string())
+    let runs: Result<Vec<Uuid>, _> = sqlx::query_scalar!("SELECT id FROM crm_robot_runs WHERE item_id = $1 AND status = 'waiting' AND data->>'document_id' = $2", item, document.to_string())
         .fetch_all(&state.db)
         .await;
     if let Ok(runs) = runs
@@ -599,10 +561,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
         Ok(Outcome::Waiting) => return Ok(()),
         Err(f) if f.retry && c.attempts < RETRIES.len() as i32 => {
             let at = Utc::now() + Duration::minutes(RETRIES[c.attempts as usize]);
-            sqlx::query("UPDATE crm_robot_runs SET status = 'scheduled', run_at = $2, attempts = attempts + 1, result = $3, data = data || '{\"waited\": true}' WHERE id = $1")
-                .bind(run_id)
-                .bind(at)
-                .bind(format!("attempt {} failed: {}; trying again at {}", c.attempts + 1, f.msg, at.format("%H:%M UTC")))
+            sqlx::query!("UPDATE crm_robot_runs SET status = 'scheduled', run_at = $2, attempts = attempts + 1, result = $3, data = data || '{\"waited\": true}' WHERE id = $1", run_id, at, format!("attempt {} failed: {}; trying again at {}", c.attempts + 1, f.msg, at.format("%H:%M UTC")))
                 .execute(&state.db)
                 .await?;
             enqueue_run(state, run_id, at, false).await.map_err(ae)?;
@@ -725,12 +684,8 @@ async fn wake_on(state: &AppState, item: Uuid, event: &str) -> AppResult<()> {
     if !WAIT_EVENTS.contains(&event) {
         return Ok(());
     }
-    let runs: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT r.id FROM crm_robot_runs r JOIN crm_robots b ON b.id = r.robot_id
-         WHERE r.item_id = $1 AND r.status = 'waiting' AND b.wait->>'until' = $2 AND NOT (r.data ? 'document_id')",
-    )
-    .bind(item)
-    .bind(event)
+    let runs: Vec<Uuid> = sqlx::query_scalar!("SELECT r.id FROM crm_robot_runs r JOIN crm_robots b ON b.id = r.robot_id
+         WHERE r.item_id = $1 AND r.status = 'waiting' AND b.wait->>'until' = $2 AND NOT (r.data ? 'document_id')", item, event)
     .fetch_all(&state.db)
     .await?;
     resume(state, &runs).await
@@ -757,7 +712,7 @@ async fn try_fire(state: &AppState, item: Uuid, event: &str, only: Option<Uuid>,
     if triggers.is_empty() {
         return Ok(false);
     }
-    let sorts: Vec<(Uuid, i32)> = sqlx::query_as("SELECT id, sort FROM crm_stages WHERE category_id = $1").bind(category).fetch_all(&state.db).await?;
+    let sorts: Vec<(Uuid, i32)> = sqlx::query!(r#"SELECT id, sort FROM crm_stages WHERE category_id = $1"#, category).map(|r| (r.id, r.sort)).fetch_all(&state.db).await?;
     let sort_of = |s: Uuid| sorts.iter().find(|x| x.0 == s).map(|x| x.1).unwrap_or(0);
     let ctx = context(state, item).await?;
     let Some(is_test) = test_gate(state, category, ctx.row.assigned_to).await? else {
@@ -789,8 +744,7 @@ struct WebhookBody {
 /// Incoming webhook: `POST /api/crm/automation/webhook/{token}` with `{"item_id": "…"}`.
 /// The token is the secret; no session is needed, so other systems can move records.
 async fn webhook(State(state): State<AppState>, Path(token): Path<String>, Json(b): Json<WebhookBody>) -> AppResult<Json<Value>> {
-    let trigger: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT id, category_id FROM crm_triggers WHERE token = $1 AND event = 'webhook' AND is_active")
-        .bind(&token)
+    let trigger: Option<(Uuid, Uuid)> = sqlx::query!(r#"SELECT id, category_id FROM crm_triggers WHERE token = $1 AND event = 'webhook' AND is_active"#, &token).map(|r| (r.id, r.category_id))
         .fetch_optional(&state.db)
         .await?;
     let Some((id, category)) = trigger else { return Err(AppError::NotFound("webhook")) };
@@ -804,9 +758,7 @@ async fn webhook(State(state): State<AppState>, Path(token): Path<String>, Json(
         return Err(AppError::TooManyRequests("too many calls to this webhook; try again in a minute".into()));
     }
     let item = b.item_id.or(b.id).ok_or_else(|| AppError::bad("item_id is required"))?;
-    let in_category: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND category_id = $2 AND deleted_at IS NULL)")
-        .bind(item)
-        .bind(category)
+    let in_category: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND category_id = $2 AND deleted_at IS NULL) AS "v!""#, item, category)
         .fetch_one(&state.db)
         .await?;
     if !in_category {
@@ -839,10 +791,10 @@ async fn overview(State(state): State<AppState>, auth: AuthUser, Query(q): Query
         .bind(q.category_id)
         .fetch_all(&state.db)
         .await?;
-    let et: i16 = sqlx::query_scalar("SELECT entity_type FROM crm_categories WHERE id = $1").bind(q.category_id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("pipeline"))?;
+    let et: i16 = sqlx::query_scalar!("SELECT entity_type FROM crm_categories WHERE id = $1", q.category_id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("pipeline"))?;
     let date_fields: Vec<Value> = date_fields(&state, et).await?.into_iter().map(|(code, label)| json!({ "code": code, "label": label })).collect();
     let (test_mode, testers): (bool, Vec<Uuid>) =
-        sqlx::query_as("SELECT automation_test_mode, automation_testers FROM crm_categories WHERE id = $1").bind(q.category_id).fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT automation_test_mode, automation_testers FROM crm_categories WHERE id = $1"#, q.category_id).map(|r| (r.automation_test_mode, r.automation_testers)).fetch_one(&state.db).await?;
     Ok(Json(json!({
         "test_mode": { "enabled": test_mode, "user_ids": testers },
         "robots": robots,
@@ -871,14 +823,11 @@ async fn set_test_mode(State(state): State<AppState>, auth: AuthUser, Json(mut b
     if b.user_ids.len() > 50 {
         return Err(AppError::bad("choose at most 50 testers"));
     }
-    let known: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND NOT is_guest").bind(&b.user_ids).fetch_one(&state.db).await?;
+    let known: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND NOT is_guest"#, &b.user_ids).fetch_one(&state.db).await?;
     if known as usize != b.user_ids.len() {
         return Err(AppError::bad("choose employees"));
     }
-    let n = sqlx::query("UPDATE crm_categories SET automation_test_mode = $2, automation_testers = $3 WHERE id = $1")
-        .bind(b.category_id)
-        .bind(b.enabled)
-        .bind(&b.user_ids)
+    let n = sqlx::query!("UPDATE crm_categories SET automation_test_mode = $2, automation_testers = $3 WHERE id = $1", b.category_id, b.enabled, &b.user_ids)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -890,11 +839,7 @@ async fn set_test_mode(State(state): State<AppState>, auth: AuthUser, Json(mut b
 
 /// The stage must belong to the pipeline, and the pipeline to a record type with stages.
 async fn stage_in(state: &AppState, category: Uuid, stage: Uuid) -> AppResult<i16> {
-    let et: Option<i16> = sqlx::query_scalar(
-        "SELECT c.entity_type FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1 AND c.id = $2",
-    )
-    .bind(stage)
-    .bind(category)
+    let et: Option<i16> = sqlx::query_scalar!("SELECT c.entity_type FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1 AND c.id = $2", stage, category)
     .fetch_optional(&state.db)
     .await?;
     et.ok_or_else(|| AppError::bad("that stage is not in this pipeline"))
@@ -1001,27 +946,10 @@ async fn create_robot(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     let params = actions::validate(&state, et, category, &action, b.params.unwrap_or_else(|| json!({}))).await?;
     let name = required("name", b.name.as_deref().unwrap_or(actions::label(&action)), 200)?;
     let (timing, field, offset) = check_timing(&state, et, b.timing.as_deref().unwrap_or("stage"), b.timing_field.flatten(), b.offset_minutes.unwrap_or(0)).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_robots (entity_type, category_id, stage_id, name, action, params, delay_minutes, conditions, is_active, created_by, sort,
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_robots (entity_type, category_id, stage_id, name, action, params, delay_minutes, conditions, is_active, created_by, sort,
                                  timing, timing_field, offset_minutes, after_previous, wait)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT COALESCE(MAX(sort), 0) + 10 FROM crm_robots WHERE stage_id = $3),
-                 $11, $12, $13, $14, $15) RETURNING id",
-    )
-    .bind(et)
-    .bind(category)
-    .bind(stage)
-    .bind(name)
-    .bind(&action)
-    .bind(params)
-    .bind(check_delay(b.delay_minutes.unwrap_or(0))?)
-    .bind(check_conditions(&b.conditions.unwrap_or_else(|| json!([])))?)
-    .bind(b.is_active.unwrap_or(true))
-    .bind(auth.id)
-    .bind(timing)
-    .bind(field)
-    .bind(offset)
-    .bind(b.after_previous.unwrap_or(false))
-    .bind(check_wait(b.wait.flatten())?)
+                 $11, $12, $13, $14, $15) RETURNING id", et, category, stage, name, &action, params, check_delay(b.delay_minutes.unwrap_or(0))?, check_conditions(&b.conditions.unwrap_or_else(|| json!([])))?, b.is_active.unwrap_or(true), auth.id, timing, field, offset, b.after_previous.unwrap_or(false), check_wait(b.wait.flatten())?)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(load_robot(&state, id).await?))
@@ -1042,23 +970,8 @@ async fn update_robot(State(state): State<AppState>, auth: AuthUser, Path(id): P
         b.offset_minutes.unwrap_or(cur.offset_minutes),
     )
     .await?;
-    sqlx::query(
-        "UPDATE crm_robots SET stage_id = $2, name = $3, action = $4, params = $5, delay_minutes = $6, conditions = $7, is_active = $8,
-                timing = $9, timing_field = $10, offset_minutes = $11, after_previous = $12, wait = $13, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(stage)
-    .bind(match b.name { Some(n) => required("name", &n, 200)?, None => cur.name })
-    .bind(&action)
-    .bind(params)
-    .bind(check_delay(b.delay_minutes.unwrap_or(cur.delay_minutes))?)
-    .bind(match b.conditions { Some(c) => check_conditions(&c)?, None => cur.conditions })
-    .bind(b.is_active.unwrap_or(cur.is_active))
-    .bind(timing)
-    .bind(field)
-    .bind(offset)
-    .bind(b.after_previous.unwrap_or(cur.after_previous))
-    .bind(match b.wait { Some(w) => check_wait(w)?, None => cur.wait })
+    sqlx::query!("UPDATE crm_robots SET stage_id = $2, name = $3, action = $4, params = $5, delay_minutes = $6, conditions = $7, is_active = $8,
+                timing = $9, timing_field = $10, offset_minutes = $11, after_previous = $12, wait = $13, updated_at = now() WHERE id = $1", id, stage, match b.name { Some(n) => required("name", &n, 200)?, None => cur.name }, &action, params, check_delay(b.delay_minutes.unwrap_or(cur.delay_minutes))?, match b.conditions { Some(c) => check_conditions(&c)?, None => cur.conditions }, b.is_active.unwrap_or(cur.is_active), timing, field, offset, b.after_previous.unwrap_or(cur.after_previous), match b.wait { Some(w) => check_wait(w)?, None => cur.wait })
     .execute(&state.db)
     .await?;
     Ok(Json(load_robot(&state, id).await?))
@@ -1077,7 +990,7 @@ async fn order_robots(State(state): State<AppState>, auth: AuthUser, Json(b): Js
         return Err(AppError::bad("too many robots"));
     }
     for (i, id) in b.ids.iter().enumerate() {
-        sqlx::query("UPDATE crm_robots SET sort = $1 WHERE id = $2 AND stage_id = $3").bind((i as i32 + 1) * 10).bind(id).bind(b.stage_id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_robots SET sort = $1 WHERE id = $2 AND stage_id = $3", (i as i32 + 1) * 10, id, b.stage_id).execute(&state.db).await?;
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -1085,7 +998,7 @@ async fn order_robots(State(state): State<AppState>, auth: AuthUser, Json(b): Js
 async fn delete_robot(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
     // Scheduled runs are skipped when they find the robot gone.
-    let n = sqlx::query("DELETE FROM crm_robots WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM crm_robots WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("robot"));
     }
@@ -1171,21 +1084,8 @@ async fn create_trigger(State(state): State<AppState>, auth: AuthUser, Json(b): 
     let event = b.event.unwrap_or_default();
     let params = check_trigger_params(&event, b.params.unwrap_or(Value::Null))?;
     let token = (event == "webhook").then(|| crate::auth::tokens::random_token(24));
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_triggers (entity_type, category_id, stage_id, name, event, params, conditions, allow_backwards, token, is_active, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
-    )
-    .bind(et)
-    .bind(category)
-    .bind(stage)
-    .bind(required("name", b.name.as_deref().unwrap_or(&event), 200)?)
-    .bind(&event)
-    .bind(params)
-    .bind(check_conditions(&b.conditions.unwrap_or_else(|| json!([])))?)
-    .bind(b.allow_backwards.unwrap_or(false))
-    .bind(token)
-    .bind(b.is_active.unwrap_or(true))
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_triggers (entity_type, category_id, stage_id, name, event, params, conditions, allow_backwards, token, is_active, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id", et, category, stage, required("name", b.name.as_deref().unwrap_or(&event), 200)?, &event, params, check_conditions(&b.conditions.unwrap_or_else(|| json!([])))?, b.allow_backwards.unwrap_or(false), token, b.is_active.unwrap_or(true), auth.id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(load_trigger(&state, id).await?))
@@ -1199,16 +1099,7 @@ async fn update_trigger(State(state): State<AppState>, auth: AuthUser, Path(id):
     }
     let stage = b.stage_id.unwrap_or(cur.stage_id);
     stage_in(&state, cur.category_id, stage).await?;
-    sqlx::query(
-        "UPDATE crm_triggers SET stage_id = $2, name = $3, params = $4, conditions = $5, allow_backwards = $6, is_active = $7, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(stage)
-    .bind(match b.name { Some(n) => required("name", &n, 200)?, None => cur.name })
-    .bind(match b.params { Some(p) => check_trigger_params(&cur.event, p)?, None => cur.params })
-    .bind(match b.conditions { Some(c) => check_conditions(&c)?, None => cur.conditions })
-    .bind(b.allow_backwards.unwrap_or(cur.allow_backwards))
-    .bind(b.is_active.unwrap_or(cur.is_active))
+    sqlx::query!("UPDATE crm_triggers SET stage_id = $2, name = $3, params = $4, conditions = $5, allow_backwards = $6, is_active = $7, updated_at = now() WHERE id = $1", id, stage, match b.name { Some(n) => required("name", &n, 200)?, None => cur.name }, match b.params { Some(p) => check_trigger_params(&cur.event, p)?, None => cur.params }, match b.conditions { Some(c) => check_conditions(&c)?, None => cur.conditions }, b.allow_backwards.unwrap_or(cur.allow_backwards), b.is_active.unwrap_or(cur.is_active))
     .execute(&state.db)
     .await?;
     Ok(Json(load_trigger(&state, id).await?))
@@ -1216,7 +1107,7 @@ async fn update_trigger(State(state): State<AppState>, auth: AuthUser, Path(id):
 
 async fn delete_trigger(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    let n = sqlx::query("DELETE FROM crm_triggers WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM crm_triggers WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("trigger"));
     }
@@ -1242,10 +1133,7 @@ struct Run {
 async fn item_runs(State(state): State<AppState>, auth: AuthUser, Path(item): Path<Uuid>) -> AppResult<Json<Value>> {
     let row = load_row(&state, item, false).await?;
     super::access::require_read(&state, &auth, row.entity_type, item, row.assigned_to).await?;
-    let runs: Vec<Run> = sqlx::query_as(
-        "SELECT id, robot_id, robot_name, status, run_at, finished_at, result, wait_until, attempts, schedule_id, is_test FROM crm_robot_runs WHERE item_id = $1 ORDER BY created_at DESC LIMIT 100",
-    )
-    .bind(item)
+    let runs: Vec<Run> = sqlx::query_as!(Run, r#"SELECT id, robot_id AS "robot_id?", robot_name, status, run_at, finished_at AS "finished_at?", result AS "result?", wait_until AS "wait_until?", attempts, schedule_id AS "schedule_id?", is_test FROM crm_robot_runs WHERE item_id = $1 ORDER BY created_at DESC LIMIT 100"#, item)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": runs })))

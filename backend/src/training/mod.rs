@@ -122,9 +122,7 @@ pub(crate) struct Enrolment {
 }
 
 pub(crate) async fn enrolment(state: &AppState, user: Uuid, course: Uuid) -> AppResult<Option<Enrolment>> {
-    Ok(sqlx::query_as("SELECT source, due_on, enrolled_at, completed_at FROM training_enrolments WHERE course_id = $1 AND user_id = $2")
-        .bind(course)
-        .bind(user)
+    Ok(sqlx::query_as!(Enrolment, r#"SELECT source, due_on AS "due_on?", enrolled_at, completed_at AS "completed_at?" FROM training_enrolments WHERE course_id = $1 AND user_id = $2"#, course, user)
         .fetch_optional(&state.db)
         .await?)
 }
@@ -148,19 +146,11 @@ fn opens_at(enrolled: Option<DateTime<Utc>>, days: i32) -> Option<DateTime<Utc>>
 
 /// A person's progress through a course.
 pub(crate) async fn progress(state: &AppState, user: Uuid, course: Uuid) -> AppResult<Value> {
-    let (lessons, done): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COUNT(p.user_id) FROM training_lessons l LEFT JOIN training_lesson_progress p ON p.lesson_id = l.id AND p.user_id = $2 WHERE l.course_id = $1",
-    )
-    .bind(course)
-    .bind(user)
+    let (lessons, done): (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", COUNT(p.user_id) AS "c1!" FROM training_lessons l LEFT JOIN training_lesson_progress p ON p.lesson_id = l.id AND p.user_id = $2 WHERE l.course_id = $1"#, course, user).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
-    let (tests, passed): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM training_attempts a WHERE a.test_id = t.id AND a.user_id = $2 AND a.passed))
-         FROM training_tests t WHERE t.course_id = $1 AND t.is_active",
-    )
-    .bind(course)
-    .bind(user)
+    let (tests, passed): (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM training_attempts a WHERE a.test_id = t.id AND a.user_id = $2 AND a.passed)) AS "c1!"
+         FROM training_tests t WHERE t.course_id = $1 AND t.is_active"#, course, user).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
     let total = lessons + tests;
@@ -181,33 +171,21 @@ pub(crate) async fn check_completion(state: &AppState, user: Uuid, course: Uuid)
         return Ok(());
     }
     // The best score of each active test.
-    let (score, max): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(b.score), 0), COALESCE(SUM(b.max_score), 0) FROM (
+    let (score, max): (i64, i64) = sqlx::query!(r#"SELECT COALESCE(SUM(b.score), 0) AS "c0!", COALESCE(SUM(b.max_score), 0) AS "c1!" FROM (
             SELECT DISTINCT ON (a.test_id) a.score, a.max_score FROM training_attempts a JOIN training_tests t ON t.id = a.test_id
-            WHERE t.course_id = $1 AND t.is_active AND a.user_id = $2 AND a.status = 'done' ORDER BY a.test_id, a.percent DESC, a.score DESC) b",
-    )
-    .bind(course)
-    .bind(user)
+            WHERE t.course_id = $1 AND t.is_active AND a.user_id = $2 AND a.status = 'done' ORDER BY a.test_id, a.percent DESC, a.score DESC) b"#, course, user).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
-    let updated = sqlx::query("UPDATE training_enrolments SET completed_at = now() WHERE course_id = $1 AND user_id = $2 AND completed_at IS NULL")
-        .bind(course)
-        .bind(user)
+    let updated = sqlx::query!("UPDATE training_enrolments SET completed_at = now() WHERE course_id = $1 AND user_id = $2 AND completed_at IS NULL", course, user)
         .execute(&state.db)
         .await?;
     if updated.rows_affected() == 0 {
         return Ok(());
     }
-    let cert: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO training_certificates (course_id, user_id, score, max_score) VALUES ($1, $2, $3, $4) ON CONFLICT (course_id, user_id) DO NOTHING RETURNING id",
-    )
-    .bind(course)
-    .bind(user)
-    .bind(score as i32)
-    .bind(max as i32)
+    let cert: Option<Uuid> = sqlx::query_scalar!("INSERT INTO training_certificates (course_id, user_id, score, max_score) VALUES ($1, $2, $3, $4) ON CONFLICT (course_id, user_id) DO NOTHING RETURNING id", course, user, score as i32, max as i32)
     .fetch_optional(&state.db)
     .await?;
-    let title: String = sqlx::query_scalar("SELECT title FROM training_courses WHERE id = $1").bind(course).fetch_one(&state.db).await?;
+    let title: String = sqlx::query_scalar!("SELECT title FROM training_courses WHERE id = $1", course).fetch_one(&state.db).await?;
     notify(state, &[user], NewNotification {
         kind: "training.completed",
         title: format!("You completed “{title}”"),
@@ -231,13 +209,8 @@ pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> App
     if cover {
         return Ok(true);
     }
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM training_lessons l WHERE $2 = ANY(l.file_ids)
-            AND ($3 OR EXISTS (SELECT 1 FROM training_enrolments e WHERE e.course_id = l.course_id AND e.user_id = $1)))",
-    )
-    .bind(auth.id)
-    .bind(file)
-    .bind(manager(auth))
+    Ok(sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM training_lessons l WHERE $2 = ANY(l.file_ids)
+            AND ($3 OR EXISTS (SELECT 1 FROM training_enrolments e WHERE e.course_id = l.course_id AND e.user_id = $1))) AS "v!""#, auth.id, file, manager(auth))
     .fetch_one(&state.db)
     .await?)
 }
@@ -266,11 +239,10 @@ async fn list_courses(State(state): State<AppState>, auth: AuthUser, Query(q): Q
     let mut items = Vec::new();
     for c in rows {
         let e = enrolment(&state, auth.id, c.id).await?;
-        let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT COUNT(*) FROM training_lessons WHERE course_id = $1), (SELECT COUNT(*) FROM training_tests WHERE course_id = $1 AND is_active)")
-            .bind(c.id)
+        let counts: (i64, i64) = sqlx::query!(r#"SELECT (SELECT COUNT(*) FROM training_lessons WHERE course_id = $1) AS "c0!", (SELECT COUNT(*) FROM training_tests WHERE course_id = $1 AND is_active) AS "c1!""#, c.id).map(|r| (r.c0, r.c1))
             .fetch_one(&state.db)
             .await?;
-        let cert: Option<Uuid> = sqlx::query_scalar("SELECT id FROM training_certificates WHERE course_id = $1 AND user_id = $2").bind(c.id).bind(auth.id).fetch_optional(&state.db).await?;
+        let cert: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM training_certificates WHERE course_id = $1 AND user_id = $2", c.id, auth.id).fetch_optional(&state.db).await?;
         let excerpt: String = c.description.chars().take(240).collect();
         items.push(json!({
             "id": c.id, "title": c.title, "excerpt": excerpt, "cover_file_id": c.cover_file_id, "is_published": c.is_published,
@@ -295,13 +267,9 @@ pub(crate) async fn course_view(state: &AppState, auth: &AuthUser, id: Uuid) -> 
         .bind(id)
         .fetch_one(&state.db)
         .await?;
-    let chapters: Vec<(Uuid, String, i32)> = sqlx::query_as("SELECT id, title, sort FROM training_chapters WHERE course_id = $1 ORDER BY sort, title").bind(id).fetch_all(&state.db).await?;
-    let lessons: Vec<(Uuid, Option<Uuid>, String, i32, i32, bool)> = sqlx::query_as(
-        "SELECT l.id, l.chapter_id, l.title, l.sort, l.opens_after_days, EXISTS (SELECT 1 FROM training_lesson_progress p WHERE p.lesson_id = l.id AND p.user_id = $2)
-         FROM training_lessons l LEFT JOIN training_chapters ch ON ch.id = l.chapter_id WHERE l.course_id = $1 ORDER BY ch.sort NULLS FIRST, l.sort, l.title",
-    )
-    .bind(id)
-    .bind(auth.id)
+    let chapters: Vec<(Uuid, String, i32)> = sqlx::query!(r#"SELECT id, title, sort FROM training_chapters WHERE course_id = $1 ORDER BY sort, title"#, id).map(|r| (r.id, r.title, r.sort)).fetch_all(&state.db).await?;
+    let lessons: Vec<(Uuid, Option<Uuid>, String, i32, i32, bool)> = sqlx::query!(r#"SELECT l.id AS "id!", l.chapter_id AS "chapter_id?", l.title AS "title!", l.sort AS "sort!", l.opens_after_days AS "opens_after_days!", EXISTS (SELECT 1 FROM training_lesson_progress p WHERE p.lesson_id = l.id AND p.user_id = $2) AS "c5!"
+         FROM training_lessons l LEFT JOIN training_chapters ch ON ch.id = l.chapter_id WHERE l.course_id = $1 ORDER BY ch.sort NULLS FIRST, l.sort, l.title"#, id, auth.id).map(|r| (r.id, r.chapter_id, r.title, r.sort, r.opens_after_days, r.c5))
     .fetch_all(&state.db)
     .await?;
     let now = Utc::now();
@@ -315,8 +283,8 @@ pub(crate) async fn course_view(state: &AppState, auth: &AuthUser, id: Uuid) -> 
         })
         .collect();
     let tests = attempts::tests_for(state, auth, id).await?;
-    let cert: Option<(Uuid, i64)> = sqlx::query_as("SELECT id, number FROM training_certificates WHERE course_id = $1 AND user_id = $2").bind(id).bind(auth.id).fetch_optional(&state.db).await?;
-    let enrolled: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM training_enrolments WHERE course_id = $1").bind(id).fetch_one(&state.db).await?;
+    let cert: Option<(Uuid, i64)> = sqlx::query!(r#"SELECT id, number FROM training_certificates WHERE course_id = $1 AND user_id = $2"#, id, auth.id).map(|r| (r.id, r.number)).fetch_optional(&state.db).await?;
+    let enrolled: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM training_enrolments WHERE course_id = $1"#, id).fetch_one(&state.db).await?;
     let mut v = json!({
         "course": c, "html": crate::kb::render(&c.description), "chapters": chapters.into_iter().map(|(i, t, s)| json!({ "id": i, "title": t, "sort": s })).collect::<Vec<_>>(),
         "lessons": lessons, "tests": tests, "enrolment": e, "can_enrol": can_enrol && e.is_none(),
@@ -324,11 +292,8 @@ pub(crate) async fn course_view(state: &AppState, auth: &AuthUser, id: Uuid) -> 
         "certificate": cert.map(|(i, n)| json!({ "id": i, "number": n })), "enrolled": enrolled, "can_manage": manager(auth),
     });
     if manager(auth) {
-        let rows: Vec<(Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query_as(
-            "SELECT a.user_id, a.department_id, COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) FROM training_access a
-             LEFT JOIN users u ON u.id = a.user_id LEFT JOIN departments d ON d.id = a.department_id WHERE a.course_id = $1",
-        )
-        .bind(id)
+        let rows: Vec<(Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query!(r#"SELECT a.user_id, a.department_id, COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) AS "c2" FROM training_access a
+             LEFT JOIN users u ON u.id = a.user_id LEFT JOIN departments d ON d.id = a.department_id WHERE a.course_id = $1"#, id).map(|r| (r.user_id, r.department_id, r.c2))
         .fetch_all(&state.db)
         .await?;
         v["audience"] = json!({
@@ -348,8 +313,8 @@ struct Who {
 }
 
 async fn check_who(state: &AppState, w: &Who) -> AppResult<()> {
-    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&w.users).fetch_one(&state.db).await?;
-    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(&w.departments).fetch_one(&state.db).await?;
+    let u: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &w.users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM departments WHERE id = ANY($1)"#, &w.departments).fetch_one(&state.db).await?;
     if u as usize != w.users.len() || d as usize != w.departments.len() {
         return Err(AppError::bad("some of the people or departments don't exist"));
     }
@@ -370,12 +335,12 @@ struct CourseInput {
 
 async fn set_audience(state: &AppState, course: Uuid, w: &Who) -> AppResult<()> {
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM training_access WHERE course_id = $1").bind(course).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM training_access WHERE course_id = $1", course).execute(&mut *tx).await?;
     for u in &w.users {
-        sqlx::query("INSERT INTO training_access (course_id, user_id) VALUES ($1, $2)").bind(course).bind(u).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO training_access (course_id, user_id) VALUES ($1, $2)", course, u).execute(&mut *tx).await?;
     }
     for d in &w.departments {
-        sqlx::query("INSERT INTO training_access (course_id, department_id) VALUES ($1, $2)").bind(course).bind(d).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO training_access (course_id, department_id) VALUES ($1, $2)", course, d).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -390,16 +355,7 @@ async fn create_course(State(state): State<AppState>, auth: AuthUser, Json(b): J
     }
     let audience = b.audience.unwrap_or_default();
     check_who(&state, &audience).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO training_courses (title, description, cover_file_id, is_published, to_all, sort, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
-    )
-    .bind(&title)
-    .bind(description.trim())
-    .bind(b.cover_file_id.flatten())
-    .bind(b.is_published.unwrap_or(false))
-    .bind(b.to_all.unwrap_or(true))
-    .bind(b.sort.unwrap_or(500))
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO training_courses (title, description, cover_file_id, is_published, to_all, sort, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id", &title, description.trim(), b.cover_file_id.flatten(), b.is_published.unwrap_or(false), b.to_all.unwrap_or(true), b.sort.unwrap_or(500), auth.id)
     .fetch_one(&state.db)
     .await?;
     set_audience(&state, id, &audience).await?;
@@ -416,19 +372,9 @@ async fn update_course(State(state): State<AppState>, auth: AuthUser, Path(id): 
     if b.description.as_ref().is_some_and(|d| d.len() > 100_000) {
         return Err(AppError::bad("the description is too long"));
     }
-    sqlx::query(
-        "UPDATE training_courses SET title = COALESCE($2, title), description = COALESCE($3, description),
+    sqlx::query!("UPDATE training_courses SET title = COALESCE($2, title), description = COALESCE($3, description),
             cover_file_id = CASE WHEN $4 THEN $5 ELSE cover_file_id END, is_published = COALESCE($6, is_published),
-            to_all = COALESCE($7, to_all), sort = COALESCE($8, sort), updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(&title)
-    .bind(b.description.as_deref().map(str::trim))
-    .bind(b.cover_file_id.is_some())
-    .bind(b.cover_file_id.flatten())
-    .bind(b.is_published)
-    .bind(b.to_all)
-    .bind(b.sort)
+            to_all = COALESCE($7, to_all), sort = COALESCE($8, sort), updated_at = now() WHERE id = $1", id, title.as_deref(), b.description.as_deref().map(str::trim), b.cover_file_id.is_some(), b.cover_file_id.flatten(), b.is_published, b.to_all, b.sort)
     .execute(&state.db)
     .await?;
     if let Some(w) = &b.audience {
@@ -441,7 +387,7 @@ async fn update_course(State(state): State<AppState>, auth: AuthUser, Path(id): 
 async fn delete_course(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
     let c = visible_course(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM training_courses WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM training_courses WHERE id = $1", id).execute(&state.db).await?;
     crate::audit::record(&state.db, Some(auth.id), "training.course_delete", "training_course", Some(id.to_string()), json!({ "title": c.title }), None).await;
     Ok(Json(json!({ "ok": true })))
 }
@@ -464,7 +410,7 @@ async fn enrol(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
         }
         Some(true) => {}
     }
-    sqlx::query("INSERT INTO training_enrolments (course_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO training_enrolments (course_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, auth.id).execute(&state.db).await?;
     check_completion(&state, auth.id, id).await?;
     course_view(&state, &auth, id).await.map(Json)
 }
@@ -475,7 +421,7 @@ async fn leave(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     if e.source == "assigned" {
         return Err(AppError::bad("this course was assigned to you"));
     }
-    sqlx::query("DELETE FROM training_enrolments WHERE course_id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM training_enrolments WHERE course_id = $1 AND user_id = $2", id, auth.id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -500,12 +446,8 @@ async fn assign(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         return Err(AppError::bad("the due date has passed"));
     }
     // The people, and everyone in the departments and their sub-departments.
-    let people: Vec<Uuid> = sqlx::query_scalar(
-        "WITH RECURSIVE tree AS (SELECT id FROM departments WHERE id = ANY($2) UNION SELECT d.id FROM departments d JOIN tree t ON d.parent_id = t.id)
-         SELECT DISTINCT u.id FROM users u WHERE u.is_active AND (u.id = ANY($1) OR u.id IN (SELECT user_id FROM user_departments WHERE department_id IN (SELECT id FROM tree)))",
-    )
-    .bind(&w.users)
-    .bind(&w.departments)
+    let people: Vec<Uuid> = sqlx::query_scalar!("WITH RECURSIVE tree AS (SELECT id FROM departments WHERE id = ANY($2) UNION SELECT d.id FROM departments d JOIN tree t ON d.parent_id = t.id)
+         SELECT DISTINCT u.id FROM users u WHERE u.is_active AND (u.id = ANY($1) OR u.id IN (SELECT user_id FROM user_departments WHERE department_id IN (SELECT id FROM tree)))", &w.users, &w.departments)
     .fetch_all(&state.db)
     .await?;
     if people.is_empty() {
@@ -514,16 +456,10 @@ async fn assign(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     let mut newly = Vec::new();
     for u in &people {
         // Skipped for anyone who already completed the course.
-        let fresh: Option<Uuid> = sqlx::query_scalar(
-            "INSERT INTO training_enrolments (course_id, user_id, source, assigned_by, due_on) VALUES ($1, $2, 'assigned', $3, $4)
+        let fresh: Option<Uuid> = sqlx::query_scalar!("INSERT INTO training_enrolments (course_id, user_id, source, assigned_by, due_on) VALUES ($1, $2, 'assigned', $3, $4)
              ON CONFLICT (course_id, user_id) DO UPDATE SET source = 'assigned', assigned_by = $3, due_on = $4, reminded_at = NULL
              WHERE training_enrolments.completed_at IS NULL
-             RETURNING id",
-        )
-        .bind(id)
-        .bind(u)
-        .bind(auth.id)
-        .bind(b.due_on)
+             RETURNING id", id, u, auth.id, b.due_on)
         .fetch_optional(&state.db)
         .await?;
         if fresh.is_some() {
@@ -543,7 +479,7 @@ async fn assign(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn unenrol(State(state): State<AppState>, auth: AuthUser, Path((id, user)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
-    let r = sqlx::query("DELETE FROM training_enrolments WHERE course_id = $1 AND user_id = $2").bind(id).bind(user).execute(&state.db).await?;
+    let r = sqlx::query!("DELETE FROM training_enrolments WHERE course_id = $1 AND user_id = $2", id, user).execute(&state.db).await?;
     if r.rows_affected() == 0 {
         return Err(AppError::NotFound("enrolment"));
     }
@@ -552,12 +488,10 @@ async fn unenrol(State(state): State<AppState>, auth: AuthUser, Path((id, user))
 
 /// Reminds people of assigned training due within two days (once).
 pub async fn run_reminders(state: &AppState) -> Result<()> {
-    let due: Vec<(Uuid, Uuid, String, NaiveDate)> = sqlx::query_as(
-        "UPDATE training_enrolments e SET reminded_at = now() FROM training_courses c
+    let due: Vec<(Uuid, Uuid, String, NaiveDate)> = sqlx::query!(r#"UPDATE training_enrolments e SET reminded_at = now() FROM training_courses c
          WHERE c.id = e.course_id AND e.completed_at IS NULL AND e.reminded_at IS NULL AND e.due_on IS NOT NULL
            AND e.due_on <= CURRENT_DATE + 2 AND e.due_on >= CURRENT_DATE
-         RETURNING e.user_id, c.id, c.title, e.due_on",
-    )
+         RETURNING e.user_id AS "user_id!", c.id AS "id!", c.title AS "title!", e.due_on AS "due_on!""#).map(|r| (r.user_id, r.id, r.title, r.due_on))
     .fetch_all(&state.db)
     .await?;
     for (user, course, title, d) in due {
@@ -587,17 +521,14 @@ async fn create_chapter(State(state): State<AppState>, auth: AuthUser, Path(id):
     require_manager(&auth)?;
     visible_course(&state, &auth, id).await?;
     let title = required("title", b.title.as_deref().unwrap_or(""), 200)?;
-    sqlx::query("INSERT INTO training_chapters (course_id, title, sort) VALUES ($1, $2, COALESCE($3, (SELECT COALESCE(MAX(sort), 0) + 10 FROM training_chapters WHERE course_id = $1)))")
-        .bind(id)
-        .bind(&title)
-        .bind(b.sort)
+    sqlx::query!("INSERT INTO training_chapters (course_id, title, sort) VALUES ($1, $2, COALESCE($3, (SELECT COALESCE(MAX(sort), 0) + 10 FROM training_chapters WHERE course_id = $1)))", id, &title, b.sort)
         .execute(&state.db)
         .await?;
     course_view(&state, &auth, id).await.map(Json)
 }
 
 async fn chapter_course(state: &AppState, id: Uuid) -> AppResult<Uuid> {
-    sqlx::query_scalar("SELECT course_id FROM training_chapters WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("chapter"))
+    sqlx::query_scalar!("SELECT course_id FROM training_chapters WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("chapter"))
 }
 
 async fn update_chapter(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<ChapterInput>) -> AppResult<Json<Value>> {
@@ -607,7 +538,7 @@ async fn update_chapter(State(state): State<AppState>, auth: AuthUser, Path(id):
         Some(t) => Some(required("title", t, 200)?),
         None => None,
     };
-    sqlx::query("UPDATE training_chapters SET title = COALESCE($2, title), sort = COALESCE($3, sort) WHERE id = $1").bind(id).bind(title).bind(b.sort).execute(&state.db).await?;
+    sqlx::query!("UPDATE training_chapters SET title = COALESCE($2, title), sort = COALESCE($3, sort) WHERE id = $1", id, title, b.sort).execute(&state.db).await?;
     course_view(&state, &auth, course).await.map(Json)
 }
 
@@ -615,7 +546,7 @@ async fn update_chapter(State(state): State<AppState>, auth: AuthUser, Path(id):
 async fn delete_chapter(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
     let course = chapter_course(&state, id).await?;
-    sqlx::query("DELETE FROM training_chapters WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM training_chapters WHERE id = $1", id).execute(&state.db).await?;
     course_view(&state, &auth, course).await.map(Json)
 }
 
@@ -655,7 +586,7 @@ async fn check_lesson_input(state: &AppState, course: Uuid, b: &LessonInput) -> 
         None => None,
     };
     if let Some(ids) = &b.file_ids {
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE id = ANY($1)").bind(ids).fetch_one(&state.db).await?;
+        let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM files WHERE id = ANY($1)"#, ids).fetch_one(&state.db).await?;
         if n as usize != ids.len() || ids.len() > 30 {
             return Err(AppError::bad("some files don't exist"));
         }
@@ -668,25 +599,15 @@ async fn create_lesson(State(state): State<AppState>, auth: AuthUser, Path(id): 
     visible_course(&state, &auth, id).await?;
     let title = required("title", b.title.as_deref().unwrap_or(""), 200)?;
     let video = check_lesson_input(&state, id, &b).await?;
-    let lid: Uuid = sqlx::query_scalar(
-        "INSERT INTO training_lessons (course_id, chapter_id, title, body, video_url, file_ids, opens_after_days, sort)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, (SELECT COALESCE(MAX(sort), 0) + 10 FROM training_lessons WHERE course_id = $1))) RETURNING id",
-    )
-    .bind(id)
-    .bind(b.chapter_id.flatten())
-    .bind(&title)
-    .bind(b.body.as_deref().unwrap_or("").trim())
-    .bind(video.flatten())
-    .bind(b.file_ids.unwrap_or_default())
-    .bind(b.opens_after_days.unwrap_or(0))
-    .bind(b.sort)
+    let lid: Uuid = sqlx::query_scalar!("INSERT INTO training_lessons (course_id, chapter_id, title, body, video_url, file_ids, opens_after_days, sort)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, (SELECT COALESCE(MAX(sort), 0) + 10 FROM training_lessons WHERE course_id = $1))) RETURNING id", id, b.chapter_id.flatten(), &title, b.body.as_deref().unwrap_or("").trim(), video.flatten(), &b.file_ids.unwrap_or_default(), b.opens_after_days.unwrap_or(0), b.sort)
     .fetch_one(&state.db)
     .await?;
     lesson_view(&state, &auth, lid).await.map(Json)
 }
 
 async fn lesson_course(state: &AppState, id: Uuid) -> AppResult<Uuid> {
-    sqlx::query_scalar("SELECT course_id FROM training_lessons WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("lesson"))
+    sqlx::query_scalar!("SELECT course_id FROM training_lessons WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("lesson"))
 }
 
 #[derive(FromRow)]
@@ -703,8 +624,7 @@ struct LessonRow {
 }
 
 async fn lesson_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Value> {
-    let l: LessonRow = sqlx::query_as("SELECT id, course_id, chapter_id, title, body, video_url, file_ids, opens_after_days, sort FROM training_lessons WHERE id = $1")
-        .bind(id)
+    let l: LessonRow = sqlx::query_as!(LessonRow, r#"SELECT id, course_id, chapter_id AS "chapter_id?", title, body, video_url AS "video_url?", file_ids, opens_after_days, sort FROM training_lessons WHERE id = $1"#, id)
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("lesson"))?;
@@ -717,13 +637,10 @@ async fn lesson_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<V
             }
         }
     }
-    let files: Vec<(Uuid, String, i64, String)> = sqlx::query_as("SELECT id, original_name, size_bytes, mime_type FROM files WHERE id = ANY($1)").bind(&l.file_ids).fetch_all(&state.db).await?;
-    let done: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM training_lesson_progress WHERE lesson_id = $1 AND user_id = $2)").bind(id).bind(auth.id).fetch_one(&state.db).await?;
+    let files: Vec<(Uuid, String, i64, String)> = sqlx::query!(r#"SELECT id, original_name, size_bytes, mime_type FROM files WHERE id = ANY($1)"#, &l.file_ids).map(|r| (r.id, r.original_name, r.size_bytes, r.mime_type)).fetch_all(&state.db).await?;
+    let done: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM training_lesson_progress WHERE lesson_id = $1 AND user_id = $2) AS "v!""#, id, auth.id).fetch_one(&state.db).await?;
     // The lessons in course order, for "previous" and "next".
-    let order: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT l.id FROM training_lessons l LEFT JOIN training_chapters ch ON ch.id = l.chapter_id WHERE l.course_id = $1 ORDER BY ch.sort NULLS FIRST, l.sort, l.title",
-    )
-    .bind(l.course_id)
+    let order: Vec<Uuid> = sqlx::query_scalar!("SELECT l.id FROM training_lessons l LEFT JOIN training_chapters ch ON ch.id = l.chapter_id WHERE l.course_id = $1 ORDER BY ch.sort NULLS FIRST, l.sort, l.title", l.course_id)
     .fetch_all(&state.db)
     .await?;
     let at = order.iter().position(|x| *x == id).unwrap_or(0);
@@ -750,22 +667,10 @@ async fn update_lesson(State(state): State<AppState>, auth: AuthUser, Path(id): 
         None => None,
     };
     let video = check_lesson_input(&state, course, &b).await?;
-    sqlx::query(
-        "UPDATE training_lessons SET title = COALESCE($2, title), body = COALESCE($3, body),
+    sqlx::query!("UPDATE training_lessons SET title = COALESCE($2, title), body = COALESCE($3, body),
             chapter_id = CASE WHEN $4 THEN $5 ELSE chapter_id END, video_url = CASE WHEN $6 THEN $7 ELSE video_url END,
             file_ids = COALESCE($8, file_ids), opens_after_days = COALESCE($9, opens_after_days), sort = COALESCE($10, sort), updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(title)
-    .bind(b.body.as_deref().map(str::trim))
-    .bind(b.chapter_id.is_some())
-    .bind(b.chapter_id.flatten())
-    .bind(video.is_some())
-    .bind(video.flatten())
-    .bind(b.file_ids)
-    .bind(b.opens_after_days)
-    .bind(b.sort)
+         WHERE id = $1", id, title, b.body.as_deref().map(str::trim), b.chapter_id.is_some(), b.chapter_id.flatten(), video.is_some(), video.flatten(), b.file_ids.as_deref(), b.opens_after_days, b.sort)
     .execute(&state.db)
     .await?;
     lesson_view(&state, &auth, id).await.map(Json)
@@ -774,7 +679,7 @@ async fn update_lesson(State(state): State<AppState>, auth: AuthUser, Path(id): 
 async fn delete_lesson(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
     let course = lesson_course(&state, id).await?;
-    sqlx::query("DELETE FROM training_lessons WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM training_lessons WHERE id = $1", id).execute(&state.db).await?;
     course_view(&state, &auth, course).await.map(Json)
 }
 
@@ -785,7 +690,7 @@ async fn complete_lesson(State(state): State<AppState>, auth: AuthUser, Path(id)
         return Err(AppError::bad("enrol in the course first"));
     }
     let course = lesson_course(&state, id).await?;
-    sqlx::query("INSERT INTO training_lesson_progress (lesson_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO training_lesson_progress (lesson_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, auth.id).execute(&state.db).await?;
     check_completion(&state, auth.id, course).await?;
     Ok(Json(json!({ "done": true, "progress": progress(&state, auth.id, course).await?, "next": v["next"] })))
 }
@@ -793,7 +698,7 @@ async fn complete_lesson(State(state): State<AppState>, auth: AuthUser, Path(id)
 async fn uncomplete_lesson(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let course = lesson_course(&state, id).await?;
     visible_course(&state, &auth, course).await?;
-    sqlx::query("DELETE FROM training_lesson_progress WHERE lesson_id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM training_lesson_progress WHERE lesson_id = $1 AND user_id = $2", id, auth.id).execute(&state.db).await?;
     Ok(Json(json!({ "done": false, "progress": progress(&state, auth.id, course).await? })))
 }
 
@@ -849,7 +754,7 @@ async fn get_certificate(State(state): State<AppState>, auth: AuthUser, Path(id)
     if c.user_id != auth.id && !manager(&auth) {
         return Err(AppError::NotFound("certificate"));
     }
-    let company: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
+    let company: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     let company = company.and_then(|v| v.as_str().map(String::from));
     Ok(Json(json!({ "certificate": c, "company": company, "can_manage": manager(&auth) })))
 }
@@ -857,9 +762,9 @@ async fn get_certificate(State(state): State<AppState>, auth: AuthUser, Path(id)
 /// Revoke (a mistake): the course counts as not completed until it is completed again.
 async fn revoke_certificate(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as("DELETE FROM training_certificates WHERE id = $1 RETURNING course_id, user_id").bind(id).fetch_optional(&state.db).await?;
+    let row: Option<(Uuid, Uuid)> = sqlx::query!(r#"DELETE FROM training_certificates WHERE id = $1 RETURNING course_id, user_id"#, id).map(|r| (r.course_id, r.user_id)).fetch_optional(&state.db).await?;
     let (course, user) = row.ok_or(AppError::NotFound("certificate"))?;
-    sqlx::query("UPDATE training_enrolments SET completed_at = NULL WHERE course_id = $1 AND user_id = $2").bind(course).bind(user).execute(&state.db).await?;
+    sqlx::query!("UPDATE training_enrolments SET completed_at = NULL WHERE course_id = $1 AND user_id = $2", course, user).execute(&state.db).await?;
     crate::audit::record(&state.db, Some(auth.id), "training.certificate_revoke", "user", Some(user.to_string()), json!({ "course": course }), None).await;
     Ok(Json(json!({ "ok": true })))
 }

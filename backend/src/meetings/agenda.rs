@@ -67,11 +67,8 @@ pub(super) async fn agenda_json(state: &AppState, meeting: Uuid) -> AppResult<Va
         .fetch_all(&state.db)
         .await?;
     let ids: Vec<Uuid> = entries.iter().map(|e| e.id).collect();
-    let reports: Vec<(Uuid, Uuid, String, String, Vec<Uuid>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT r.agenda_id, r.user_id, u.first_name || ' ' || u.last_name, r.body, r.file_ids, r.updated_at
-         FROM meeting_reports r JOIN users u ON u.id = r.user_id WHERE r.agenda_id = ANY($1) ORDER BY r.created_at",
-    )
-    .bind(&ids)
+    let reports: Vec<(Uuid, Uuid, String, String, Vec<Uuid>, DateTime<Utc>)> = sqlx::query!(r#"SELECT r.agenda_id AS "agenda_id!", r.user_id AS "user_id!", u.first_name || ' ' || u.last_name AS "c2!", r.body AS "body!", r.file_ids AS "file_ids!", r.updated_at AS "updated_at!"
+         FROM meeting_reports r JOIN users u ON u.id = r.user_id WHERE r.agenda_id = ANY($1) ORDER BY r.created_at"#, &ids).map(|r| (r.agenda_id, r.user_id, r.c2, r.body, r.file_ids, r.updated_at))
     .fetch_all(&state.db)
     .await?;
     let people: Vec<Uuid> = entries.iter().flat_map(|e| e.responsible_ids.iter().copied().chain(e.proposed_by)).collect();
@@ -83,10 +80,10 @@ pub(super) async fn agenda_json(state: &AppState, meeting: Uuid) -> AppResult<Va
             Some(t) => sqlx::query_as("SELECT id, number, title, status FROM tasks WHERE id = $1").bind(t).fetch_optional(&state.db).await?,
             None => None,
         };
-        let earlier: i64 = sqlx::query_scalar("SELECT count(*) FROM meeting_agenda WHERE topic_id = $1 AND id <> $2").bind(e.topic_id).bind(e.id).fetch_one(&state.db).await?;
+        let earlier: i64 = sqlx::query_scalar!(r#"SELECT count(*) AS "v!" FROM meeting_agenda WHERE topic_id = $1 AND id <> $2"#, e.topic_id, e.id).fetch_one(&state.db).await?;
         let mut rs = Vec::new();
         for (_, uid, uname, body, file_ids, at) in reports.iter().filter(|r| r.0 == e.id) {
-            let files: Vec<(Uuid, String, i64)> = sqlx::query_as("SELECT id, original_name, size_bytes FROM files WHERE id = ANY($1)").bind(file_ids).fetch_all(&state.db).await?;
+            let files: Vec<(Uuid, String, i64)> = sqlx::query!(r#"SELECT id, original_name, size_bytes FROM files WHERE id = ANY($1)"#, file_ids).map(|r| (r.id, r.original_name, r.size_bytes)).fetch_all(&state.db).await?;
             rs.push(json!({ "user_id": uid, "name": uname, "body": body, "updated_at": at,
                             "files": files.into_iter().map(|(id, n, s)| json!({ "id": id, "name": n, "size": s })).collect::<Vec<_>>() }));
         }
@@ -111,7 +108,7 @@ async fn check_responsible(state: &AppState, meeting: Uuid, ids: &[Uuid]) -> App
         if out.contains(u) {
             continue;
         }
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM meeting_members WHERE meeting_id = $1 AND user_id = $2)").bind(meeting).bind(u).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM meeting_members WHERE meeting_id = $1 AND user_id = $2) AS "v!""#, meeting, u).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("the people presenting a topic take part in the meeting"));
         }
@@ -172,25 +169,15 @@ async fn add(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>
             return Err(AppError::bad("sub-points go under a topic of this meeting (one level deep)"));
         }
     }
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM meeting_agenda WHERE meeting_id = $1").bind(id).fetch_one(&state.db).await?;
+    let count: i64 = sqlx::query_scalar!(r#"SELECT count(*) AS "v!" FROM meeting_agenda WHERE meeting_id = $1"#, id).fetch_one(&state.db).await?;
     if count >= 300 {
         return Err(AppError::bad("at most 300 agenda items"));
     }
-    let sort: i32 = sqlx::query_scalar::<_, Option<i32>>("SELECT max(sort) FROM meeting_agenda WHERE meeting_id = $1").bind(id).fetch_one(&state.db).await?.unwrap_or(0) + 10;
+    let sort: i32 = sqlx::query_scalar!(r#"SELECT max(sort) AS "v?" FROM meeting_agenda WHERE meeting_id = $1"#, id).fetch_one(&state.db).await?.unwrap_or(0) + 10;
     let mut tx = state.db.begin().await?;
-    let topic: Uuid = sqlx::query_scalar("INSERT INTO meeting_topics (title, created_by) VALUES ($1, $2) RETURNING id").bind(&title).bind(auth.id).fetch_one(&mut *tx).await?;
-    sqlx::query(
-        "INSERT INTO meeting_agenda (meeting_id, topic_id, parent_id, sort, description, responsible_ids, duration_minutes, proposed_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(id)
-    .bind(topic)
-    .bind(b.parent_id)
-    .bind(sort)
-    .bind(&description)
-    .bind(&responsible)
-    .bind(duration)
-    .bind(auth.id)
+    let topic: Uuid = sqlx::query_scalar!("INSERT INTO meeting_topics (title, created_by) VALUES ($1, $2) RETURNING id", &title, auth.id).fetch_one(&mut *tx).await?;
+    sqlx::query!("INSERT INTO meeting_agenda (meeting_id, topic_id, parent_id, sort, description, responsible_ids, duration_minutes, proposed_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", id, topic, b.parent_id, sort, description.as_deref(), &responsible, duration, auth.id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -211,7 +198,7 @@ async fn change(State(state): State<AppState>, auth: AuthUser, Path(aid): Path<U
     }
     if let Some(t) = &b.title {
         let t = required("title", t, 300)?;
-        sqlx::query("UPDATE meeting_topics SET title = $2 WHERE id = $1").bind(e.topic_id).bind(t).execute(&state.db).await?;
+        sqlx::query!("UPDATE meeting_topics SET title = $2 WHERE id = $1", e.topic_id, t).execute(&state.db).await?;
     }
     let status = match b.status.as_deref() {
         Some(s) if ["open", "done"].contains(&s) => Some(s.to_string()),
@@ -227,21 +214,10 @@ async fn change(State(state): State<AppState>, auth: AuthUser, Path(aid): Path<U
         None => None,
     };
     let duration = b.duration_minutes.map(check_minutes).transpose()?;
-    sqlx::query(
-        "UPDATE meeting_agenda SET description = CASE WHEN $2 THEN $3 ELSE description END, responsible_ids = COALESCE($4, responsible_ids),
+    sqlx::query!("UPDATE meeting_agenda SET description = CASE WHEN $2 THEN $3 ELSE description END, responsible_ids = COALESCE($4, responsible_ids),
              duration_minutes = CASE WHEN $5 THEN $6 ELSE duration_minutes END, decision = CASE WHEN $7 THEN $8 ELSE decision END,
              status = COALESCE($9, status)
-         WHERE id = $1",
-    )
-    .bind(aid)
-    .bind(b.description.is_some())
-    .bind(clean(b.description.flatten()))
-    .bind(&responsible)
-    .bind(duration.is_some())
-    .bind(duration.flatten())
-    .bind(decision.is_some())
-    .bind(decision.flatten())
-    .bind(status)
+         WHERE id = $1", aid, b.description.is_some(), clean(b.description.flatten()), responsible.as_deref(), duration.is_some(), duration.flatten(), decision.is_some(), decision.flatten(), status)
     .execute(&state.db)
     .await?;
     if let Some(r) = responsible {
@@ -260,9 +236,9 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(aid): Path<U
     if !(p.runs() || own) {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("DELETE FROM meeting_agenda WHERE id = $1").bind(aid).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM meeting_agenda WHERE id = $1", aid).execute(&state.db).await?;
     // A topic that is on no agenda any more is gone.
-    sqlx::query("DELETE FROM meeting_topics t WHERE t.id = $1 AND NOT EXISTS (SELECT 1 FROM meeting_agenda a WHERE a.topic_id = t.id)").bind(e.topic_id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM meeting_topics t WHERE t.id = $1 AND NOT EXISTS (SELECT 1 FROM meeting_agenda a WHERE a.topic_id = t.id)", e.topic_id).execute(&state.db).await?;
     get_meeting(State(state), auth, Path(e.meeting_id)).await
 }
 
@@ -279,7 +255,7 @@ async fn order(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     not_closed(&m)?;
     let mut tx = state.db.begin().await?;
     for (i, aid) in b.ids.iter().enumerate() {
-        sqlx::query("UPDATE meeting_agenda SET sort = $3 WHERE id = $1 AND meeting_id = $2").bind(aid).bind(id).bind((i as i32 + 1) * 10).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE meeting_agenda SET sort = $3 WHERE id = $1 AND meeting_id = $2", aid, id, (i as i32 + 1) * 10).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     get_meeting(State(state), auth, Path(id)).await
@@ -313,9 +289,7 @@ async fn make_task(State(state): State<AppState>, auth: AuthUser, Path(aid): Pat
     }
     // In the meeting's workgroup when the person making it works there (the keeper may not).
     let project = match m.project_id {
-        Some(p) => sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2 AND role <> 'viewer')")
-            .bind(p)
-            .bind(auth.id)
+        Some(p) => sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2 AND role <> 'viewer') AS "v!""#, p, auth.id)
             .fetch_one(&state.db)
             .await?
             .then_some(p),
@@ -330,7 +304,7 @@ async fn make_task(State(state): State<AppState>, auth: AuthUser, Path(aid): Pat
         ..Default::default()
     })
     .await?;
-    sqlx::query("UPDATE meeting_agenda SET task_id = $2 WHERE id = $1").bind(aid).bind(task).execute(&state.db).await?;
+    sqlx::query!("UPDATE meeting_agenda SET task_id = $2 WHERE id = $1", aid, task).execute(&state.db).await?;
     get_meeting(State(state), auth, Path(e.meeting_id)).await
 }
 
@@ -353,21 +327,13 @@ async fn write_report(State(state): State<AppState>, auth: AuthUser, Path(aid): 
     if b.file_ids.len() > 20 {
         return Err(AppError::bad("at most 20 files"));
     }
-    let current: Vec<Uuid> = sqlx::query_scalar::<_, Vec<Uuid>>("SELECT file_ids FROM meeting_reports WHERE agenda_id = $1 AND user_id = $2")
-        .bind(aid)
-        .bind(auth.id)
+    let current: Vec<Uuid> = sqlx::query_scalar!("SELECT file_ids FROM meeting_reports WHERE agenda_id = $1 AND user_id = $2", aid, auth.id)
         .fetch_optional(&state.db)
         .await?
         .unwrap_or_default();
     super::own_files(&state, &auth, &b.file_ids, &current).await?;
-    sqlx::query(
-        "INSERT INTO meeting_reports (agenda_id, user_id, body, file_ids) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (agenda_id, user_id) DO UPDATE SET body = EXCLUDED.body, file_ids = EXCLUDED.file_ids, updated_at = now()",
-    )
-    .bind(aid)
-    .bind(auth.id)
-    .bind(&body)
-    .bind(&b.file_ids)
+    sqlx::query!("INSERT INTO meeting_reports (agenda_id, user_id, body, file_ids) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (agenda_id, user_id) DO UPDATE SET body = EXCLUDED.body, file_ids = EXCLUDED.file_ids, updated_at = now()", aid, auth.id, &body, &b.file_ids)
     .execute(&state.db)
     .await?;
     get_meeting(State(state), auth, Path(e.meeting_id)).await
@@ -377,7 +343,7 @@ async fn drop_report(State(state): State<AppState>, auth: AuthUser, Path(aid): P
     let e = entry(&state, aid).await?;
     let (m, _) = visible(&state, &auth, e.meeting_id).await?;
     not_closed(&m)?;
-    sqlx::query("DELETE FROM meeting_reports WHERE agenda_id = $1 AND user_id = $2").bind(aid).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM meeting_reports WHERE agenda_id = $1 AND user_id = $2", aid, auth.id).execute(&state.db).await?;
     get_meeting(State(state), auth, Path(e.meeting_id)).await
 }
 
@@ -389,29 +355,23 @@ async fn drop_report_of(State(state): State<AppState>, auth: AuthUser, Path((aid
         return Err(AppError::Forbidden);
     }
     not_closed(&m)?;
-    sqlx::query("DELETE FROM meeting_reports WHERE agenda_id = $1 AND user_id = $2").bind(aid).bind(user).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM meeting_reports WHERE agenda_id = $1 AND user_id = $2", aid, user).execute(&state.db).await?;
     get_meeting(State(state), auth, Path(e.meeting_id)).await
 }
 
 /// Every meeting a topic came up in (that this person may see): reports, decisions, status.
 async fn history(State(state): State<AppState>, auth: AuthUser, Path(topic): Path<Uuid>) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, Uuid, String, DateTime<Utc>, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT a.id, m.id, m.title, m.starts_at, m.state, a.decision, a.status FROM meeting_agenda a JOIN meetings m ON m.id = a.meeting_id
-         WHERE a.topic_id = $1 ORDER BY m.starts_at",
-    )
-    .bind(topic)
+    let rows: Vec<(Uuid, Uuid, String, DateTime<Utc>, String, Option<String>, String)> = sqlx::query!(r#"SELECT a.id, m.id AS "c1", m.title, m.starts_at, m.state, a.decision, a.status FROM meeting_agenda a JOIN meetings m ON m.id = a.meeting_id
+         WHERE a.topic_id = $1 ORDER BY m.starts_at"#, topic).map(|r| (r.id, r.c1, r.title, r.starts_at, r.state, r.decision, r.status))
     .fetch_all(&state.db)
     .await?;
-    let title: Option<String> = sqlx::query_scalar("SELECT title FROM meeting_topics WHERE id = $1").bind(topic).fetch_optional(&state.db).await?;
+    let title: Option<String> = sqlx::query_scalar!("SELECT title FROM meeting_topics WHERE id = $1", topic).fetch_optional(&state.db).await?;
     let mut items = Vec::new();
     for (aid, mid, mtitle, starts, mstate, decision, status) in rows {
         if visible(&state, &auth, mid).await.is_err() {
             continue;
         }
-        let reports: Vec<(String, String)> = sqlx::query_as(
-            "SELECT u.first_name || ' ' || u.last_name, r.body FROM meeting_reports r JOIN users u ON u.id = r.user_id WHERE r.agenda_id = $1 ORDER BY r.created_at",
-        )
-        .bind(aid)
+        let reports: Vec<(String, String)> = sqlx::query!(r#"SELECT u.first_name || ' ' || u.last_name AS "c0!", r.body AS "body!" FROM meeting_reports r JOIN users u ON u.id = r.user_id WHERE r.agenda_id = $1 ORDER BY r.created_at"#, aid).map(|r| (r.c0, r.body))
         .fetch_all(&state.db)
         .await?;
         items.push(json!({ "meeting": { "id": mid, "title": mtitle, "starts_at": starts, "state": mstate }, "decision": decision, "status": status,
@@ -430,7 +390,7 @@ pub(super) async fn carry_over(state: &AppState, from: Uuid, to: Uuid) -> AppRes
         .bind(from)
         .fetch_all(&state.db)
         .await?;
-    let members: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM meeting_members WHERE meeting_id = $1").bind(to).fetch_all(&state.db).await?;
+    let members: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM meeting_members WHERE meeting_id = $1", to).fetch_all(&state.db).await?;
     let mut mapped: Vec<(Uuid, Uuid)> = Vec::new();
     let mut tx = state.db.begin().await?;
     for e in &entries {
@@ -442,21 +402,11 @@ pub(super) async fn carry_over(state: &AppState, from: Uuid, to: Uuid) -> AppRes
             None => None,
         };
         let responsible: Vec<Uuid> = e.responsible_ids.iter().copied().filter(|u| members.contains(u)).collect();
-        let new: Uuid = sqlx::query_scalar(
-            "INSERT INTO meeting_agenda (meeting_id, topic_id, parent_id, sort, description, responsible_ids, duration_minutes, proposed_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-        )
-        .bind(to)
-        .bind(e.topic_id)
-        .bind(parent)
-        .bind(e.sort)
-        .bind(&e.description)
-        .bind(&responsible)
-        .bind(e.duration_minutes)
-        .bind(e.proposed_by)
+        let new: Uuid = sqlx::query_scalar!("INSERT INTO meeting_agenda (meeting_id, topic_id, parent_id, sort, description, responsible_ids, duration_minutes, proposed_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id", to, e.topic_id, parent, e.sort, e.description.as_deref(), &responsible, e.duration_minutes, e.proposed_by)
         .fetch_one(&mut *tx)
         .await?;
-        sqlx::query("UPDATE meeting_agenda SET status = 'carried' WHERE id = $1").bind(e.id).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE meeting_agenda SET status = 'carried' WHERE id = $1", e.id).execute(&mut *tx).await?;
         mapped.push((e.id, new));
     }
     tx.commit().await?;

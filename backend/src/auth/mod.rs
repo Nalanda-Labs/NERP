@@ -78,7 +78,7 @@ pub async fn invalidate_authz(state: &AppState, user_ids: &[Uuid]) -> AppResult<
 
 /// An active person acting without a request of their own (automation acting for them).
 pub async fn load_auth_user(state: &AppState, user_id: Uuid) -> AppResult<AuthUser> {
-    let active: bool = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1").bind(user_id).fetch_optional(&state.db).await?.unwrap_or(false);
+    let active: bool = sqlx::query_scalar!("SELECT is_active FROM users WHERE id = $1", user_id).fetch_optional(&state.db).await?.unwrap_or(false);
     if !active {
         return Err(AppError::bad("that person is no longer active"));
     }
@@ -87,16 +87,13 @@ pub async fn load_auth_user(state: &AppState, user_id: Uuid) -> AppResult<AuthUs
 }
 
 pub async fn load_permissions(state: &AppState, user_id: Uuid) -> AppResult<Vec<String>> {
-    let mut perms = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT rp.permission FROM user_roles ur
+    let mut perms = sqlx::query_scalar!("SELECT DISTINCT rp.permission FROM user_roles ur
          JOIN role_permissions rp ON rp.role_id = ur.role_id
-         WHERE ur.user_id = $1",
-    )
-    .bind(user_id)
+         WHERE ur.user_id = $1", user_id)
     .fetch_all(&state.db)
     .await?;
     // A guest from outside the company carries a marker (never a grantable permission).
-    let guest: bool = sqlx::query_scalar("SELECT is_guest FROM users WHERE id = $1").bind(user_id).fetch_optional(&state.db).await?.unwrap_or(false);
+    let guest: bool = sqlx::query_scalar!("SELECT is_guest FROM users WHERE id = $1", user_id).fetch_optional(&state.db).await?.unwrap_or(false);
     if guest {
         perms.retain(|p| p != permissions::ALL);
         perms.push(GUEST.into());
@@ -132,8 +129,7 @@ async fn load_authz(state: &AppState, user_id: Uuid) -> AppResult<Option<AuthzEn
     }
 
     let row: Option<(bool, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as("SELECT is_active, password_changed_at FROM users WHERE id = $1")
-            .bind(user_id)
+        sqlx::query!(r#"SELECT is_active, password_changed_at FROM users WHERE id = $1"#, user_id).map(|r| (r.is_active, r.password_changed_at))
             .fetch_optional(&state.db)
             .await?;
     let Some((active, changed_at)) = row else {
@@ -153,8 +149,7 @@ async fn load_authz(state: &AppState, user_id: Uuid) -> AppResult<Option<AuthzEn
 /// Acts on behalf of a user outside a request (e.g. a scheduled job). `None` if the
 /// user no longer exists or is deactivated.
 pub async fn acting_as(state: &AppState, user_id: Uuid) -> AppResult<Option<AuthUser>> {
-    let active: Option<bool> = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1")
-        .bind(user_id)
+    let active: Option<bool> = sqlx::query_scalar!("SELECT is_active FROM users WHERE id = $1", user_id)
         .fetch_optional(&state.db)
         .await?;
     if active != Some(true) {
@@ -222,7 +217,7 @@ async fn identify(parts: &mut Parts, state: &AppState) -> Result<AuthUser, AppEr
         // When someone was last active (written at most every two minutes).
         let fresh: Option<String> = redis::cmd("SET").arg(format!("seen:{}", claims.sub)).arg(1).arg("NX").arg("EX").arg(120).query_async(&mut redis).await.unwrap_or(None);
         if fresh.is_some() {
-            let _ = sqlx::query("UPDATE users SET last_seen_at = now() WHERE id = $1").bind(claims.sub).execute(&state.db).await;
+            let _ = sqlx::query!("UPDATE users SET last_seen_at = now() WHERE id = $1", claims.sub).execute(&state.db).await;
         }
 
         Ok(AuthUser {

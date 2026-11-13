@@ -356,7 +356,7 @@ async fn list_mailboxes(State(state): State<AppState>, auth: AuthUser) -> AppRes
 
 async fn create_mailbox(State(state): State<AppState>, auth: AuthUser, Json(b): Json<MailboxBody>) -> AppResult<Json<Value>> {
     let s = settings(b, None)?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_mailboxes WHERE owner_id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_mailboxes WHERE owner_id = $1"#, auth.id).fetch_one(&state.db).await?;
     if n >= 10 {
         return Err(AppError::bad("at most 10 mailboxes per person"));
     }
@@ -367,30 +367,9 @@ async fn create_mailbox(State(state): State<AppState>, auth: AuthUser, Json(b): 
             [result.0.err().map(|e| format!("IMAP {e}")), result.1.err()].into_iter().flatten().collect::<Vec<_>>().join("; ")
         )));
     }
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_mailboxes (owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_mailboxes (owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
              username, secret, allow_invalid_certs, shared_with, create_leads, sync_days, sync_enabled, shared_roles, shared_departments)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id",
-    )
-    .bind(auth.id)
-    .bind(&s.email)
-    .bind(&s.display_name)
-    .bind(&s.imap_host)
-    .bind(s.imap_port)
-    .bind(&s.imap_security)
-    .bind(&s.smtp_host)
-    .bind(s.smtp_port)
-    .bind(&s.smtp_security)
-    .bind(s.smtp_auth)
-    .bind(&s.username)
-    .bind(crypto::seal(&state.config.data_key, &s.password))
-    .bind(s.allow_invalid_certs)
-    .bind(&s.shared_with)
-    .bind(s.create_leads)
-    .bind(s.sync_days)
-    .bind(s.sync_enabled)
-    .bind(&s.shared_roles)
-    .bind(&s.shared_departments)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id", auth.id, &s.email, &s.display_name, &s.imap_host, s.imap_port, &s.imap_security, &s.smtp_host, s.smtp_port, &s.smtp_security, s.smtp_auth, &s.username, crypto::seal(&state.config.data_key, &s.password), s.allow_invalid_certs, &s.shared_with, s.create_leads, s.sync_days, s.sync_enabled, &s.shared_roles, &s.shared_departments)
     .fetch_one(&state.db)
     .await?;
     crate::audit::record(&state.db, Some(auth.id), "crm.mailbox.connect", "crm_mailbox", Some(id.to_string()), json!({ "email": s.email }), None).await;
@@ -410,18 +389,8 @@ async fn update_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
         if !(0..=365).contains(&days) {
             return Err(AppError::bad("import between 0 and 365 days of mail"));
         }
-        sqlx::query(
-            "UPDATE crm_mailboxes SET display_name = $2, shared_with = $3, create_leads = $4, sync_days = $5, sync_enabled = $6,
-                 shared_roles = $7, shared_departments = $8, updated_at = now() WHERE id = $1",
-        )
-        .bind(id)
-        .bind(b.display_name.unwrap_or(cur.display_name).trim().chars().take(200).collect::<String>())
-        .bind(b.shared_with.unwrap_or(cur.shared_with).into_iter().take(100).collect::<Vec<_>>())
-        .bind(b.create_leads.unwrap_or(cur.create_leads))
-        .bind(days)
-        .bind(b.sync_enabled.unwrap_or(cur.sync_enabled))
-        .bind(b.shared_roles.unwrap_or(cur.shared_roles).into_iter().take(50).collect::<Vec<_>>())
-        .bind(b.shared_departments.unwrap_or(cur.shared_departments).into_iter().take(100).collect::<Vec<_>>())
+        sqlx::query!("UPDATE crm_mailboxes SET display_name = $2, shared_with = $3, create_leads = $4, sync_days = $5, sync_enabled = $6,
+                 shared_roles = $7, shared_departments = $8, updated_at = now() WHERE id = $1", id, b.display_name.unwrap_or(cur.display_name).trim().chars().take(200).collect::<String>(), &(b.shared_with.unwrap_or(cur.shared_with).into_iter().take(100).collect::<Vec<_>>()), b.create_leads.unwrap_or(cur.create_leads), days, b.sync_enabled.unwrap_or(cur.sync_enabled), &(b.shared_roles.unwrap_or(cur.shared_roles).into_iter().take(50).collect::<Vec<_>>()), &(b.shared_departments.unwrap_or(cur.shared_departments).into_iter().take(100).collect::<Vec<_>>()))
         .execute(&state.db)
         .await?;
         return Ok(Json(serde_json::to_value(load_mailbox(&state, id).await?).unwrap()));
@@ -439,33 +408,11 @@ async fn update_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
     }
     // A different server or account means a fresh start for folder positions.
     let reset = s.imap_host != cur.imap_host || s.username != cur.username;
-    sqlx::query(
-        "UPDATE crm_mailboxes SET email = $2, display_name = $3, imap_host = $4, imap_port = $5, imap_security = $6, smtp_host = $7, smtp_port = $8,
+    sqlx::query!("UPDATE crm_mailboxes SET email = $2, display_name = $3, imap_host = $4, imap_port = $5, imap_security = $6, smtp_host = $7, smtp_port = $8,
              smtp_security = $9, smtp_auth = $10, username = $11, secret = $12, allow_invalid_certs = $13, shared_with = $14, create_leads = $15,
              sync_days = $16, sync_enabled = $17, shared_roles = $19, shared_departments = $20, last_error = NULL,
              folders = CASE WHEN $18 THEN '{}'::jsonb ELSE folders END, sent_folder = CASE WHEN $18 THEN NULL ELSE sent_folder END, updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(&s.email)
-    .bind(&s.display_name)
-    .bind(&s.imap_host)
-    .bind(s.imap_port)
-    .bind(&s.imap_security)
-    .bind(&s.smtp_host)
-    .bind(s.smtp_port)
-    .bind(&s.smtp_security)
-    .bind(s.smtp_auth)
-    .bind(&s.username)
-    .bind(crypto::seal(&state.config.data_key, &s.password))
-    .bind(s.allow_invalid_certs)
-    .bind(&s.shared_with)
-    .bind(s.create_leads)
-    .bind(s.sync_days)
-    .bind(s.sync_enabled)
-    .bind(reset)
-    .bind(&s.shared_roles)
-    .bind(&s.shared_departments)
+         WHERE id = $1", id, &s.email, &s.display_name, &s.imap_host, s.imap_port, &s.imap_security, &s.smtp_host, s.smtp_port, &s.smtp_security, s.smtp_auth, &s.username, crypto::seal(&state.config.data_key, &s.password), s.allow_invalid_certs, &s.shared_with, s.create_leads, s.sync_days, s.sync_enabled, reset, &s.shared_roles, &s.shared_departments)
     .execute(&state.db)
     .await?;
     Ok(Json(serde_json::to_value(load_mailbox(&state, id).await?).unwrap()))
@@ -477,7 +424,7 @@ async fn delete_mailbox(State(state): State<AppState>, auth: AuthUser, Path(id):
         return Err(AppError::NotFound("mailbox"));
     }
     // Filed emails stay on their records.
-    sqlx::query("DELETE FROM crm_mailboxes WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_mailboxes WHERE id = $1", id).execute(&state.db).await?;
     crate::audit::record(&state.db, Some(auth.id), "crm.mailbox.disconnect", "crm_mailbox", Some(id.to_string()), json!({ "email": cur.email }), None).await;
     Ok(Json(json!({ "ok": true })))
 }
@@ -511,7 +458,7 @@ async fn sync_now(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 
 /// Recurring: queue a sync for every enabled mailbox.
 pub async fn run_poll(state: &AppState) -> anyhow::Result<()> {
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM crm_mailboxes WHERE sync_enabled").fetch_all(&state.db).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_mailboxes WHERE sync_enabled").fetch_all(&state.db).await?;
     for id in ids {
         queue_sync(state, id).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     }
@@ -526,9 +473,7 @@ pub async fn run_sync(state: &AppState, payload: &Value) -> anyhow::Result<()> {
             Err(_) => return Ok(()),
         };
         let r = sync::sync(state, &mb).await;
-        sqlx::query("UPDATE crm_mailboxes SET last_sync_at = now(), last_error = $2 WHERE id = $1")
-            .bind(id)
-            .bind(r.as_ref().err())
+        sqlx::query!("UPDATE crm_mailboxes SET last_sync_at = now(), last_error = $2 WHERE id = $1", id, r.as_ref().err())
             .execute(&state.db)
             .await?;
         match r {
@@ -556,22 +501,19 @@ pub async fn run_sync(state: &AppState, payload: &Value) -> anyhow::Result<()> {
 /// (a to-do for incoming mail; done for outgoing, which also closes the conversation's
 /// open incoming email activities).
 async fn file_on_records(state: &AppState, email: Uuid, items: &[Uuid], author: Option<Uuid>) -> AppResult<()> {
-    let e: (String, String, String, String, Uuid, Option<Uuid>) = sqlx::query_as(
-        "SELECT direction, subject, from_addr, snippet, thread_id, mailbox_id FROM crm_emails WHERE id = $1",
-    )
-    .bind(email)
+    let e: (String, String, String, String, Uuid, Option<Uuid>) = sqlx::query!(r#"SELECT direction, subject, from_addr, snippet, thread_id, mailbox_id FROM crm_emails WHERE id = $1"#, email).map(|r| (r.direction, r.subject, r.from_addr, r.snippet, r.thread_id, r.mailbox_id))
     .fetch_one(&state.db)
     .await?;
     let (direction, subject, from, snippet, thread, mailbox) = e;
     let owner: Option<Uuid> = match mailbox {
-        Some(m) => sqlx::query_scalar("SELECT owner_id FROM crm_mailboxes WHERE id = $1").bind(m).fetch_optional(&state.db).await?,
+        Some(m) => sqlx::query_scalar!("SELECT owner_id FROM crm_mailboxes WHERE id = $1", m).fetch_optional(&state.db).await?,
         None => None,
     };
     let mut primary: Option<(Uuid, i16, Option<Uuid>, i32)> = None;
     for item in items {
-        sqlx::query("INSERT INTO crm_email_links (email_id, item_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(email).bind(item).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO crm_email_links (email_id, item_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", email, item).execute(&state.db).await?;
         timeline(&state.db, *item, "email", author, Some(subject.clone()), json!({ "email_id": email, "direction": direction, "from": from, "snippet": snippet })).await?;
-        sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(item).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", item).execute(&state.db).await?;
         let row = load_row(state, *item, false).await.ok();
         if let Some(r) = row {
             // Prefer an open pipeline record (deal, lead, smart process) over a contact/company.
@@ -585,26 +527,14 @@ async fn file_on_records(state: &AppState, email: Uuid, items: &[Uuid], author: 
     if let Some((item, _, assigned, _)) = primary {
         let incoming = direction == "in";
         if let Some(responsible) = assigned.or(owner).or(author) {
-            sqlx::query(
-                "INSERT INTO crm_activities (item_id, kind, subject, direction, responsible_id, created_by, email_id, is_completed, completed_at, deadline)
-                 VALUES ($1, 'email', $2, $3, $4, $5, $6, $7, CASE WHEN $7 THEN now() END, CASE WHEN NOT $7 THEN now() + interval '1 day' END)",
-            )
-            .bind(item)
-            .bind(if subject.is_empty() { "(no subject)".to_string() } else { subject.clone() })
-            .bind(if incoming { "incoming" } else { "outgoing" })
-            .bind(responsible)
-            .bind(author.unwrap_or(super::automation::SYSTEM_USER))
-            .bind(email)
-            .bind(!incoming)
+            sqlx::query!("INSERT INTO crm_activities (item_id, kind, subject, direction, responsible_id, created_by, email_id, is_completed, completed_at, deadline)
+                 VALUES ($1, 'email', $2, $3, $4, $5, $6, $7, CASE WHEN $7 THEN now() END, CASE WHEN NOT $7 THEN now() + interval '1 day' END)", item, if subject.is_empty() { "(no subject)".to_string() } else { subject.clone() }, if incoming { "incoming" } else { "outgoing" }, responsible, author.unwrap_or(super::automation::SYSTEM_USER), email, !incoming)
             .execute(&state.db)
             .await?;
         }
         if !incoming {
-            sqlx::query(
-                "UPDATE crm_activities SET is_completed = TRUE, completed_at = now(), result = 'replied', updated_at = now()
-                 WHERE NOT is_completed AND email_id IN (SELECT id FROM crm_emails WHERE thread_id = $1 AND direction = 'in')",
-            )
-            .bind(thread)
+            sqlx::query!("UPDATE crm_activities SET is_completed = TRUE, completed_at = now(), result = 'replied', updated_at = now()
+                 WHERE NOT is_completed AND email_id IN (SELECT id FROM crm_emails WHERE thread_id = $1 AND direction = 'in')", thread)
             .execute(&state.db)
             .await?;
         }
@@ -671,17 +601,14 @@ async fn recipients(State(state): State<AppState>, auth: AuthUser, Path(item): P
 
 /// Readable by whoever can read a record it is filed on, its sender, or the mailbox owner.
 async fn can_read_email(state: &AppState, auth: &AuthUser, email: Uuid) -> AppResult<bool> {
-    let (created_by, owner): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
-        "SELECT e.created_by, m.owner_id FROM crm_emails e LEFT JOIN crm_mailboxes m ON m.id = e.mailbox_id WHERE e.id = $1",
-    )
-    .bind(email)
+    let (created_by, owner): (Option<Uuid>, Option<Uuid>) = sqlx::query!(r#"SELECT e.created_by AS "created_by?", m.owner_id AS "owner_id?" FROM crm_emails e LEFT JOIN crm_mailboxes m ON m.id = e.mailbox_id WHERE e.id = $1"#, email).map(|r| (r.created_by, r.owner_id))
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("email"))?;
     if created_by == Some(auth.id) || owner == Some(auth.id) {
         return Ok(true);
     }
-    let items: Vec<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_email_links WHERE email_id = $1").bind(email).fetch_all(&state.db).await?;
+    let items: Vec<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_email_links WHERE email_id = $1", email).fetch_all(&state.db).await?;
     for i in items {
         if let Ok(r) = load_row(state, i, false).await
             && require(state, auth, r.entity_type, "read", r.assigned_to).await.is_ok() {
@@ -697,7 +624,7 @@ async fn get_email(State(state): State<AppState>, auth: AuthUser, Path(id): Path
     }
     let (summary, text, html, message_id): (Value, Option<String>, Option<String>, String) = {
         let s: EmailSummary = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {SUMMARY} FROM crm_emails e WHERE e.id = $1"))).bind(id).fetch_one(&state.db).await?;
-        let (t, h, m): (Option<String>, Option<String>, String) = sqlx::query_as("SELECT body_text, body_html, message_id FROM crm_emails WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+        let (t, h, m): (Option<String>, Option<String>, String) = sqlx::query!(r#"SELECT body_text, body_html, message_id FROM crm_emails WHERE id = $1"#, id).map(|r| (r.body_text, r.body_html, r.message_id)).fetch_one(&state.db).await?;
         (serde_json::to_value(s).unwrap(), t, h, m)
     };
     let mut v = summary;
@@ -709,7 +636,7 @@ async fn get_email(State(state): State<AppState>, auth: AuthUser, Path(id): Path
 
 /// Files module hook: attachments are readable like their email.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
-    let email: Option<Uuid> = sqlx::query_scalar("SELECT email_id FROM crm_email_files WHERE file_id = $1").bind(file).fetch_optional(&state.db).await?;
+    let email: Option<Uuid> = sqlx::query_scalar!("SELECT email_id FROM crm_email_files WHERE file_id = $1", file).fetch_optional(&state.db).await?;
     match email {
         Some(e) => can_read_email(state, auth, e).await,
         None => Ok(false),
@@ -781,13 +708,12 @@ pub async fn queue_send(
     let (thread_id, in_reply_to, refs, mut links, quoted) = match reply_to {
         Some(r) => {
             let (t, mid, mut refs, from, sent, text): (Uuid, String, Vec<String>, String, DateTime<Utc>, Option<String>) =
-                sqlx::query_as("SELECT thread_id, message_id, refs, from_addr, sent_at, body_text FROM crm_emails WHERE id = $1")
-                    .bind(r)
+                sqlx::query!(r#"SELECT thread_id, message_id, refs, from_addr, sent_at, body_text FROM crm_emails WHERE id = $1"#, r).map(|r| (r.thread_id, r.message_id, r.refs, r.from_addr, r.sent_at, r.body_text))
                     .fetch_optional(&state.db)
                     .await?
                     .ok_or_else(|| AppError::bad("the message you reply to does not exist"))?;
             refs.push(mid.clone());
-            let links: Vec<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_email_links WHERE email_id = $1").bind(r).fetch_all(&state.db).await?;
+            let links: Vec<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_email_links WHERE email_id = $1", r).fetch_all(&state.db).await?;
             let q = text.map(|t| format!("\n\nOn {}, {from} wrote:\n{}", sent.format("%Y-%m-%d %H:%M UTC"), t.lines().take(200).map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")));
             (t, Some(mid), refs, links, q)
         }
@@ -805,9 +731,7 @@ pub async fn queue_send(
     let mut atts = Vec::new();
     for f in file_ids.iter().take(20) {
         let (name, mime, owner, bytes) = files::read_bytes(state, *f).await?;
-        let doc: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_documents WHERE item_id = $1 AND (pdf_file_id = $2 OR source_file_id = $2))")
-            .bind(item)
-            .bind(f)
+        let doc: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_documents WHERE item_id = $1 AND (pdf_file_id = $2 OR source_file_id = $2)) AS "v!""#, item, f)
             .fetch_one(&state.db)
             .await?;
         if owner != Some(sender) && !doc {
@@ -816,35 +740,17 @@ pub async fn queue_send(
         atts.push(json!({ "file_id": f, "name": name, "size": bytes.len(), "mime": mime }));
     }
     let from_name = if mailbox.display_name.is_empty() {
-        sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1").bind(sender).fetch_optional(&state.db).await?.unwrap_or_default()
+        sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, sender).fetch_optional(&state.db).await?.unwrap_or_default()
     } else {
         mailbox.display_name.clone()
     };
-    sqlx::query(
-        "INSERT INTO crm_emails (id, mailbox_id, direction, status, message_id, in_reply_to, refs, thread_id, from_addr, from_name, to_addrs, cc_addrs,
+    sqlx::query!("INSERT INTO crm_emails (id, mailbox_id, direction, status, message_id, in_reply_to, refs, thread_id, from_addr, from_name, to_addrs, cc_addrs,
              subject, body_text, body_html, snippet, attachments, created_by)
-         VALUES ($1, $2, 'out', 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
-    )
-    .bind(id)
-    .bind(mailbox.id)
-    .bind(&message_id)
-    .bind(&in_reply_to)
-    .bind(&refs)
-    .bind(thread_id)
-    .bind(&mailbox.email)
-    .bind(&from_name)
-    .bind(json!(to.iter().map(|(a, n)| json!({ "address": a, "name": n })).collect::<Vec<_>>()))
-    .bind(json!(cc.iter().map(|(a, n)| json!({ "address": a, "name": n })).collect::<Vec<_>>()))
-    .bind(&subject)
-    .bind(&text)
-    .bind(&html)
-    .bind(sync::snippet(&text))
-    .bind(Value::Array(atts))
-    .bind(sender)
+         VALUES ($1, $2, 'out', 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)", id, mailbox.id, &message_id, in_reply_to.as_deref(), &refs, thread_id, &mailbox.email, &from_name, json!(to.iter().map(|(a, n)| json!({ "address": a, "name": n })).collect::<Vec<_>>()), json!(cc.iter().map(|(a, n)| json!({ "address": a, "name": n })).collect::<Vec<_>>()), &subject, &text, &html, sync::snippet(&text), Value::Array(atts), sender)
     .execute(&state.db)
     .await?;
     for l in &links {
-        sqlx::query("INSERT INTO crm_email_links (email_id, item_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(l).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO crm_email_links (email_id, item_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, l).execute(&state.db).await?;
     }
     jobs::enqueue(&state.db, SEND_JOB, json!({ "email_id": id }), None).await?;
     state.job_wakeup.notify_one();
@@ -863,8 +769,7 @@ async fn send_email(State(state): State<AppState>, auth: AuthUser, Path(item): P
 }
 
 async fn resend(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let (status, created_by): (String, Option<Uuid>) = sqlx::query_as("SELECT status, created_by FROM crm_emails WHERE id = $1")
-        .bind(id)
+    let (status, created_by): (String, Option<Uuid>) = sqlx::query!(r#"SELECT status, created_by FROM crm_emails WHERE id = $1"#, id).map(|r| (r.status, r.created_by))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("email"))?;
@@ -874,7 +779,7 @@ async fn resend(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if status != "failed" {
         return Err(AppError::bad("only failed messages can be sent again"));
     }
-    sqlx::query("UPDATE crm_emails SET status = 'queued', error = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_emails SET status = 'queued', error = NULL WHERE id = $1", id).execute(&state.db).await?;
     jobs::enqueue(&state.db, SEND_JOB, json!({ "email_id": id }), None).await?;
     state.job_wakeup.notify_one();
     get_email(State(state), auth, Path(id)).await
@@ -884,11 +789,8 @@ async fn resend(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 /// copy in the mailbox's sent folder.
 pub async fn run_send(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     let id: Uuid = serde_json::from_value(payload["email_id"].clone())?;
-    let row: Option<(Option<Uuid>, String, String, String, Option<String>, Vec<String>, String, String, Value, Value, String, String, Value, Option<Uuid>)> = sqlx::query_as(
-        "SELECT mailbox_id, status, from_addr, from_name, in_reply_to, refs, message_id, subject, to_addrs, cc_addrs, body_text, body_html, attachments, created_by
-         FROM crm_emails WHERE id = $1",
-    )
-    .bind(id)
+    let row: Option<(Option<Uuid>, String, String, String, Option<String>, Vec<String>, String, String, Value, Value, String, String, Value, Option<Uuid>)> = sqlx::query!(r#"SELECT mailbox_id AS "mailbox_id?", status AS "status!", from_addr AS "from_addr!", from_name AS "from_name!", in_reply_to AS "in_reply_to?", refs AS "refs!", message_id AS "message_id!", subject AS "subject!", to_addrs AS "to_addrs!", cc_addrs AS "cc_addrs!", body_text AS "body_text!", body_html AS "body_html!", attachments AS "attachments!", created_by AS "created_by?"
+         FROM crm_emails WHERE id = $1"#, id).map(|r| (r.mailbox_id, r.status, r.from_addr, r.from_name, r.in_reply_to, r.refs, r.message_id, r.subject, r.to_addrs, r.cc_addrs, r.body_text, r.body_html, r.attachments, r.created_by))
     .fetch_optional(&state.db)
     .await?;
     let Some((mailbox, status, from, from_name, in_reply_to, refs, message_id, subject, to, cc, text, html, atts, created_by)) = row else { return Ok(()) };
@@ -949,7 +851,7 @@ pub async fn run_send(state: &AppState, payload: &Value) -> anyhow::Result<()> {
             let folder = mb.sent_folder.clone().unwrap_or_else(|| "Sent".into());
             if mb.sent_folder.is_none() {
                 let _ = session.create(&folder).await;
-                let _ = sqlx::query("UPDATE crm_mailboxes SET sent_folder = $2 WHERE id = $1").bind(mb.id).bind(&folder).execute(&state.db).await;
+                let _ = sqlx::query!("UPDATE crm_mailboxes SET sent_folder = $2 WHERE id = $1", mb.id, &folder).execute(&state.db).await;
             }
             if let Err(e) = session.append(&folder, Some("(\\Seen)"), None, &raw).await {
                 tracing::debug!(error = %e, "could not keep a copy in the sent folder");
@@ -961,13 +863,13 @@ pub async fn run_send(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     .await;
     match result {
         Ok(()) => {
-            sqlx::query("UPDATE crm_emails SET status = 'sent', sent_at = now(), error = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
-            let links: Vec<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_email_links WHERE email_id = $1").bind(id).fetch_all(&state.db).await?;
+            sqlx::query!("UPDATE crm_emails SET status = 'sent', sent_at = now(), error = NULL WHERE id = $1", id).execute(&state.db).await?;
+            let links: Vec<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_email_links WHERE email_id = $1", id).fetch_all(&state.db).await?;
             file_on_records(state, id, &links, created_by).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
         }
         Err(e) => {
-            sqlx::query("UPDATE crm_emails SET status = 'failed', error = $2 WHERE id = $1").bind(id).bind(&e).execute(&state.db).await?;
-            let links: Vec<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_email_links WHERE email_id = $1").bind(id).fetch_all(&state.db).await?;
+            sqlx::query!("UPDATE crm_emails SET status = 'failed', error = $2 WHERE id = $1", id, &e).execute(&state.db).await?;
+            let links: Vec<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_email_links WHERE email_id = $1", id).fetch_all(&state.db).await?;
             for l in links {
                 if let Ok(r) = load_row(state, l, false).await {
                     broadcast(state, r.entity_type, l, false).await;

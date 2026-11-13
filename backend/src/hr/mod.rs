@@ -57,13 +57,10 @@ pub(crate) async fn managed(state: &AppState, auth: &AuthUser) -> AppResult<Opti
         return Ok(None);
     }
     Ok(Some(
-        sqlx::query_scalar(
-            "WITH RECURSIVE mine AS (SELECT id FROM departments WHERE head_user_id = $1 OR deputy_user_id = $1
+        sqlx::query_scalar!("WITH RECURSIVE mine AS (SELECT id FROM departments WHERE head_user_id = $1 OR deputy_user_id = $1
                                      UNION SELECT d.id FROM departments d JOIN mine m ON d.parent_id = m.id)
              SELECT DISTINCT ud.user_id FROM user_departments ud JOIN users u ON u.id = ud.user_id
-             WHERE ud.department_id IN (SELECT id FROM mine) AND ud.user_id <> $1 AND u.is_active",
-        )
-        .bind(auth.id)
+             WHERE ud.department_id IN (SELECT id FROM mine) AND ud.user_id <> $1 AND u.is_active", auth.id)
         .fetch_all(&state.db)
         .await?,
     ))
@@ -83,14 +80,11 @@ pub(crate) async fn manages(state: &AppState, auth: &AuthUser, user: Uuid) -> Ap
 /// managers when there are none.
 pub(crate) async fn approvers(state: &AppState, user: Uuid) -> AppResult<Vec<Uuid>> {
     // Heads above the person, with how many levels up; the nearest ones decide.
-    let above: Vec<(Uuid, i32)> = sqlx::query_as(
-        "WITH RECURSIVE up AS (
+    let above: Vec<(Uuid, i32)> = sqlx::query!(r#"WITH RECURSIVE up AS (
              SELECT d.parent_id, d.head_user_id, d.deputy_user_id, 0 AS n FROM departments d JOIN user_departments ud ON ud.department_id = d.id WHERE ud.user_id = $1
              UNION ALL SELECT p.parent_id, p.head_user_id, p.deputy_user_id, up.n + 1 FROM departments p JOIN up ON p.id = up.parent_id),
               who AS (SELECT head_user_id AS h, n FROM up UNION ALL SELECT deputy_user_id, n FROM up)
-         SELECT who.h, who.n FROM who JOIN users u ON u.id = who.h WHERE who.h <> $1 AND u.is_active",
-    )
-    .bind(user)
+         SELECT who.h AS "h!", who.n AS "n!" FROM who JOIN users u ON u.id = who.h WHERE who.h <> $1 AND u.is_active"#, user).map(|r| (r.h, r.n))
     .fetch_all(&state.db)
     .await?;
     let nearest = above.iter().map(|(_, n)| *n).min();
@@ -100,12 +94,8 @@ pub(crate) async fn approvers(state: &AppState, user: Uuid) -> AppResult<Vec<Uui
     if !heads.is_empty() {
         return Ok(heads);
     }
-    Ok(sqlx::query_scalar(
-        "SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id JOIN users u ON u.id = ur.user_id
-         WHERE rp.permission IN ($1, '*') AND u.is_active AND ur.user_id <> $2",
-    )
-    .bind(perm::HR)
-    .bind(user)
+    Ok(sqlx::query_scalar!("SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id JOIN users u ON u.id = ur.user_id
+         WHERE rp.permission IN ($1, '*') AND u.is_active AND ur.user_id <> $2", perm::HR, user)
     .fetch_all(&state.db)
     .await?)
 }
@@ -122,11 +112,11 @@ pub(crate) struct Settings {
 }
 
 pub(crate) async fn settings(state: &AppState) -> AppResult<Settings> {
-    Ok(sqlx::query_as("SELECT work_weekdays, workday_hours, annual_vacation_days FROM hr_settings").fetch_one(&state.db).await?)
+    Ok(sqlx::query_as!(Settings, "SELECT work_weekdays, workday_hours, annual_vacation_days FROM hr_settings").fetch_one(&state.db).await?)
 }
 
 pub(crate) async fn holidays(state: &AppState, from: NaiveDate, to: NaiveDate) -> AppResult<Vec<NaiveDate>> {
-    Ok(sqlx::query_scalar("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $2").bind(from).bind(to).fetch_all(&state.db).await?)
+    Ok(sqlx::query_scalar!("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $2", from, to).fetch_all(&state.db).await?)
 }
 
 /// Working days from `from` to `to`, both included.
@@ -175,7 +165,7 @@ async fn update_settings(State(state): State<AppState>, auth: AuthUser, Json(b):
 }
 
 async fn list_holidays(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
-    let rows: Vec<(NaiveDate, String)> = sqlx::query_as("SELECT day, name FROM hr_holidays WHERE day >= CURRENT_DATE - 366 ORDER BY day").fetch_all(&state.db).await?;
+    let rows: Vec<(NaiveDate, String)> = sqlx::query!(r#"SELECT day, name FROM hr_holidays WHERE day >= CURRENT_DATE - 366 ORDER BY day"#).map(|r| (r.day, r.name)).fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(d, n)| json!({ "day": d, "name": n })).collect::<Vec<_>>() })))
 }
 
@@ -188,13 +178,13 @@ struct HolidayInput {
 async fn add_holiday(State(state): State<AppState>, auth: AuthUser, Json(b): Json<HolidayInput>) -> AppResult<Json<Value>> {
     auth.require(perm::HR)?;
     let name = required("name", &b.name, 100)?;
-    sqlx::query("INSERT INTO hr_holidays (day, name) VALUES ($1, $2) ON CONFLICT (day) DO UPDATE SET name = $2").bind(b.day).bind(name).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO hr_holidays (day, name) VALUES ($1, $2) ON CONFLICT (day) DO UPDATE SET name = $2", b.day, name).execute(&state.db).await?;
     list_holidays(State(state), auth).await
 }
 
 async fn remove_holiday(State(state): State<AppState>, auth: AuthUser, Path(day): Path<NaiveDate>) -> AppResult<Json<Value>> {
     auth.require(perm::HR)?;
-    sqlx::query("DELETE FROM hr_holidays WHERE day = $1").bind(day).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM hr_holidays WHERE day = $1", day).execute(&state.db).await?;
     list_holidays(State(state), auth).await
 }
 
@@ -208,13 +198,10 @@ async fn set_allowance(State(state): State<AppState>, auth: AuthUser, Path((user
     auth.require(perm::HR)?;
     match b.days {
         None => {
-            sqlx::query("DELETE FROM hr_allowances WHERE user_id = $1 AND year = $2").bind(user).bind(year).execute(&state.db).await?;
+            sqlx::query!("DELETE FROM hr_allowances WHERE user_id = $1 AND year = $2", user, year).execute(&state.db).await?;
         }
         Some(d) if (0.0..=366.0).contains(&d) => {
-            sqlx::query("INSERT INTO hr_allowances (user_id, year, days) VALUES ($1, $2, $3) ON CONFLICT (user_id, year) DO UPDATE SET days = $3")
-                .bind(user)
-                .bind(year)
-                .bind(Decimal::try_from(d).unwrap_or_default().round_dp(1))
+            sqlx::query!("INSERT INTO hr_allowances (user_id, year, days) VALUES ($1, $2, $3) ON CONFLICT (user_id, year) DO UPDATE SET days = $3", user, year, Decimal::try_from(d).unwrap_or_default().round_dp(1))
                 .execute(&state.db)
                 .await?;
         }

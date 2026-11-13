@@ -77,7 +77,7 @@ fn require_manager(auth: &AuthUser) -> AppResult<()> {
 
 /// Whether another person may be given tickets (they work on the help desk).
 pub(crate) async fn is_worker(state: &AppState, user: Uuid) -> AppResult<bool> {
-    let active: bool = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1").bind(user).fetch_optional(&state.db).await?.unwrap_or(false);
+    let active: bool = sqlx::query_scalar!("SELECT is_active FROM users WHERE id = $1", user).fetch_optional(&state.db).await?.unwrap_or(false);
     if !active {
         return Ok(false);
     }
@@ -99,11 +99,11 @@ async fn check_worker(state: &AppState, user: Option<Uuid>, what: &str) -> AppRe
 
 async fn settings_json(state: &AppState) -> AppResult<Value> {
     let (mailbox, portal, intro, days, reopen, tz): (Option<Uuid>, bool, Option<String>, i32, bool, String) =
-        sqlx::query_as("SELECT mailbox_id, portal_enabled, portal_intro, auto_close_days, allow_reopen, timezone FROM support_settings WHERE id")
+        sqlx::query!(r#"SELECT mailbox_id, portal_enabled, portal_intro, auto_close_days, allow_reopen, timezone FROM support_settings WHERE id"#).map(|r| (r.mailbox_id, r.portal_enabled, r.portal_intro, r.auto_close_days, r.allow_reopen, r.timezone))
             .fetch_one(&state.db)
             .await?;
     let mailbox_email: Option<String> = match mailbox {
-        Some(m) => sqlx::query_scalar("SELECT email FROM crm_mailboxes WHERE id = $1").bind(m).fetch_optional(&state.db).await?,
+        Some(m) => sqlx::query_scalar!("SELECT email FROM crm_mailboxes WHERE id = $1", m).fetch_optional(&state.db).await?,
         None => None,
     };
     Ok(json!({ "mailbox_id": mailbox, "mailbox_email": mailbox_email, "portal_enabled": portal, "portal_intro": intro,
@@ -147,8 +147,7 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     if intro.as_ref().and_then(|i| i.as_ref()).is_some_and(|i| i.chars().count() > 5000) {
         return Err(AppError::bad("the introduction is too long"));
     }
-    sqlx::query(
-        "UPDATE support_settings SET
+    sqlx::query!("UPDATE support_settings SET
              mailbox_id = CASE WHEN $1 THEN $2 ELSE mailbox_id END,
              portal_enabled = COALESCE($3, portal_enabled),
              portal_intro = CASE WHEN $4 THEN $5 ELSE portal_intro END,
@@ -156,16 +155,7 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
              allow_reopen = COALESCE($7, allow_reopen),
              timezone = COALESCE($8, timezone),
              updated_at = now()
-         WHERE id",
-    )
-    .bind(b.mailbox_id.is_some())
-    .bind(b.mailbox_id.flatten())
-    .bind(b.portal_enabled)
-    .bind(intro.is_some())
-    .bind(intro.flatten())
-    .bind(b.auto_close_days)
-    .bind(b.allow_reopen)
-    .bind(b.timezone)
+         WHERE id", b.mailbox_id.is_some(), b.mailbox_id.flatten(), b.portal_enabled, intro.is_some(), intro.flatten(), b.auto_close_days, b.allow_reopen, b.timezone)
     .execute(&state.db)
     .await?;
     Ok(Json(settings_json(&state).await?))
@@ -175,7 +165,7 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
 async fn team(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require_worker(&auth)?;
     let users: Vec<(Uuid, String, Option<Uuid>)> =
-        sqlx::query_as("SELECT id, first_name || ' ' || last_name, avatar_file_id FROM users WHERE is_active AND NOT is_system ORDER BY first_name, last_name")
+        sqlx::query!(r#"SELECT id AS "id!", first_name || ' ' || last_name AS "c1!", avatar_file_id AS "avatar_file_id?" FROM users WHERE is_active AND NOT is_system ORDER BY first_name, last_name"#).map(|r| (r.id, r.c1, r.avatar_file_id))
             .fetch_all(&state.db)
             .await?;
     let mut items = Vec::new();
@@ -215,21 +205,19 @@ async fn list_dictionary(State(state): State<AppState>, _auth: AuthUser) -> AppR
 /// Checks that `id` is an entry of `kind`.
 pub(crate) async fn entry_of(state: &AppState, id: Option<Uuid>, kind: &str) -> AppResult<Option<Uuid>> {
     let Some(id) = id else { return Ok(None) };
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM support_dictionary WHERE id = $1 AND kind = $2)")
-        .bind(id)
-        .bind(kind)
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM support_dictionary WHERE id = $1 AND kind = $2) AS "v!""#, id, kind)
         .fetch_one(&state.db)
         .await?;
     if ok { Ok(Some(id)) } else { Err(AppError::bad(format!("unknown {kind}"))) }
 }
 
 pub(crate) async fn default_of(state: &AppState, kind: &str) -> AppResult<Option<Uuid>> {
-    Ok(sqlx::query_scalar("SELECT id FROM support_dictionary WHERE kind = $1 AND is_default ORDER BY sort LIMIT 1").bind(kind).fetch_optional(&state.db).await?)
+    Ok(sqlx::query_scalar!("SELECT id FROM support_dictionary WHERE kind = $1 AND is_default ORDER BY sort LIMIT 1", kind).fetch_optional(&state.db).await?)
 }
 
 pub(crate) async fn entry_name(state: &AppState, id: Option<Uuid>) -> AppResult<String> {
     Ok(match id {
-        Some(id) => sqlx::query_scalar("SELECT name FROM support_dictionary WHERE id = $1").bind(id).fetch_optional(&state.db).await?.unwrap_or_default(),
+        Some(id) => sqlx::query_scalar!("SELECT name FROM support_dictionary WHERE id = $1", id).fetch_optional(&state.db).await?.unwrap_or_default(),
         None => String::new(),
     })
 }
@@ -260,21 +248,13 @@ async fn create_entry(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     check_worker(&state, responsible, "the responsible person").await?;
     let sort = match b.sort {
         Some(s) => s,
-        None => sqlx::query_scalar::<_, Option<i32>>("SELECT max(sort) FROM support_dictionary WHERE kind = $1").bind(&kind).fetch_one(&state.db).await?.unwrap_or(0) + 100,
+        None => sqlx::query_scalar!(r#"SELECT max(sort) AS "v?" FROM support_dictionary WHERE kind = $1"#, &kind).fetch_one(&state.db).await?.unwrap_or(0) + 100,
     };
     let mut tx = state.db.begin().await?;
     if b.is_default == Some(true) {
-        sqlx::query("UPDATE support_dictionary SET is_default = FALSE WHERE kind = $1").bind(&kind).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE support_dictionary SET is_default = FALSE WHERE kind = $1", &kind).execute(&mut *tx).await?;
     }
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO support_dictionary (kind, name, description, sort, is_default, responsible_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-    )
-    .bind(&kind)
-    .bind(&name)
-    .bind(clean(b.description.flatten()))
-    .bind(sort)
-    .bind(b.is_default.unwrap_or(false))
-    .bind(responsible)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO support_dictionary (kind, name, description, sort, is_default, responsible_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", &kind, &name, clean(b.description.flatten()), sort, b.is_default.unwrap_or(false), responsible)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -292,7 +272,7 @@ async fn entry_json(state: &AppState, id: Uuid) -> AppResult<Json<Value>> {
 
 async fn update_entry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<EntryInput>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
-    let kind: String = sqlx::query_scalar("SELECT kind FROM support_dictionary WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("entry"))?;
+    let kind: String = sqlx::query_scalar!("SELECT kind FROM support_dictionary WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("entry"))?;
     let name = match b.name {
         Some(n) => Some(required("name", &n, 200)?),
         None => None,
@@ -305,21 +285,11 @@ async fn update_entry(State(state): State<AppState>, auth: AuthUser, Path(id): P
     }
     let mut tx = state.db.begin().await?;
     if b.is_default == Some(true) {
-        sqlx::query("UPDATE support_dictionary SET is_default = FALSE WHERE kind = $1 AND id <> $2").bind(&kind).bind(id).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE support_dictionary SET is_default = FALSE WHERE kind = $1 AND id <> $2", &kind, id).execute(&mut *tx).await?;
     }
-    sqlx::query(
-        "UPDATE support_dictionary SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END, sort = COALESCE($5, sort),
+    sqlx::query!("UPDATE support_dictionary SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END, sort = COALESCE($5, sort),
              is_default = COALESCE($6, is_default), responsible_id = CASE WHEN $7 THEN $8 ELSE responsible_id END
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(b.description.is_some())
-    .bind(clean(b.description.flatten()))
-    .bind(b.sort)
-    .bind(b.is_default)
-    .bind(b.responsible_id.is_some())
-    .bind(b.responsible_id.flatten())
+         WHERE id = $1", id, name, b.description.is_some(), clean(b.description.flatten()), b.sort, b.is_default, b.responsible_id.is_some(), b.responsible_id.flatten())
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -329,11 +299,10 @@ async fn update_entry(State(state): State<AppState>, auth: AuthUser, Path(id): P
 async fn delete_entry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
     // Tickets keep working without it (their field is cleared); SLAs stop matching it.
-    sqlx::query("UPDATE support_slas SET category_ids = array_remove(category_ids, $1), criticality_ids = array_remove(criticality_ids, $1)")
-        .bind(id)
+    sqlx::query!("UPDATE support_slas SET category_ids = array_remove(category_ids, $1), criticality_ids = array_remove(criticality_ids, $1)", id)
         .execute(&state.db)
         .await?;
-    let n = sqlx::query("DELETE FROM support_dictionary WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM support_dictionary WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("entry"));
     }
@@ -454,42 +423,15 @@ async fn save_sla(state: &AppState, id: Option<Uuid>, b: SlaInput) -> AppResult<
     );
     let id = match id {
         Some(id) => {
-            sqlx::query(
-                "UPDATE support_slas SET name = $2, description = $3, priority = $4, response_minutes = $5, notice_minutes = $6, responsible_id = $7,
-                     category_ids = $8, criticality_ids = $9, requesters = $10, hours = $11, skip_holidays = $12 WHERE id = $1",
-            )
-            .bind(id)
-            .bind(row.0)
-            .bind(row.1)
-            .bind(row.2)
-            .bind(row.3)
-            .bind(row.4)
-            .bind(row.5)
-            .bind(row.6)
-            .bind(row.7)
-            .bind(row.8)
-            .bind(row.9)
-            .bind(row.10)
+            sqlx::query!("UPDATE support_slas SET name = $2, description = $3, priority = $4, response_minutes = $5, notice_minutes = $6, responsible_id = $7,
+                     category_ids = $8, criticality_ids = $9, requesters = $10, hours = $11, skip_holidays = $12 WHERE id = $1", id, row.0, row.1, row.2, row.3, row.4, row.5, &row.6, &row.7, row.8, row.9, row.10)
             .execute(&state.db)
             .await?;
             id
         }
         None => {
-            sqlx::query_scalar(
-                "INSERT INTO support_slas (name, description, priority, response_minutes, notice_minutes, responsible_id, category_ids, criticality_ids,
-                     requesters, hours, skip_holidays) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
-            )
-            .bind(row.0)
-            .bind(row.1)
-            .bind(row.2)
-            .bind(row.3)
-            .bind(row.4)
-            .bind(row.5)
-            .bind(row.6)
-            .bind(row.7)
-            .bind(row.8)
-            .bind(row.9)
-            .bind(row.10)
+            sqlx::query_scalar!("INSERT INTO support_slas (name, description, priority, response_minutes, notice_minutes, responsible_id, category_ids, criticality_ids,
+                     requesters, hours, skip_holidays) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id", row.0, row.1, row.2, row.3, row.4, row.5, &row.6, &row.7, row.8, row.9, row.10)
             .fetch_one(&state.db)
             .await?
         }
@@ -516,13 +458,13 @@ async fn update_sla(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 
 async fn delete_sla(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
-    let default: bool = sqlx::query_scalar("SELECT is_default FROM support_slas WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("SLA"))?;
+    let default: bool = sqlx::query_scalar!("SELECT is_default FROM support_slas WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("SLA"))?;
     if default {
         return Err(AppError::bad("the default SLA covers every other ticket and cannot be removed"));
     }
     // Its open tickets move to the default agreement (deadlines stay as they were).
-    sqlx::query("UPDATE support_tickets SET sla_id = (SELECT id FROM support_slas WHERE is_default LIMIT 1) WHERE sla_id = $1").bind(id).execute(&state.db).await?;
-    sqlx::query("DELETE FROM support_slas WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE support_tickets SET sla_id = (SELECT id FROM support_slas WHERE is_default LIMIT 1) WHERE sla_id = $1", id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM support_slas WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -532,7 +474,7 @@ async fn delete_sla(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 
 async fn list_answers(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require_worker(&auth)?;
-    let rows: Vec<(Uuid, String, String, i32)> = sqlx::query_as("SELECT id, title, body, sort FROM support_answers ORDER BY sort, title").fetch_all(&state.db).await?;
+    let rows: Vec<(Uuid, String, String, i32)> = sqlx::query!(r#"SELECT id, title, body, sort FROM support_answers ORDER BY sort, title"#).map(|r| (r.id, r.title, r.body, r.sort)).fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, title, body, sort)| json!({ "id": id, "title": title, "body": body, "sort": sort })).collect::<Vec<_>>() })))
 }
 
@@ -547,11 +489,7 @@ async fn create_answer(State(state): State<AppState>, auth: AuthUser, Json(b): J
     require_manager(&auth)?;
     let title = required("title", &b.title.unwrap_or_default(), 200)?;
     let body = required("text", &b.body.unwrap_or_default(), 20_000)?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO support_answers (title, body, sort, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(&title)
-        .bind(&body)
-        .bind(b.sort.unwrap_or(100))
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO support_answers (title, body, sort, created_by) VALUES ($1, $2, $3, $4) RETURNING id", &title, &body, b.sort.unwrap_or(100), auth.id)
         .fetch_one(&state.db)
         .await?;
     Ok(Json(json!({ "id": id, "title": title, "body": body, "sort": b.sort.unwrap_or(100) })))
@@ -561,13 +499,7 @@ async fn update_answer(State(state): State<AppState>, auth: AuthUser, Path(id): 
     require_manager(&auth)?;
     let title = b.title.map(|t| required("title", &t, 200)).transpose()?;
     let body = b.body.map(|t| required("text", &t, 20_000)).transpose()?;
-    let row: Option<(String, String, i32)> = sqlx::query_as(
-        "UPDATE support_answers SET title = COALESCE($2, title), body = COALESCE($3, body), sort = COALESCE($4, sort) WHERE id = $1 RETURNING title, body, sort",
-    )
-    .bind(id)
-    .bind(title)
-    .bind(body)
-    .bind(b.sort)
+    let row: Option<(String, String, i32)> = sqlx::query!(r#"UPDATE support_answers SET title = COALESCE($2, title), body = COALESCE($3, body), sort = COALESCE($4, sort) WHERE id = $1 RETURNING title, body, sort"#, id, title, body, b.sort).map(|r| (r.title, r.body, r.sort))
     .fetch_optional(&state.db)
     .await?;
     let (title, body, sort) = row.ok_or(AppError::NotFound("answer"))?;
@@ -576,7 +508,7 @@ async fn update_answer(State(state): State<AppState>, auth: AuthUser, Path(id): 
 
 async fn delete_answer(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
-    sqlx::query("DELETE FROM support_answers WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM support_answers WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -587,13 +519,8 @@ async fn delete_answer(State(state): State<AppState>, auth: AuthUser, Path(id): 
 /// Files attached to ticket messages: support sees them all; the requester sees those on
 /// messages (not notes) of their own tickets.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM support_messages m JOIN support_tickets t ON t.id = m.ticket_id
-         WHERE $2 = ANY(m.file_ids) AND ($3 OR t.responsible_id = $1 OR (t.requester_id = $1 AND m.kind = 'message')))",
-    )
-    .bind(auth.id)
-    .bind(file)
-    .bind(worker(auth))
+    Ok(sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM support_messages m JOIN support_tickets t ON t.id = m.ticket_id
+         WHERE $2 = ANY(m.file_ids) AND ($3 OR t.responsible_id = $1 OR (t.requester_id = $1 AND m.kind = 'message'))) AS "v!""#, auth.id, file, worker(auth))
     .fetch_one(&state.db)
     .await?)
 }
@@ -613,38 +540,24 @@ async fn stats(State(state): State<AppState>, auth: AuthUser, Query(q): Query<St
     }
     let (start, end): (DateTime<Utc>, DateTime<Utc>) = (from.and_hms_opt(0, 0, 0).unwrap().and_utc(), (to + chrono::Duration::days(1)).and_hms_opt(0, 0, 0).unwrap().and_utc());
     let db = &state.db;
-    let (created, closed, auto_closed): (i64, i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE created_at >= $1 AND created_at < $2),
-                count(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2),
-                count(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2 AND auto_closed)
-         FROM support_tickets WHERE NOT is_spam",
-    )
-    .bind(start)
-    .bind(end)
+    let (created, closed, auto_closed): (i64, i64, i64) = sqlx::query!(r#"SELECT count(*) FILTER (WHERE created_at >= $1 AND created_at < $2) AS "c0!",
+                count(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2) AS "c1!",
+                count(*) FILTER (WHERE closed_at >= $1 AND closed_at < $2 AND auto_closed) AS "c2!"
+         FROM support_tickets WHERE NOT is_spam"#, start, end).map(|r| (r.c0, r.c1, r.c2))
     .fetch_one(db)
     .await?;
-    let (open, overdue, unassigned, on_hold): (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE is_overdue), count(*) FILTER (WHERE responsible_id IS NULL), count(*) FILTER (WHERE on_hold)
-         FROM support_tickets WHERE closed_at IS NULL AND NOT is_spam",
-    )
+    let (open, overdue, unassigned, on_hold): (i64, i64, i64, i64) = sqlx::query!(r#"SELECT count(*) AS "c0!", count(*) FILTER (WHERE is_overdue) AS "c1!", count(*) FILTER (WHERE responsible_id IS NULL) AS "c2!", count(*) FILTER (WHERE on_hold) AS "c3!"
+         FROM support_tickets WHERE closed_at IS NULL AND NOT is_spam"#).map(|r| (r.c0, r.c1, r.c2, r.c3))
     .fetch_one(db)
     .await?;
-    let (first_response, resolution): (Option<f64>, Option<f64>) = sqlx::query_as(
-        "SELECT (SELECT avg(extract(epoch FROM first_response_at - created_at) / 60)::float8 FROM support_tickets
-                 WHERE NOT is_spam AND created_at >= $1 AND created_at < $2 AND first_response_at IS NOT NULL),
+    let (first_response, resolution): (Option<f64>, Option<f64>) = sqlx::query!(r#"SELECT (SELECT avg(extract(epoch FROM first_response_at - created_at) / 60)::float8 FROM support_tickets
+                 WHERE NOT is_spam AND created_at >= $1 AND created_at < $2 AND first_response_at IS NOT NULL) AS "c0",
                 (SELECT avg(extract(epoch FROM closed_at - created_at) / 60)::float8 FROM support_tickets
-                 WHERE NOT is_spam AND closed_at >= $1 AND closed_at < $2)",
-    )
-    .bind(start)
-    .bind(end)
+                 WHERE NOT is_spam AND closed_at >= $1 AND closed_at < $2) AS "c1""#, start, end).map(|r| (r.c0, r.c1))
     .fetch_one(db)
     .await?;
-    let (replies, late_replies, minutes): (i64, i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE kind = 'message'), count(*) FILTER (WHERE kind = 'message' AND is_overdue), COALESCE(sum(minutes_spent), 0)::int8
-         FROM support_messages WHERE by_support AND created_at >= $1 AND created_at < $2",
-    )
-    .bind(start)
-    .bind(end)
+    let (replies, late_replies, minutes): (i64, i64, i64) = sqlx::query!(r#"SELECT count(*) FILTER (WHERE kind = 'message') AS "c0!", count(*) FILTER (WHERE kind = 'message' AND is_overdue) AS "c1!", COALESCE(sum(minutes_spent), 0)::int8 AS "c2!"
+         FROM support_messages WHERE by_support AND created_at >= $1 AND created_at < $2"#, start, end).map(|r| (r.c0, r.c1, r.c2))
     .fetch_one(db)
     .await?;
     let st = &state;
@@ -664,36 +577,24 @@ async fn stats(State(state): State<AppState>, auth: AuthUser, Query(q): Query<St
     let by_category = group("category_id").await?;
     let by_status = group("status_id").await?;
     let by_criticality = group("criticality_id").await?;
-    let people: Vec<(Option<Uuid>, Option<String>, i64, i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT t.responsible_id, u.first_name || ' ' || u.last_name,
-                count(*) FILTER (WHERE t.closed_at IS NULL), count(*) FILTER (WHERE t.closed_at IS NULL AND t.is_overdue),
-                count(*) FILTER (WHERE t.closed_at >= $1 AND t.closed_at < $2),
-                COALESCE((SELECT sum(m.minutes_spent) FROM support_messages m WHERE m.author_id = t.responsible_id AND m.created_at >= $1 AND m.created_at < $2), 0)::int8,
-                COALESCE((SELECT count(*) FROM support_messages m WHERE m.author_id = t.responsible_id AND m.by_support AND m.kind = 'message' AND m.is_overdue AND m.created_at >= $1 AND m.created_at < $2), 0)::int8
+    let people: Vec<(Option<Uuid>, Option<String>, i64, i64, i64, i64, i64)> = sqlx::query!(r#"SELECT t.responsible_id AS "responsible_id?", u.first_name || ' ' || u.last_name AS "c1?",
+                count(*) FILTER (WHERE t.closed_at IS NULL) AS "c2!", count(*) FILTER (WHERE t.closed_at IS NULL AND t.is_overdue) AS "c3!",
+                count(*) FILTER (WHERE t.closed_at >= $1 AND t.closed_at < $2) AS "c4!",
+                COALESCE((SELECT sum(m.minutes_spent) FROM support_messages m WHERE m.author_id = t.responsible_id AND m.created_at >= $1 AND m.created_at < $2), 0)::int8 AS "c5!",
+                COALESCE((SELECT count(*) FROM support_messages m WHERE m.author_id = t.responsible_id AND m.by_support AND m.kind = 'message' AND m.is_overdue AND m.created_at >= $1 AND m.created_at < $2), 0)::int8 AS "c6!"
          FROM support_tickets t LEFT JOIN users u ON u.id = t.responsible_id
          WHERE NOT t.is_spam AND (t.closed_at IS NULL OR (t.closed_at >= $1 AND t.closed_at < $2))
-         GROUP BY t.responsible_id, u.first_name, u.last_name ORDER BY u.first_name NULLS LAST",
-    )
-    .bind(start)
-    .bind(end)
+         GROUP BY t.responsible_id, u.first_name, u.last_name ORDER BY u.first_name NULLS LAST"#, start, end).map(|r| (r.responsible_id, r.c1, r.c2, r.c3, r.c4, r.c5, r.c6))
     .fetch_all(db)
     .await?;
-    let marks: Vec<(Uuid, String, i64)> = sqlx::query_as(
-        "SELECT d.id, d.name, count(t.id) FROM support_dictionary d
+    let marks: Vec<(Uuid, String, i64)> = sqlx::query!(r#"SELECT d.id AS "id!", d.name AS "name!", count(t.id) AS "c2!" FROM support_dictionary d
          LEFT JOIN support_tickets t ON t.mark_id = d.id AND t.closed_at >= $1 AND t.closed_at < $2
-         WHERE d.kind = 'mark' GROUP BY d.id, d.name, d.sort ORDER BY d.sort",
-    )
-    .bind(start)
-    .bind(end)
+         WHERE d.kind = 'mark' GROUP BY d.id, d.name, d.sort ORDER BY d.sort"#, start, end).map(|r| (r.id, r.name, r.c2))
     .fetch_all(db)
     .await?;
-    let daily: Vec<(NaiveDate, i64, i64)> = sqlx::query_as(
-        "SELECT d::date, (SELECT count(*) FROM support_tickets WHERE NOT is_spam AND created_at >= d AND created_at < d + interval '1 day'),
-                (SELECT count(*) FROM support_tickets WHERE NOT is_spam AND closed_at >= d AND closed_at < d + interval '1 day')
-         FROM generate_series($1::timestamptz, $2::timestamptz - interval '1 day', interval '1 day') d ORDER BY d",
-    )
-    .bind(start)
-    .bind(end)
+    let daily: Vec<(NaiveDate, i64, i64)> = sqlx::query!(r#"SELECT d::date AS "c0!", (SELECT count(*) FROM support_tickets WHERE NOT is_spam AND created_at >= d AND created_at < d + interval '1 day') AS "c1!",
+                (SELECT count(*) FROM support_tickets WHERE NOT is_spam AND closed_at >= d AND closed_at < d + interval '1 day') AS "c2!"
+         FROM generate_series($1::timestamptz, $2::timestamptz - interval '1 day', interval '1 day') d ORDER BY d"#, start, end).map(|r| (r.c0, r.c1, r.c2))
     .fetch_all(db)
     .await?;
     Ok(Json(json!({

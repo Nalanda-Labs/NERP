@@ -209,8 +209,7 @@ pub async fn copy_out(state: &AppState, f: &FileMeta, dest: &std::path::Path) ->
 
 /// Deletes a server-managed file (row and disk). Missing files are ignored.
 pub async fn delete_stored(state: &AppState, id: Uuid) {
-    let path: Option<String> = sqlx::query_scalar("DELETE FROM files WHERE id = $1 RETURNING storage_path")
-        .bind(id)
+    let path: Option<String> = sqlx::query_scalar!("DELETE FROM files WHERE id = $1 RETURNING storage_path", id)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -254,8 +253,7 @@ async fn list(
         auth.require(perm::FILES_MANAGE)?;
     }
     let owner = if all { None } else { Some(auth.id) };
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files WHERE ($1::uuid IS NULL OR owner_id = $1)")
-        .bind(owner)
+    let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM files WHERE ($1::uuid IS NULL OR owner_id = $1)"#, owner)
         .fetch_one(&state.db)
         .await?;
     let items: Vec<FileMeta> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -553,7 +551,7 @@ async fn remove(
         }
         auth.require(perm::FILES_MANAGE)?;
     }
-    sqlx::query("DELETE FROM files WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM files WHERE id = $1", id).execute(&state.db).await?;
     crate::blob::discard(&state, &file.storage_path).await;
     audit::record(&state.db, Some(auth.id), "file.delete", "file", Some(id.to_string()), json!({ "name": file.original_name }), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))

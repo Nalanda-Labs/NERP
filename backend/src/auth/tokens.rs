@@ -96,20 +96,10 @@ pub fn decode_access_token(state: &AppState, token: &str) -> AppResult<Claims> {
 
 async fn store_session(state: &AppState, sid: Uuid, data: &SessionData) -> AppResult<()> {
     let ttl = state.config.refresh_token_ttl_secs;
-    sqlx::query(
-        "INSERT INTO auth_sessions (id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent, expires_at)
+    sqlx::query!("INSERT INTO auth_sessions (id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent, expires_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8))
          ON CONFLICT (id) DO UPDATE SET refresh_hash = EXCLUDED.refresh_hash, last_used_at = EXCLUDED.last_used_at,
-             ip = EXCLUDED.ip, user_agent = EXCLUDED.user_agent, expires_at = EXCLUDED.expires_at",
-    )
-    .bind(sid)
-    .bind(data.user_id)
-    .bind(&data.refresh_hash)
-    .bind(data.created_at)
-    .bind(data.last_used_at)
-    .bind(&data.ip)
-    .bind(&data.user_agent)
-    .bind(ttl as f64)
+             ip = EXCLUDED.ip, user_agent = EXCLUDED.user_agent, expires_at = EXCLUDED.expires_at", sid, data.user_id, &data.refresh_hash, data.created_at, data.last_used_at, data.ip.as_deref(), data.user_agent.as_deref(), ttl as f64)
     .execute(&state.db)
     .await?;
     cache_session(state, sid, data).await;
@@ -156,10 +146,7 @@ pub async fn get_session(state: &AppState, sid: Uuid) -> AppResult<Option<Sessio
     if let Some(d) = raw.and_then(|r| serde_json::from_str(&r).ok()) {
         return Ok(Some(d));
     }
-    let row: Option<SessionRow> = sqlx::query_as(
-        "SELECT user_id, refresh_hash, created_at, last_used_at, ip, user_agent FROM auth_sessions WHERE id = $1 AND expires_at > now()",
-    )
-    .bind(sid)
+    let row: Option<SessionRow> = sqlx::query!(r#"SELECT user_id, refresh_hash, created_at, last_used_at, ip, user_agent FROM auth_sessions WHERE id = $1 AND expires_at > now()"#, sid).map(|r| (r.user_id, r.refresh_hash, r.created_at, r.last_used_at, r.ip, r.user_agent))
     .fetch_optional(&state.db)
     .await?;
     let data = row.map(from_row);
@@ -188,24 +175,16 @@ pub async fn rotate_refresh_token(
     let new_token = random_token(32);
     let ttl = state.config.refresh_token_ttl_secs;
     // One statement: of two requests with the same token, only one gets the session.
-    let row: Option<(Uuid, SessionRow)> = sqlx::query_as::<_, (Uuid, Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, Option<String>)>(
-        "UPDATE auth_sessions SET refresh_hash = $2, last_used_at = now(), ip = COALESCE($3, ip), user_agent = COALESCE($4, user_agent),
+    let row: Option<(Uuid, SessionRow)> = sqlx::query!(r#"UPDATE auth_sessions SET refresh_hash = $2, last_used_at = now(), ip = COALESCE($3, ip), user_agent = COALESCE($4, user_agent),
              expires_at = now() + make_interval(secs => $5)
          WHERE refresh_hash = $1 AND expires_at > now()
-         RETURNING id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent",
-    )
-    .bind(&hash)
-    .bind(hash_token(&new_token))
-    .bind(&meta.ip)
-    .bind(meta.user_agent.as_ref().map(|u| u.chars().take(400).collect::<String>()))
-    .bind(ttl as f64)
+         RETURNING id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent"#, &hash, hash_token(&new_token), meta.ip.as_deref(), meta.user_agent.as_ref().map(|u| u.chars().take(400).collect::<String>()), ttl as f64).map(|r| (r.id, r.user_id, r.refresh_hash, r.created_at, r.last_used_at, r.ip, r.user_agent))
     .fetch_optional(&state.db)
     .await?
     .map(|r| (r.0, (r.1, r.2, r.3, r.4, r.5, r.6)));
     let Some((sid, row)) = row else {
         // An exchanged token presented again: past the grace period, assume it was stolen.
-        let used: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as("SELECT session_id, used_at FROM auth_used_refresh WHERE hash = $1 AND expires_at > now()")
-            .bind(&hash)
+        let used: Option<(Uuid, DateTime<Utc>)> = sqlx::query!(r#"SELECT session_id, used_at FROM auth_used_refresh WHERE hash = $1 AND expires_at > now()"#, &hash).map(|r| (r.session_id, r.used_at))
             .fetch_optional(&state.db)
             .await?;
         if let Some((sid, at)) = used
@@ -226,10 +205,7 @@ pub async fn rotate_refresh_token(
             }
         return Ok(None);
     };
-    sqlx::query("INSERT INTO auth_used_refresh (hash, session_id, used_at, expires_at) VALUES ($1, $2, now(), now() + make_interval(secs => $3)) ON CONFLICT (hash) DO NOTHING")
-        .bind(&hash)
-        .bind(sid)
-        .bind(ttl as f64)
+    sqlx::query!("INSERT INTO auth_used_refresh (hash, session_id, used_at, expires_at) VALUES ($1, $2, now(), now() + make_interval(secs => $3)) ON CONFLICT (hash) DO NOTHING", &hash, sid, ttl as f64)
         .execute(&state.db)
         .await?;
     let data = from_row(row);
@@ -239,7 +215,7 @@ pub async fn rotate_refresh_token(
 
 /// Ends one session: its refresh token stops working and its access tokens are rejected.
 pub async fn revoke_session(state: &AppState, sid: Uuid) -> AppResult<()> {
-    let user: Option<Uuid> = sqlx::query_scalar("DELETE FROM auth_sessions WHERE id = $1 RETURNING user_id").bind(sid).fetch_optional(&state.db).await?;
+    let user: Option<Uuid> = sqlx::query_scalar!("DELETE FROM auth_sessions WHERE id = $1 RETURNING user_id", sid).fetch_optional(&state.db).await?;
     // Redis's copy goes too (tried a few times; if Redis can't be reached, the copy runs out
     // within CACHE_SECS and the session is gone from the database already).
     let mut redis = state.redis.clone();
@@ -277,7 +253,7 @@ pub async fn revoke_session(state: &AppState, sid: Uuid) -> AppResult<()> {
 
 /// Signs a user out everywhere, optionally keeping one session.
 pub async fn revoke_all_sessions(state: &AppState, user_id: Uuid, keep: Option<Uuid>) -> AppResult<()> {
-    let sids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM auth_sessions WHERE user_id = $1").bind(user_id).fetch_all(&state.db).await?;
+    let sids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM auth_sessions WHERE user_id = $1", user_id).fetch_all(&state.db).await?;
     for sid in sids {
         if Some(sid) != keep {
             revoke_session(state, sid).await?;
@@ -288,11 +264,8 @@ pub async fn revoke_all_sessions(state: &AppState, user_id: Uuid, keep: Option<U
 
 /// Lists live sessions, newest use first.
 pub async fn list_sessions(state: &AppState, user_id: Uuid) -> AppResult<Vec<(Uuid, SessionData)>> {
-    let rows: Vec<(Uuid, Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent FROM auth_sessions
-         WHERE user_id = $1 AND expires_at > now() ORDER BY last_used_at DESC",
-    )
-    .bind(user_id)
+    let rows: Vec<(Uuid, Uuid, String, DateTime<Utc>, DateTime<Utc>, Option<String>, Option<String>)> = sqlx::query!(r#"SELECT id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent FROM auth_sessions
+         WHERE user_id = $1 AND expires_at > now() ORDER BY last_used_at DESC"#, user_id).map(|r| (r.id, r.user_id, r.refresh_hash, r.created_at, r.last_used_at, r.ip, r.user_agent))
     .fetch_all(&state.db)
     .await?;
     Ok(rows.into_iter().map(|r| (r.0, from_row((r.1, r.2, r.3, r.4, r.5, r.6)))).collect())
@@ -319,19 +292,9 @@ pub async fn adopt_redis_sessions(state: &AppState) -> anyhow::Result<()> {
         if ttl <= 0 {
             continue;
         }
-        let done = sqlx::query(
-            "INSERT INTO auth_sessions (id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent, expires_at)
+        let done = sqlx::query!("INSERT INTO auth_sessions (id, user_id, refresh_hash, created_at, last_used_at, ip, user_agent, expires_at)
              SELECT $1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8) WHERE EXISTS (SELECT 1 FROM users WHERE id = $2)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(sid)
-        .bind(d.user_id)
-        .bind(&d.refresh_hash)
-        .bind(d.created_at)
-        .bind(d.last_used_at)
-        .bind(&d.ip)
-        .bind(&d.user_agent)
-        .bind(ttl as f64)
+             ON CONFLICT DO NOTHING", sid, d.user_id, &d.refresh_hash, d.created_at, d.last_used_at, d.ip.as_deref(), d.user_agent.as_deref(), ttl as f64)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -361,9 +324,9 @@ pub const CLEANUP_JOB: &str = "auth.cleanup";
 
 /// Daily: expired sessions and tokens go.
 pub async fn cleanup(state: &AppState) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM auth_sessions WHERE expires_at < now()").execute(&state.db).await?;
-    sqlx::query("DELETE FROM auth_used_refresh WHERE expires_at < now()").execute(&state.db).await?;
-    sqlx::query("DELETE FROM auth_link_tokens WHERE expires_at < now()").execute(&state.db).await?;
+    sqlx::query!("DELETE FROM auth_sessions WHERE expires_at < now()").execute(&state.db).await?;
+    sqlx::query!("DELETE FROM auth_used_refresh WHERE expires_at < now()").execute(&state.db).await?;
+    sqlx::query!("DELETE FROM auth_link_tokens WHERE expires_at < now()").execute(&state.db).await?;
     Ok(())
 }
 
@@ -407,13 +370,8 @@ pub async fn issue_link_token(
 ) -> AppResult<String> {
     let token = random_token(32);
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM auth_link_tokens WHERE scope = $1 AND owner_id = $2").bind(scope).bind(owner).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO auth_link_tokens (hash, scope, owner_id, value, expires_at) VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))")
-        .bind(hash_token(&token))
-        .bind(scope)
-        .bind(owner)
-        .bind(value)
-        .bind(ttl_secs as f64)
+    sqlx::query!("DELETE FROM auth_link_tokens WHERE scope = $1 AND owner_id = $2", scope, owner).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO auth_link_tokens (hash, scope, owner_id, value, expires_at) VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))", hash_token(&token), scope, owner, value, ttl_secs as f64)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -421,22 +379,18 @@ pub async fn issue_link_token(
 }
 
 pub async fn peek_link_token(state: &AppState, scope: &str, token: &str) -> AppResult<Option<serde_json::Value>> {
-    Ok(sqlx::query_scalar("SELECT value FROM auth_link_tokens WHERE hash = $1 AND scope = $2 AND expires_at > now()")
-        .bind(hash_token(token))
-        .bind(scope)
+    Ok(sqlx::query_scalar!("SELECT value FROM auth_link_tokens WHERE hash = $1 AND scope = $2 AND expires_at > now()", hash_token(token), scope)
         .fetch_optional(&state.db)
         .await?)
 }
 
 pub async fn consume_link_token(state: &AppState, scope: &str, token: &str) -> AppResult<Option<serde_json::Value>> {
-    Ok(sqlx::query_scalar("DELETE FROM auth_link_tokens WHERE hash = $1 AND scope = $2 AND expires_at > now() RETURNING value")
-        .bind(hash_token(token))
-        .bind(scope)
+    Ok(sqlx::query_scalar!("DELETE FROM auth_link_tokens WHERE hash = $1 AND scope = $2 AND expires_at > now() RETURNING value", hash_token(token), scope)
         .fetch_optional(&state.db)
         .await?)
 }
 
 pub async fn revoke_link_tokens(state: &AppState, scope: &str, owner: Uuid) -> AppResult<()> {
-    sqlx::query("DELETE FROM auth_link_tokens WHERE scope = $1 AND owner_id = $2").bind(scope).bind(owner).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM auth_link_tokens WHERE scope = $1 AND owner_id = $2", scope, owner).execute(&state.db).await?;
     Ok(())
 }

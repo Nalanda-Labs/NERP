@@ -28,7 +28,7 @@ pub fn router() -> Router<AppState> {
 
 async fn system(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::SYSTEM_MANAGE)?;
-    let counts: Vec<(String, i64)> = sqlx::query_as("SELECT status, COUNT(*) FROM jobs GROUP BY status")
+    let counts: Vec<(String, i64)> = sqlx::query!(r#"SELECT status AS "status!", COUNT(*) AS "c1!" FROM jobs GROUP BY status"#).map(|r| (r.status, r.c1))
         .fetch_all(&state.db)
         .await?;
     let counts: serde_json::Map<String, Value> = counts.into_iter().map(|(s, c)| (s, json!(c))).collect();
@@ -99,22 +99,12 @@ async fn list_jobs(
     auth.require(perm::SYSTEM_MANAGE)?;
     let status = clean(q.status);
     let kind = clean(q.kind);
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM jobs WHERE ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR kind = $2)",
-    )
-    .bind(&status)
-    .bind(&kind)
+    let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM jobs WHERE ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR kind = $2)"#, status.as_deref(), kind.as_deref())
     .fetch_one(&state.db)
     .await?;
-    let items: Vec<JobRow> = sqlx::query_as(
-        "SELECT id, kind, payload, status, run_at, attempts, max_attempts, locked_by, last_error, created_at, updated_at
+    let items: Vec<JobRow> = sqlx::query_as!(JobRow, r#"SELECT id, kind, payload, status, run_at, attempts, max_attempts, locked_by AS "locked_by?", last_error AS "last_error?", created_at, updated_at
          FROM jobs WHERE ($1::text IS NULL OR status = $1) AND ($2::text IS NULL OR kind = $2)
-         ORDER BY created_at DESC LIMIT $3 OFFSET $4",
-    )
-    .bind(&status)
-    .bind(&kind)
-    .bind(q.page.limit())
-    .bind(q.page.offset())
+         ORDER BY created_at DESC LIMIT $3 OFFSET $4"#, status.as_deref(), kind.as_deref(), q.page.limit(), q.page.offset())
     .fetch_all(&state.db)
     .await?;
     Ok(Json(Page {
@@ -127,11 +117,8 @@ async fn list_jobs(
 
 async fn retry_job(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     auth.require(perm::SYSTEM_MANAGE)?;
-    let n = sqlx::query(
-        "UPDATE jobs SET status = 'pending', attempts = 0, run_at = now(), last_error = NULL, updated_at = now()
-         WHERE id = $1 AND status = 'failed'",
-    )
-    .bind(id)
+    let n = sqlx::query!("UPDATE jobs SET status = 'pending', attempts = 0, run_at = now(), last_error = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'failed'", id)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -155,8 +142,7 @@ async fn test_email(
     auth.require(perm::SYSTEM_MANAGE)?;
     let to = match clean(body.to) {
         Some(t) => super::normalize_email(&t)?,
-        None => sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-            .bind(auth.id)
+        None => sqlx::query_scalar!("SELECT email FROM users WHERE id = $1", auth.id)
             .fetch_one(&state.db)
             .await?,
     };

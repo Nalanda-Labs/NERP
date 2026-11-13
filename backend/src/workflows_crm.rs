@@ -40,7 +40,7 @@ pub(crate) async fn fields(state: &AppState, et: i16) -> AppResult<Vec<Field>> {
     let t = entity_type_by_id(state, et).await?;
     let mut out = vec![field("title", "Title", "string", vec![]), field("comments", "Comments", "text", vec![]), field("source", "Source", "string", vec![])];
     if t.has_stages {
-        let stages: Vec<String> = sqlx::query_scalar("SELECT DISTINCT s.name FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE c.entity_type = $1 ORDER BY 1").bind(et).fetch_all(&state.db).await?;
+        let stages: Vec<String> = sqlx::query_scalar!("SELECT DISTINCT s.name FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE c.entity_type = $1 ORDER BY 1", et).fetch_all(&state.db).await?;
         out.push(field("stage", "Stage", "select", stages));
     }
     if t.has_amount {
@@ -101,7 +101,7 @@ pub(crate) async fn set_field(state: &AppState, item: Uuid, code: &str, value: &
     let empty = value.trim().is_empty();
     match code {
         "stage" => {
-            let stage: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_stages WHERE category_id = $1 AND lower(name) = lower($2) LIMIT 1").bind(r.category_id).bind(value.trim()).fetch_optional(&state.db).await?;
+            let stage: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_stages WHERE category_id = $1 AND lower(name) = lower($2) LIMIT 1", r.category_id, value.trim()).fetch_optional(&state.db).await?;
             let Some(s) = stage else { return Err(AppError::bad(format!("no stage “{value}” in the record's pipeline"))) };
             body.insert("stage_id".into(), json!(s));
         }
@@ -137,15 +137,9 @@ pub async fn on_record(state: &AppState, auth: &AuthUser, et: i16, item: Uuid, t
     if auth.id == SYSTEM_USER {
         return;
     }
-    let templates: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT t.id FROM wf_templates t WHERE t.crm_entity_type = $1 AND t.trigger = $2 AND t.is_active
+    let templates: Vec<Uuid> = sqlx::query_scalar!("SELECT t.id FROM wf_templates t WHERE t.crm_entity_type = $1 AND t.trigger = $2 AND t.is_active
            AND (cardinality(t.test_users) = 0 OR $4 = ANY(t.test_users))
-           AND NOT EXISTS (SELECT 1 FROM wf_instances w WHERE w.template_id = t.id AND w.crm_item_id = $3 AND w.status IN ('running', 'waiting'))",
-    )
-    .bind(et)
-    .bind(trigger)
-    .bind(item)
-    .bind(auth.id)
+           AND NOT EXISTS (SELECT 1 FROM wf_instances w WHERE w.template_id = t.id AND w.crm_item_id = $3 AND w.status IN ('running', 'waiting'))", et, trigger, item, auth.id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
@@ -161,7 +155,7 @@ async fn list_templates(State(state): State<AppState>, auth: AuthUser, Path(code
     let t = entity_type(&state, &code).await?;
     access::require_any(&state, &auth, t.id, "read").await?;
     let rows: Vec<(Uuid, String, String, Value, bool, Vec<Uuid>)> =
-        sqlx::query_as("SELECT id, name, trigger, steps, is_active, test_users FROM wf_templates WHERE crm_entity_type = $1 ORDER BY name").bind(t.id).fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT id, name, trigger, steps, is_active, test_users FROM wf_templates WHERE crm_entity_type = $1 ORDER BY name"#, t.id).map(|r| (r.id, r.name, r.trigger, r.steps, r.is_active, r.test_users)).fetch_all(&state.db).await?;
     let fs = fields(&state, t.id).await?;
     Ok(Json(json!({
         "items": rows.into_iter().map(|(id, n, tr, st, a, tu)| json!({ "id": id, "name": n, "trigger": tr, "steps": st, "is_active": a, "test_users": tu })).collect::<Vec<_>>(),
@@ -183,11 +177,7 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Path(cod
 async fn record_processes(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let r = load_row(&state, id, false).await?;
     access::require_read(&state, &auth, r.entity_type, id, r.assigned_to).await?;
-    let manual: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, name FROM wf_templates WHERE crm_entity_type = $1 AND trigger = 'manual' AND is_active AND (cardinality(test_users) = 0 OR $2 = ANY(test_users)) ORDER BY name",
-    )
-    .bind(r.entity_type)
-    .bind(auth.id)
+    let manual: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id, name FROM wf_templates WHERE crm_entity_type = $1 AND trigger = 'manual' AND is_active AND (cardinality(test_users) = 0 OR $2 = ANY(test_users)) ORDER BY name"#, r.entity_type, auth.id).map(|r| (r.id, r.name))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -199,16 +189,13 @@ async fn record_processes(State(state): State<AppState>, auth: AuthUser, Path(id
 async fn start_manual(State(state): State<AppState>, auth: AuthUser, Path((id, template)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
     let r = load_row(&state, id, false).await?;
     access::require(&state, &auth, r.entity_type, "write", r.assigned_to).await?;
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM wf_templates WHERE id = $1 AND crm_entity_type = $2 AND is_active AND (cardinality(test_users) = 0 OR $3 = ANY(test_users)))")
-        .bind(template)
-        .bind(r.entity_type)
-        .bind(auth.id)
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM wf_templates WHERE id = $1 AND crm_entity_type = $2 AND is_active AND (cardinality(test_users) = 0 OR $3 = ANY(test_users))) AS "v!""#, template, r.entity_type, auth.id)
         .fetch_one(&state.db)
         .await?;
     if !ok {
         return Err(AppError::NotFound("process"));
     }
-    let running: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM wf_instances WHERE template_id = $1 AND crm_item_id = $2 AND status IN ('running', 'waiting'))").bind(template).bind(id).fetch_one(&state.db).await?;
+    let running: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM wf_instances WHERE template_id = $1 AND crm_item_id = $2 AND status IN ('running', 'waiting')) AS "v!""#, template, id).fetch_one(&state.db).await?;
     if running {
         return Err(AppError::bad("this process is already running on the record"));
     }

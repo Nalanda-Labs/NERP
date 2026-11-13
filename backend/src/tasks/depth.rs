@@ -54,12 +54,12 @@ pub fn router() -> Router<AppState> {
 
 /// Moves a moment off weekends and company holidays to the same time on the next working day.
 pub async fn to_working_day(state: &AppState, at: DateTime<Utc>) -> AppResult<DateTime<Utc>> {
-    let weekdays: Vec<i32> = sqlx::query_scalar("SELECT work_weekdays FROM hr_settings WHERE id").fetch_optional(&state.db).await?.unwrap_or_else(|| vec![1, 2, 3, 4, 5]);
+    let weekdays: Vec<i32> = sqlx::query_scalar!("SELECT work_weekdays FROM hr_settings WHERE id").fetch_optional(&state.db).await?.unwrap_or_else(|| vec![1, 2, 3, 4, 5]);
     if weekdays.is_empty() {
         return Ok(at);
     }
     let from = at.date_naive();
-    let holidays: Vec<NaiveDate> = sqlx::query_scalar("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $1 + 400").bind(from).fetch_all(&state.db).await?;
+    let holidays: Vec<NaiveDate> = sqlx::query_scalar!("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $1 + 400", from).fetch_all(&state.db).await?;
     let mut d = at;
     for _ in 0..400 {
         let day = d.date_naive();
@@ -81,13 +81,9 @@ pub async fn count_new_comments(state: &AppState, viewer: Uuid, items: &mut [Tas
         return Ok(());
     }
     let ids: Vec<Uuid> = items.iter().map(|t| t.id).collect();
-    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
-        "SELECT cm.task_id, COUNT(*) FROM task_comments cm LEFT JOIN task_views v ON v.task_id = cm.task_id AND v.user_id = $2
+    let rows: Vec<(Uuid, i64)> = sqlx::query!(r#"SELECT cm.task_id AS "task_id!", COUNT(*) AS "c1!" FROM task_comments cm LEFT JOIN task_views v ON v.task_id = cm.task_id AND v.user_id = $2
          WHERE cm.task_id = ANY($1) AND cm.author_id IS DISTINCT FROM $2 AND (v.viewed_at IS NULL OR cm.created_at > v.viewed_at)
-         GROUP BY cm.task_id",
-    )
-    .bind(&ids)
-    .bind(viewer)
+         GROUP BY cm.task_id"#, &ids, viewer).map(|r| (r.task_id, r.c1))
     .fetch_all(&state.db)
     .await?;
     let by: HashMap<Uuid, i64> = rows.into_iter().collect();
@@ -131,11 +127,8 @@ async fn rate(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
 }
 
 pub async fn result_of(state: &AppState, task: Uuid) -> AppResult<Option<Value>> {
-    let row: Option<(Uuid, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT c.id, c.body, trim(u.first_name || ' ' || u.last_name), c.created_at FROM tasks t JOIN task_comments c ON c.id = t.result_comment_id
-         LEFT JOIN users u ON u.id = c.author_id WHERE t.id = $1",
-    )
-    .bind(task)
+    let row: Option<(Uuid, String, Option<String>, DateTime<Utc>)> = sqlx::query!(r#"SELECT c.id, c.body, trim(u.first_name || ' ' || u.last_name) AS "c2", c.created_at FROM tasks t JOIN task_comments c ON c.id = t.result_comment_id
+         LEFT JOIN users u ON u.id = c.author_id WHERE t.id = $1"#, task).map(|r| (r.id, r.body, r.c2, r.created_at))
     .fetch_optional(&state.db)
     .await?;
     Ok(row.map(|(id, body, author, at)| json!({ "comment_id": id, "body": body, "author_name": author, "created_at": at })))
@@ -154,12 +147,12 @@ async fn set_result(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         return Err(AppError::Forbidden);
     }
     if let Some(c) = b.comment_id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM task_comments WHERE id = $1 AND task_id = $2)").bind(c).bind(id).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM task_comments WHERE id = $1 AND task_id = $2) AS "v!""#, c, id).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("that comment isn't on this task"));
         }
     }
-    sqlx::query("UPDATE tasks SET result_comment_id = $2, last_activity_at = now() WHERE id = $1").bind(id).bind(b.comment_id).execute(&state.db).await?;
+    sqlx::query!("UPDATE tasks SET result_comment_id = $2, last_activity_at = now() WHERE id = $1", id, b.comment_id).execute(&state.db).await?;
     record_history(&state.db, id, auth.id, "result", None, b.comment_id.map(|_| "marked".to_string())).await?;
     broadcast_changed(&state, id, core.project_id, false).await;
     Ok(Json(load_detail(&state, &auth, id).await?))
@@ -186,7 +179,7 @@ const PARTS: &[(&str, &str)] = &[
 /// Puts a task in the bin: everything about it is kept, then it is deleted. Subtasks stay
 /// (without their parent) and get it back if it is restored.
 pub async fn trash_task(state: &AppState, task: Uuid, by: Uuid) -> AppResult<()> {
-    let row: Value = sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+    let row: Value = sqlx::query_scalar!(r#"SELECT to_jsonb(t) AS "v!" FROM tasks t WHERE id = $1"#, task).fetch_one(&state.db).await?;
     let mut parts = serde_json::Map::new();
     for (table, sql) in PARTS {
         let rows: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COALESCE(jsonb_agg(to_jsonb(x)), '[]') FROM ({sql}) x")))
@@ -195,20 +188,15 @@ pub async fn trash_task(state: &AppState, task: Uuid, by: Uuid) -> AppResult<()>
             .await?;
         parts.insert((*table).into(), rows);
     }
-    let children: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM tasks WHERE parent_id = $1").bind(task).fetch_all(&state.db).await?;
+    let children: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM tasks WHERE parent_id = $1", task).fetch_all(&state.db).await?;
     let snapshot = json!({ "task": row, "parts": parts, "children": children });
     let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "INSERT INTO task_trash (id, number, title, project_id, created_by, responsible_id, snapshot, deleted_by)
+    sqlx::query!("INSERT INTO task_trash (id, number, title, project_id, created_by, responsible_id, snapshot, deleted_by)
          SELECT id, number, title, project_id, created_by, responsible_id, $2, $3 FROM tasks WHERE id = $1
-         ON CONFLICT (id) DO UPDATE SET snapshot = EXCLUDED.snapshot, deleted_at = now(), deleted_by = EXCLUDED.deleted_by",
-    )
-    .bind(task)
-    .bind(&snapshot)
-    .bind(by)
+         ON CONFLICT (id) DO UPDATE SET snapshot = EXCLUDED.snapshot, deleted_at = now(), deleted_by = EXCLUDED.deleted_by", task, &snapshot, by)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM tasks WHERE id = $1").bind(task).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM tasks WHERE id = $1", task).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -221,15 +209,10 @@ struct TrashQuery {
 /// Deleted tasks I can put back: those I made or deleted (all of them with "manage all tasks").
 async fn trash(State(state): State<AppState>, auth: AuthUser, Query(q): Query<TrashQuery>) -> AppResult<Json<Value>> {
     let term = clean(q.q).map(|t| format!("%{}%", t.replace('%', "\\%").replace('_', "\\_")));
-    let rows: Vec<(Uuid, i64, String, Option<String>, Option<String>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT t.id, t.number, t.title, (SELECT name FROM projects WHERE id = t.project_id), trim(u.first_name || ' ' || u.last_name), t.deleted_at
+    let rows: Vec<(Uuid, i64, String, Option<String>, Option<String>, DateTime<Utc>)> = sqlx::query!(r#"SELECT t.id, t.number, t.title, (SELECT name FROM projects WHERE id = t.project_id) AS "c3", trim(u.first_name || ' ' || u.last_name) AS "c4", t.deleted_at
          FROM task_trash t LEFT JOIN users u ON u.id = t.deleted_by
          WHERE ($1 OR t.created_by = $2 OR t.deleted_by = $2) AND ($3::text IS NULL OR t.title ILIKE $3)
-         ORDER BY t.deleted_at DESC LIMIT 500",
-    )
-    .bind(auth.can(perm::TASKS_MANAGE_ALL))
-    .bind(auth.id)
-    .bind(term)
+         ORDER BY t.deleted_at DESC LIMIT 500"#, auth.can(perm::TASKS_MANAGE_ALL), auth.id, term).map(|r| (r.id, r.number, r.title, r.c3, r.c4, r.deleted_at))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -239,7 +222,7 @@ async fn trash(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Tr
 }
 
 async fn trashed(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Value> {
-    let row: Option<(Value, Option<Uuid>, Option<Uuid>)> = sqlx::query_as("SELECT snapshot, created_by, deleted_by FROM task_trash WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let row: Option<(Value, Option<Uuid>, Option<Uuid>)> = sqlx::query!(r#"SELECT snapshot, created_by, deleted_by FROM task_trash WHERE id = $1"#, id).map(|r| (r.snapshot, r.created_by, r.deleted_by)).fetch_optional(&state.db).await?;
     let Some((snapshot, creator, deleter)) = row else { return Err(AppError::NotFound("deleted task")) };
     if !(auth.can(perm::TASKS_MANAGE_ALL) || creator == Some(auth.id) || deleter == Some(auth.id)) {
         return Err(AppError::NotFound("deleted task"));
@@ -269,14 +252,14 @@ async fn restore(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
     }
     // A sprint that has finished meanwhile can't take it back.
     if let Some(s) = task["sprint_id"].as_str().and_then(|s| s.parse::<Uuid>().ok()) {
-        let done: bool = sqlx::query_scalar("SELECT status = 'completed' FROM scrum_sprints WHERE id = $1").bind(s).fetch_one(&state.db).await?;
+        let done: bool = sqlx::query_scalar!(r#"SELECT status = 'completed' AS "v!" FROM scrum_sprints WHERE id = $1"#, s).fetch_one(&state.db).await?;
         if done {
             task["sprint_id"] = Value::Null;
         }
     }
     let result = task["result_comment_id"].take();
     let mut tx = state.db.begin().await?;
-    sqlx::query("INSERT INTO tasks SELECT * FROM jsonb_populate_record(NULL::tasks, $1)").bind(&task).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO tasks SELECT * FROM jsonb_populate_record(NULL::tasks, $1)", &task).execute(&mut *tx).await?;
     for (table, _) in PARTS {
         let rows = &snapshot["parts"][table];
         if rows.as_array().is_none_or(|r| r.is_empty()) {
@@ -299,15 +282,13 @@ async fn restore(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
         .await?;
     }
     if result.is_string() {
-        sqlx::query("UPDATE tasks SET result_comment_id = $2 WHERE id = $1 AND EXISTS (SELECT 1 FROM task_comments WHERE id = $2)")
-            .bind(id)
-            .bind(result.as_str().and_then(|s| s.parse::<Uuid>().ok()))
+        sqlx::query!("UPDATE tasks SET result_comment_id = $2 WHERE id = $1 AND EXISTS (SELECT 1 FROM task_comments WHERE id = $2)", id, result.as_str().and_then(|s| s.parse::<Uuid>().ok()))
             .execute(&mut *tx)
             .await?;
     }
     let children: Vec<Uuid> = serde_json::from_value(snapshot["children"].clone()).unwrap_or_default();
-    sqlx::query("UPDATE tasks SET parent_id = $1 WHERE id = ANY($2) AND parent_id IS NULL").bind(id).bind(&children).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM task_trash WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE tasks SET parent_id = $1 WHERE id = ANY($2) AND parent_id IS NULL", id, &children).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM task_trash WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     record_history(&state.db, id, auth.id, "restored", None, None).await?;
     let project = task["project_id"].as_str().and_then(|s| s.parse().ok());
@@ -317,12 +298,12 @@ async fn restore(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
 
 async fn purge_one(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     trashed(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM task_trash WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_trash WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn run_trash_purge(state: &AppState) -> Result<()> {
-    let n = sqlx::query("DELETE FROM task_trash WHERE deleted_at < now() - make_interval(days => $1)").bind(TRASH_DAYS as i32).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM task_trash WHERE deleted_at < now() - make_interval(days => $1)", TRASH_DAYS as i32).execute(&state.db).await?.rows_affected();
     if n > 0 {
         tracing::info!(purged = n, "emptied old tasks from the recycle bin");
     }
@@ -335,10 +316,10 @@ pub async fn run_trash_purge(state: &AppState) -> Result<()> {
 
 async fn planner_stages(state: &AppState, user: Uuid) -> AppResult<Vec<(Uuid, String, String, f64)>> {
     let mut stages: Vec<(Uuid, String, String, f64)> =
-        sqlx::query_as("SELECT id, name, color, sort FROM task_planner_stages WHERE user_id = $1 ORDER BY sort").bind(user).fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT id, name, color, sort FROM task_planner_stages WHERE user_id = $1 ORDER BY sort"#, user).map(|r| (r.id, r.name, r.color, r.sort)).fetch_all(&state.db).await?;
     if stages.is_empty() {
         for (i, (n, c)) in [("Do now", "rose"), ("Next", "sky"), ("Later", "slate")].iter().enumerate() {
-            sqlx::query("INSERT INTO task_planner_stages (user_id, name, color, sort) VALUES ($1, $2, $3, $4)").bind(user).bind(n).bind(c).bind(i as f64).execute(&state.db).await?;
+            sqlx::query!("INSERT INTO task_planner_stages (user_id, name, color, sort) VALUES ($1, $2, $3, $4)", user, n, c, i as f64).execute(&state.db).await?;
         }
         stages = sqlx::query_as("SELECT id, name, color, sort FROM task_planner_stages WHERE user_id = $1 ORDER BY sort").bind(user).fetch_all(&state.db).await?;
     }
@@ -353,7 +334,7 @@ async fn planner(State(state): State<AppState>, auth: AuthUser) -> AppResult<Jso
         .push(" OR EXISTS (SELECT 1 FROM task_members m WHERE m.task_id = t.id AND m.role = 'assistant' AND m.user_id = ").push_bind(auth.id)
         .push(")) ORDER BY t.deadline ASC NULLS LAST LIMIT 500");
     let tasks: Vec<TaskSummary> = qb.build_query_as().fetch_all(&state.db).await?;
-    let placed: Vec<(Uuid, Uuid, f64)> = sqlx::query_as("SELECT task_id, stage_id, position FROM task_planner WHERE user_id = $1").bind(auth.id).fetch_all(&state.db).await?;
+    let placed: Vec<(Uuid, Uuid, f64)> = sqlx::query!(r#"SELECT task_id, stage_id, position FROM task_planner WHERE user_id = $1"#, auth.id).map(|r| (r.task_id, r.stage_id, r.position)).fetch_all(&state.db).await?;
     let first = stages.first().map(|s| s.0);
     let items: Vec<Value> = tasks
         .into_iter()
@@ -389,46 +370,42 @@ async fn new_planner_stage(State(state): State<AppState>, auth: AuthUser, Json(b
     if !super::stages::COLORS.contains(&color.as_str()) {
         return Err(AppError::bad("unknown colour"));
     }
-    sqlx::query("INSERT INTO task_planner_stages (user_id, name, color, sort) VALUES ($1, $2, $3, $4)")
-        .bind(auth.id)
-        .bind(name)
-        .bind(color)
-        .bind(b.sort.unwrap_or(stages.last().map(|s| s.3 + 1.0).unwrap_or(0.0)))
+    sqlx::query!("INSERT INTO task_planner_stages (user_id, name, color, sort) VALUES ($1, $2, $3, $4)", auth.id, name, color, b.sort.unwrap_or(stages.last().map(|s| s.3 + 1.0).unwrap_or(0.0)))
         .execute(&state.db)
         .await?;
     planner(State(state), auth).await
 }
 
 async fn own_stage(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<()> {
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM task_planner_stages WHERE id = $1 AND user_id = $2)").bind(id).bind(auth.id).fetch_one(&state.db).await?;
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM task_planner_stages WHERE id = $1 AND user_id = $2) AS "v!""#, id, auth.id).fetch_one(&state.db).await?;
     if ok { Ok(()) } else { Err(AppError::NotFound("column")) }
 }
 
 async fn update_planner_stage(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PlannerStage>) -> AppResult<Json<Value>> {
     own_stage(&state, &auth, id).await?;
     if let Some(n) = &b.name {
-        sqlx::query("UPDATE task_planner_stages SET name = $2 WHERE id = $1").bind(id).bind(required("column name", n, 60)?).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_planner_stages SET name = $2 WHERE id = $1", id, required("column name", n, 60)?).execute(&state.db).await?;
     }
     if let Some(c) = &b.color {
         if !super::stages::COLORS.contains(&c.as_str()) {
             return Err(AppError::bad("unknown colour"));
         }
-        sqlx::query("UPDATE task_planner_stages SET color = $2 WHERE id = $1").bind(id).bind(c).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_planner_stages SET color = $2 WHERE id = $1", id, c).execute(&state.db).await?;
     }
     if let Some(s) = b.sort {
-        sqlx::query("UPDATE task_planner_stages SET sort = $2 WHERE id = $1").bind(id).bind(s).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_planner_stages SET sort = $2 WHERE id = $1", id, s).execute(&state.db).await?;
     }
     planner(State(state), auth).await
 }
 
 async fn delete_planner_stage(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     own_stage(&state, &auth, id).await?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_planner_stages WHERE user_id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM task_planner_stages WHERE user_id = $1"#, auth.id).fetch_one(&state.db).await?;
     if n <= 1 {
         return Err(AppError::bad("the planner needs a column"));
     }
     // Its cards go back to the first column.
-    sqlx::query("DELETE FROM task_planner_stages WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_planner_stages WHERE id = $1", id).execute(&state.db).await?;
     planner(State(state), auth).await
 }
 
@@ -447,7 +424,7 @@ async fn plan_task(State(state): State<AppState>, auth: AuthUser, Path(id): Path
         let user = auth.id;
         async move {
             match n {
-                Some(n) => sqlx::query_scalar::<_, f64>("SELECT position FROM task_planner WHERE user_id = $1 AND task_id = $2").bind(user).bind(n).fetch_optional(&db).await,
+                Some(n) => sqlx::query_scalar!("SELECT position FROM task_planner WHERE user_id = $1 AND task_id = $2", user, n).fetch_optional(&db).await,
                 None => Ok(None),
             }
         }
@@ -458,14 +435,8 @@ async fn plan_task(State(state): State<AppState>, auth: AuthUser, Path(id): Path
         (None, Some(c)) => c - 1.0,
         (None, None) => 0.0,
     };
-    sqlx::query(
-        "INSERT INTO task_planner (user_id, task_id, stage_id, position) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (user_id, task_id) DO UPDATE SET stage_id = EXCLUDED.stage_id, position = EXCLUDED.position",
-    )
-    .bind(auth.id)
-    .bind(id)
-    .bind(b.stage_id)
-    .bind(position)
+    sqlx::query!("INSERT INTO task_planner (user_id, task_id, stage_id, position) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, task_id) DO UPDATE SET stage_id = EXCLUDED.stage_id, position = EXCLUDED.position", auth.id, id, b.stage_id, position)
     .execute(&state.db)
     .await?;
     Ok(Json(load_detail(&state, &auth, id).await?))
@@ -486,13 +457,9 @@ struct FieldQuery {
 }
 
 async fn defs(state: &AppState, project: Option<Uuid>, all: bool) -> AppResult<Vec<Value>> {
-    let rows: Vec<(Uuid, Option<Uuid>, String, String, Vec<String>, bool, bool, i32, Option<String>)> = sqlx::query_as(
-        "SELECT d.id, d.project_id, d.name, d.kind, d.options, d.required, d.show_in_list, d.sort, p.name
+    let rows: Vec<(Uuid, Option<Uuid>, String, String, Vec<String>, bool, bool, i32, Option<String>)> = sqlx::query!(r#"SELECT d.id AS "id!", d.project_id AS "project_id?", d.name AS "name!", d.kind AS "kind!", d.options AS "options!", d.required AS "required!", d.show_in_list AS "show_in_list!", d.sort AS "sort!", p.name AS "c8?"
          FROM task_field_defs d LEFT JOIN projects p ON p.id = d.project_id
-         WHERE $2 OR d.project_id IS NULL OR d.project_id = $1 ORDER BY d.project_id NULLS FIRST, d.sort, d.created_at",
-    )
-    .bind(project)
-    .bind(all)
+         WHERE $2 OR d.project_id IS NULL OR d.project_id = $1 ORDER BY d.project_id NULLS FIRST, d.sort, d.created_at"#, project, all).map(|r| (r.id, r.project_id, r.name, r.kind, r.options, r.required, r.show_in_list, r.sort, r.c8))
     .fetch_all(&state.db)
     .await?;
     Ok(rows
@@ -548,40 +515,33 @@ async fn create_field(State(state): State<AppState>, auth: AuthUser, Json(b): Js
         return Err(AppError::bad(format!("kind must be one of: {}", KINDS.join(", "))));
     }
     let options = clean_options(&kind, b.options)?;
-    sqlx::query("INSERT INTO task_field_defs (project_id, name, kind, options, required, show_in_list, sort) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-        .bind(b.project_id)
-        .bind(name)
-        .bind(&kind)
-        .bind(&options)
-        .bind(b.required.unwrap_or(false))
-        .bind(b.show_in_list.unwrap_or(false))
-        .bind(b.sort.unwrap_or(0))
+    sqlx::query!("INSERT INTO task_field_defs (project_id, name, kind, options, required, show_in_list, sort) VALUES ($1, $2, $3, $4, $5, $6, $7)", b.project_id, name, &kind, &options, b.required.unwrap_or(false), b.show_in_list.unwrap_or(false), b.sort.unwrap_or(0))
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "items": defs(&state, b.project_id, false).await? })))
 }
 
 async fn field_project(state: &AppState, id: Uuid) -> AppResult<(Option<Uuid>, String)> {
-    sqlx::query_as("SELECT project_id, kind FROM task_field_defs WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("field"))
+    sqlx::query!(r#"SELECT project_id, kind FROM task_field_defs WHERE id = $1"#, id).map(|r| (r.project_id, r.kind)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("field"))
 }
 
 async fn update_field(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<FieldInput>) -> AppResult<Json<Value>> {
     let (project, kind) = field_project(&state, id).await?;
     require_field_admin(&state, &auth, project).await?;
     if let Some(n) = &b.name {
-        sqlx::query("UPDATE task_field_defs SET name = $2 WHERE id = $1").bind(id).bind(required("field name", n, 100)?).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_field_defs SET name = $2 WHERE id = $1", id, required("field name", n, 100)?).execute(&state.db).await?;
     }
     if b.options.is_some() {
-        sqlx::query("UPDATE task_field_defs SET options = $2 WHERE id = $1").bind(id).bind(clean_options(&kind, b.options)?).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_field_defs SET options = $2 WHERE id = $1", id, &(clean_options(&kind, b.options)?)).execute(&state.db).await?;
     }
     if let Some(r) = b.required {
-        sqlx::query("UPDATE task_field_defs SET required = $2 WHERE id = $1").bind(id).bind(r).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_field_defs SET required = $2 WHERE id = $1", id, r).execute(&state.db).await?;
     }
     if let Some(l) = b.show_in_list {
-        sqlx::query("UPDATE task_field_defs SET show_in_list = $2 WHERE id = $1").bind(id).bind(l).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_field_defs SET show_in_list = $2 WHERE id = $1", id, l).execute(&state.db).await?;
     }
     if let Some(s) = b.sort {
-        sqlx::query("UPDATE task_field_defs SET sort = $2 WHERE id = $1").bind(id).bind(s).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_field_defs SET sort = $2 WHERE id = $1", id, s).execute(&state.db).await?;
     }
     Ok(Json(json!({ "items": defs(&state, project, false).await? })))
 }
@@ -589,14 +549,14 @@ async fn update_field(State(state): State<AppState>, auth: AuthUser, Path(id): P
 async fn delete_field(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let (project, _) = field_project(&state, id).await?;
     require_field_admin(&state, &auth, project).await?;
-    sqlx::query("DELETE FROM task_field_defs WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_field_defs WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "items": defs(&state, project, false).await? })))
 }
 
 /// The fields that apply to a task (company-wide and its project's) with its values.
 pub async fn field_values(state: &AppState, task: Uuid, project: Option<Uuid>) -> AppResult<Vec<Value>> {
     let mut list = defs(state, project, false).await?;
-    let values: Vec<(Uuid, Value)> = sqlx::query_as("SELECT field_id, value FROM task_field_values WHERE task_id = $1").bind(task).fetch_all(&state.db).await?;
+    let values: Vec<(Uuid, Value)> = sqlx::query!(r#"SELECT field_id, value FROM task_field_values WHERE task_id = $1"#, task).map(|r| (r.field_id, r.value)).fetch_all(&state.db).await?;
     for d in list.iter_mut() {
         let id: Uuid = d["id"].as_str().unwrap().parse().unwrap();
         d["value"] = values.iter().find(|v| v.0 == id).map(|v| v.1.clone()).unwrap_or(Value::Null);
@@ -626,7 +586,7 @@ async fn check_value(state: &AppState, kind: &str, options: &[String], name: &st
         ("user", Value::String(s)) if s.is_empty() => Value::Null,
         ("user", Value::String(s)) => {
             let id: Uuid = s.parse().map_err(|_| bad())?;
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)").bind(id).fetch_one(&state.db).await?;
+            let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1) AS "v!""#, id).fetch_one(&state.db).await?;
             if !ok {
                 return Err(bad());
             }
@@ -647,23 +607,16 @@ pub async fn set_fields(state: &AppState, task: Uuid, project: Option<Uuid>, val
         let options: Vec<String> = serde_json::from_value(d["options"].clone()).unwrap_or_default();
         let v = check_value(state, d["kind"].as_str().unwrap_or("text"), &options, d["name"].as_str().unwrap_or("field"), v).await?;
         if v.is_null() {
-            sqlx::query("DELETE FROM task_field_values WHERE task_id = $1 AND field_id = $2").bind(task).bind(field).execute(&state.db).await?;
+            sqlx::query!("DELETE FROM task_field_values WHERE task_id = $1 AND field_id = $2", task, field).execute(&state.db).await?;
         } else {
-            sqlx::query("INSERT INTO task_field_values (task_id, field_id, value) VALUES ($1, $2, $3) ON CONFLICT (task_id, field_id) DO UPDATE SET value = EXCLUDED.value")
-                .bind(task)
-                .bind(field)
-                .bind(v)
+            sqlx::query!("INSERT INTO task_field_values (task_id, field_id, value) VALUES ($1, $2, $3) ON CONFLICT (task_id, field_id) DO UPDATE SET value = EXCLUDED.value", task, field, v)
                 .execute(&state.db)
                 .await?;
         }
     }
     if check_required {
-        let missing: Option<String> = sqlx::query_scalar(
-            "SELECT d.name FROM task_field_defs d WHERE d.required AND (d.project_id IS NULL OR d.project_id = $2)
-               AND NOT EXISTS (SELECT 1 FROM task_field_values v WHERE v.task_id = $1 AND v.field_id = d.id) ORDER BY d.sort LIMIT 1",
-        )
-        .bind(task)
-        .bind(project)
+        let missing: Option<String> = sqlx::query_scalar!("SELECT d.name FROM task_field_defs d WHERE d.required AND (d.project_id IS NULL OR d.project_id = $2)
+               AND NOT EXISTS (SELECT 1 FROM task_field_values v WHERE v.task_id = $1 AND v.field_id = d.id) ORDER BY d.sort LIMIT 1", task, project)
         .fetch_optional(&state.db)
         .await?;
         if let Some(m) = missing {

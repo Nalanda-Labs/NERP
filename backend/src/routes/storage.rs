@@ -52,28 +52,22 @@ const KINDS: &str = "SELECT CASE WHEN mime_type LIKE 'image/%' THEN 'images' WHE
 
 async fn overview(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::FILES_MANAGE)?;
-    let (count, bytes): (i64, i64) = sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)::bigint FROM files").fetch_one(&state.db).await?;
+    let (count, bytes): (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", COALESCE(SUM(size_bytes), 0)::bigint AS "c1!" FROM files"#).map(|r| (r.c0, r.c1)).fetch_one(&state.db).await?;
     let areas: Vec<(String, i64, i64)> = sqlx::query_as(AREAS).fetch_all(&state.db).await?;
     let kinds: Vec<(String, i64, i64)> = sqlx::query_as(KINDS).fetch_all(&state.db).await?;
-    let people: Vec<(Option<Uuid>, Option<String>, i64, i64)> = sqlx::query_as(
-        "SELECT f.owner_id, trim(u.first_name || ' ' || u.last_name), COUNT(*), COALESCE(SUM(f.size_bytes), 0)::bigint
-         FROM files f LEFT JOIN users u ON u.id = f.owner_id GROUP BY 1, 2 ORDER BY 4 DESC LIMIT 15",
-    )
+    let people: Vec<(Option<Uuid>, Option<String>, i64, i64)> = sqlx::query!(r#"SELECT f.owner_id AS "owner_id?", trim(u.first_name || ' ' || u.last_name) AS "c1?", COUNT(*) AS "c2!", COALESCE(SUM(f.size_bytes), 0)::bigint AS "c3!"
+         FROM files f LEFT JOIN users u ON u.id = f.owner_id GROUP BY 1, 2 ORDER BY 4 DESC LIMIT 15"#).map(|r| (r.owner_id, r.c1, r.c2, r.c3))
     .fetch_all(&state.db)
     .await?;
-    let largest: Vec<(Uuid, String, i64, Option<String>, chrono::DateTime<chrono::Utc>, String)> = sqlx::query_as(
-        "SELECT f.id, f.original_name, f.size_bytes, trim(u.first_name || ' ' || u.last_name), f.created_at, f.mime_type
-         FROM files f LEFT JOIN users u ON u.id = f.owner_id ORDER BY f.size_bytes DESC LIMIT 20",
-    )
+    let largest: Vec<(Uuid, String, i64, Option<String>, chrono::DateTime<chrono::Utc>, String)> = sqlx::query!(r#"SELECT f.id, f.original_name, f.size_bytes, trim(u.first_name || ' ' || u.last_name) AS "c3", f.created_at, f.mime_type
+         FROM files f LEFT JOIN users u ON u.id = f.owner_id ORDER BY f.size_bytes DESC LIMIT 20"#).map(|r| (r.id, r.original_name, r.size_bytes, r.c3, r.created_at, r.mime_type))
     .fetch_all(&state.db)
     .await?;
-    let old_versions: (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(v.size_bytes), 0)::bigint FROM drive_versions v JOIN drive_nodes n ON n.id = v.node_id
-         WHERE n.deleted_at IS NULL AND v.file_id IS NOT NULL AND v.file_id IS DISTINCT FROM n.file_id",
-    )
+    let old_versions: (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", COALESCE(SUM(v.size_bytes), 0)::bigint AS "c1!" FROM drive_versions v JOIN drive_nodes n ON n.id = v.node_id
+         WHERE n.deleted_at IS NULL AND v.file_id IS NOT NULL AND v.file_id IS DISTINCT FROM n.file_id"#).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
-    let trash: (i64, i64) = sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)::bigint FROM drive_nodes WHERE deleted_at IS NOT NULL AND kind = 'file'").fetch_one(&state.db).await?;
+    let trash: (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", COALESCE(SUM(size_bytes), 0)::bigint AS "c1!" FROM drive_nodes WHERE deleted_at IS NOT NULL AND kind = 'file'"#).map(|r| (r.c0, r.c1)).fetch_one(&state.db).await?;
     let pair = |r: Vec<(String, i64, i64)>| r.into_iter().map(|(k, n, b)| json!({ "key": k, "files": n, "bytes": b })).collect::<Vec<_>>();
     Ok(Json(json!({
         "files": count, "bytes": bytes,
@@ -105,13 +99,10 @@ async fn cleanup(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
     let (removed, bytes) = match b.what.as_str() {
         "drive_trash" => {
             // The topmost items in the trash (their contents go with them).
-            let ids: Vec<(Uuid, i64)> = sqlx::query_as(
-                "SELECT n.id, (WITH RECURSIVE down AS (SELECT n.id AS id UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id)
-                    SELECT COALESCE(SUM(v.size_bytes), 0)::bigint FROM drive_versions v WHERE v.node_id IN (SELECT id FROM down))
+            let ids: Vec<(Uuid, i64)> = sqlx::query!(r#"SELECT n.id AS "id!", (WITH RECURSIVE down AS (SELECT n.id AS id UNION ALL SELECT d.id FROM drive_nodes d JOIN down ON d.parent_id = down.id)
+                    SELECT COALESCE(SUM(v.size_bytes), 0)::bigint FROM drive_versions v WHERE v.node_id IN (SELECT id FROM down)) AS "c1!"
                  FROM drive_nodes n WHERE n.deleted_at < now() - make_interval(days => $1)
-                   AND NOT EXISTS (SELECT 1 FROM drive_nodes p WHERE p.id = n.parent_id AND p.deleted_at IS NOT NULL) LIMIT 5000",
-            )
-            .bind(days)
+                   AND NOT EXISTS (SELECT 1 FROM drive_nodes p WHERE p.id = n.parent_id AND p.deleted_at IS NOT NULL) LIMIT 5000"#, days).map(|r| (r.id, r.c1))
             .fetch_all(&state.db)
             .await?;
             let bytes = ids.iter().map(|(_, b)| b).sum::<i64>();
@@ -125,18 +116,14 @@ async fn cleanup(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
             if !(0..=100).contains(&keep) {
                 return Err(AppError::bad("keep 0 to 100 earlier versions"));
             }
-            let gone: Vec<(Option<Uuid>, i64)> = sqlx::query_as(
-                "WITH ranked AS (
+            let gone: Vec<(Option<Uuid>, i64)> = sqlx::query!(r#"WITH ranked AS (
                     SELECT v.node_id, v.version, v.file_id, v.size_bytes, v.uploaded_at, n.file_id AS current,
                            row_number() OVER (PARTITION BY v.node_id ORDER BY v.version DESC) AS r
                     FROM drive_versions v JOIN drive_nodes n ON n.id = v.node_id WHERE n.deleted_at IS NULL)
                  DELETE FROM drive_versions d USING ranked x
                  WHERE d.node_id = x.node_id AND d.version = x.version AND x.r > $1 + 1 AND x.file_id IS DISTINCT FROM x.current
                    AND x.uploaded_at < now() - make_interval(days => $2)
-                 RETURNING d.file_id, d.size_bytes",
-            )
-            .bind(keep)
-            .bind(days)
+                 RETURNING d.file_id, d.size_bytes"#, keep, days).map(|r| (r.file_id, r.size_bytes))
             .fetch_all(&state.db)
             .await?;
             for f in gone.iter().filter_map(|(f, _)| *f) {

@@ -257,42 +257,24 @@ async fn make_locked(state: &AppState, actor: Option<&AuthUser>, b: NewBooking, 
     let price = service.map(|s| s.price).unwrap_or(Decimal::ZERO) + extras.iter().map(|e| e.price).sum::<Decimal>();
 
     // The client in the CRM: the contact given, or found by email, or made.
-    let make_contact: bool = sqlx::query_scalar("SELECT make_contact FROM booking_settings WHERE id").fetch_one(&state.db).await?;
+    let make_contact: bool = sqlx::query_scalar!("SELECT make_contact FROM booking_settings WHERE id").fetch_one(&state.db).await?;
     let contact = match b.contact_id {
         Some(c) => Some(c),
         None if make_contact => find_or_make_contact(state, &name, email.as_deref(), phone.as_deref(), actor.map(|a| a.id)).await?,
         None => None,
     };
     let token = random_token(24);
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO bookings (starts_at, ends_at, status, service_id, extra_ids, price, client_name, client_email, client_phone, contact_id, note, source, form_id, overbooked, token_hash, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id",
-    )
-    .bind(b.starts_at)
-    .bind(ends)
-    .bind(if b.waitlist { "waitlist" } else { "booked" })
-    .bind(b.service_id)
-    .bind(&b.extra_ids)
-    .bind(price)
-    .bind(&name)
-    .bind(&email)
-    .bind(&phone)
-    .bind(contact)
-    .bind(clean(b.note.clone()).map(|n| n.chars().take(4000).collect::<String>()))
-    .bind(source)
-    .bind(form)
-    .bind(overbooked)
-    .bind(hash(&token))
-    .bind(actor.map(|a| a.id))
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO bookings (starts_at, ends_at, status, service_id, extra_ids, price, client_name, client_email, client_phone, contact_id, note, source, form_id, overbooked, token_hash, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id", b.starts_at, ends, if b.waitlist { "waitlist" } else { "booked" }, b.service_id, &b.extra_ids, price, &name, email.as_deref(), phone.as_deref(), contact, clean(b.note.clone()).map(|n| n.chars().take(4000).collect::<String>()), source, form, overbooked, hash(&token), actor.map(|a| a.id))
     .fetch_one(&state.db)
     .await?;
     for r in &res {
-        sqlx::query("INSERT INTO booking_resources_used (booking_id, resource_id) VALUES ($1, $2)").bind(id).bind(r).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO booking_resources_used (booking_id, resource_id) VALUES ($1, $2)", id, r).execute(&state.db).await?;
     }
     let booking = load(state, id).await?;
     // The deal it was made from, or a new one when a pipeline is chosen.
     if let Some(d) = b.deal_id {
-        sqlx::query("UPDATE bookings SET deal_id = $2 WHERE id = $1").bind(id).bind(d).execute(&state.db).await?;
+        sqlx::query!("UPDATE bookings SET deal_id = $2 WHERE id = $1", id, d).execute(&state.db).await?;
         let _ = crate::crm::timeline(&state.db, d, "booking", actor.map(|a| a.id), None, json!({ "event": if b.waitlist { "waitlist" } else { "booked" }, "booking_id": id, "number": booking.number, "starts_at": b.starts_at, "service": service.map(|s| s.name.clone()) })).await;
     } else if !b.waitlist
         && let Err(e) = make_deal(state, &booking, &resources, service).await {
@@ -335,13 +317,8 @@ pub(crate) fn hash(token: &str) -> String {
 async fn find_or_make_contact(state: &AppState, name: &str, email: Option<&str>, phone: Option<&str>, by: Option<Uuid>) -> AppResult<Option<Uuid>> {
     for (kind, v) in [("email", email), ("phone", phone)] {
         let Some(v) = v else { continue };
-        let found: Option<Uuid> = sqlx::query_scalar(
-            "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
-             WHERE m.kind = $1 AND m.normalized = $2 AND i.entity_type = $3 AND i.deleted_at IS NULL ORDER BY i.updated_at DESC LIMIT 1",
-        )
-        .bind(kind)
-        .bind(normalize(kind, v))
-        .bind(CONTACT)
+        let found: Option<Uuid> = sqlx::query_scalar!("SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+             WHERE m.kind = $1 AND m.normalized = $2 AND i.entity_type = $3 AND i.deleted_at IS NULL ORDER BY i.updated_at DESC LIMIT 1", kind, normalize(kind, v), CONTACT)
         .fetch_optional(&state.db)
         .await?;
         if found.is_some() {
@@ -383,7 +360,7 @@ async fn find_or_make_contact(state: &AppState, name: &str, email: Option<&str>,
 }
 
 async fn make_deal(state: &AppState, b: &Booking, resources: &[Resource], service: Option<&Service>) -> AppResult<()> {
-    let (cat, currency): (Option<Uuid>, String) = sqlx::query_as("SELECT deal_category_id, currency FROM booking_settings WHERE id").fetch_one(&state.db).await?;
+    let (cat, currency): (Option<Uuid>, String) = sqlx::query!(r#"SELECT deal_category_id, currency FROM booking_settings WHERE id"#).map(|r| (r.deal_category_id, r.currency)).fetch_one(&state.db).await?;
     let Some(cat) = cat else { return Ok(()) };
     let t = entity_type_by_id(state, DEAL).await?;
     let mut d = Map::new();
@@ -397,24 +374,22 @@ async fn make_deal(state: &AppState, b: &Booking, resources: &[Resource], servic
     }
     d.insert("assigned_to".into(), json!(resources.iter().find_map(|r| r.user_id).or(b.created_by)));
     let id = create_item(state, &system_auth(), &t, d, None).await?;
-    sqlx::query("UPDATE bookings SET deal_id = $2 WHERE id = $1").bind(b.id).bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE bookings SET deal_id = $2 WHERE id = $1", b.id, id).execute(&state.db).await?;
     crate::crm::broadcast(state, DEAL, id, false).await;
     Ok(())
 }
 
 async fn company(state: &AppState) -> String {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "NERP".into())
 }
 
 async fn what_and_when(state: &AppState, b: &Booking) -> (String, String) {
-    let names: Vec<String> = sqlx::query_scalar("SELECT r.name FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1 ORDER BY r.name")
-        .bind(b.id)
+    let names: Vec<String> = sqlx::query_scalar!("SELECT r.name FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1 ORDER BY r.name", b.id)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
-    let tz: Option<String> = sqlx::query_scalar("SELECT r.timezone FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1 LIMIT 1")
-        .bind(b.id)
+    let tz: Option<String> = sqlx::query_scalar!("SELECT r.timezone FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1 LIMIT 1", b.id)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -426,7 +401,7 @@ async fn what_and_when(state: &AppState, b: &Booking) -> (String, String) {
 
 async fn confirm_email(state: &AppState, b: &Booking, token: &str) {
     let Some(to) = &b.client_email else { return };
-    let on: bool = sqlx::query_scalar("SELECT confirm_email FROM booking_settings WHERE id").fetch_one(&state.db).await.unwrap_or(false);
+    let on: bool = sqlx::query_scalar!("SELECT confirm_email FROM booking_settings WHERE id").fetch_one(&state.db).await.unwrap_or(false);
     if !on {
         return;
     }
@@ -495,27 +470,15 @@ async fn update_locked(state: &AppState, auth: AuthUser, id: Uuid, b: UpdateBook
         }
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "UPDATE bookings SET starts_at = $2, ends_at = $3, overbooked = $4, note = CASE WHEN $5 THEN $6 ELSE note END,
+    sqlx::query!("UPDATE bookings SET starts_at = $2, ends_at = $3, overbooked = $4, note = CASE WHEN $5 THEN $6 ELSE note END,
             client_name = COALESCE($7, client_name), client_phone = CASE WHEN $8 THEN $9 ELSE client_phone END,
-            reminded_at = CASE WHEN $10 THEN NULL ELSE reminded_at END, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(starts)
-    .bind(ends)
-    .bind(overbooked)
-    .bind(b.note.is_some())
-    .bind(clean(b.note.flatten()))
-    .bind(clean(b.client_name))
-    .bind(b.client_phone.is_some())
-    .bind(clean(b.client_phone.flatten()))
-    .bind(moved)
+            reminded_at = CASE WHEN $10 THEN NULL ELSE reminded_at END, updated_at = now() WHERE id = $1", id, starts, ends, overbooked, b.note.is_some(), clean(b.note.flatten()), clean(b.client_name), b.client_phone.is_some(), clean(b.client_phone.flatten()), moved)
     .execute(&mut *tx)
     .await?;
     if let Some(r) = &b.resource_ids {
-        sqlx::query("DELETE FROM booking_resources_used WHERE booking_id = $1").bind(id).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM booking_resources_used WHERE booking_id = $1", id).execute(&mut *tx).await?;
         for x in r {
-            sqlx::query("INSERT INTO booking_resources_used (booking_id, resource_id) SELECT $1, id FROM booking_resources WHERE id = $2").bind(id).bind(x).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO booking_resources_used (booking_id, resource_id) SELECT $1, id FROM booking_resources WHERE id = $2", id, x).execute(&mut *tx).await?;
         }
     }
     tx.commit().await?;
@@ -545,7 +508,7 @@ async fn set_status(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
             }
         }
     }
-    sqlx::query("UPDATE bookings SET status = $2, updated_at = now() WHERE id = $1").bind(id).bind(&b.status).execute(&state.db).await?;
+    sqlx::query!("UPDATE bookings SET status = $2, updated_at = now() WHERE id = $1", id, &b.status).execute(&state.db).await?;
     for item in [cur.contact_id, cur.deal_id].into_iter().flatten() {
         let _ = crate::crm::timeline(&state.db, item, "booking", Some(auth.id), None, json!({ "event": b.status, "booking_id": id, "number": cur.number, "starts_at": cur.starts_at })).await;
     }
@@ -578,7 +541,7 @@ pub(crate) async fn for_record(State(state): State<AppState>, auth: AuthUser, Pa
 /// Tells CRM automation: triggers waiting for this booking event (booked, confirmed, came,
 /// no_show, cancelled) on the booking's deal and contact.
 pub(crate) async fn crm_event(state: &AppState, id: Uuid, status: &str) {
-    let links: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as("SELECT deal_id, contact_id FROM bookings WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    let links: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query!(r#"SELECT deal_id, contact_id FROM bookings WHERE id = $1"#, id).map(|r| (r.deal_id, r.contact_id)).fetch_optional(&state.db).await.ok().flatten();
     let Some((deal, contact)) = links else { return };
     for item in [deal, contact].into_iter().flatten() {
         crate::crm::automation::fire(state, item, "booking", |p| p.get("status").and_then(Value::as_str).is_none_or(|s| s == status)).await;
@@ -587,20 +550,15 @@ pub(crate) async fn crm_event(state: &AppState, id: Uuid, status: &str) {
 
 /// A booking was cancelled: whoever waits for that time is told it is free.
 pub(crate) async fn freed(state: &AppState, b: &Booking) {
-    let waiting: Vec<(Uuid, i64, String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT DISTINCT w.id, w.number, w.client_name, w.created_by FROM bookings w JOIN booking_resources_used u ON u.booking_id = w.id
-         WHERE w.status = 'waitlist' AND u.resource_id = ANY($1) AND w.starts_at < $3 AND w.ends_at > $2",
-    )
-    .bind(&b.resource_ids)
-    .bind(b.starts_at)
-    .bind(b.ends_at)
+    let waiting: Vec<(Uuid, i64, String, Option<Uuid>)> = sqlx::query!(r#"SELECT DISTINCT w.id, w.number, w.client_name, w.created_by FROM bookings w JOIN booking_resources_used u ON u.booking_id = w.id
+         WHERE w.status = 'waitlist' AND u.resource_id = ANY($1) AND w.starts_at < $3 AND w.ends_at > $2"#, &b.resource_ids, b.starts_at, b.ends_at).map(|r| (r.id, r.number, r.client_name, r.created_by))
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
     if waiting.is_empty() {
         return;
     }
-    let mut who: Vec<Uuid> = sqlx::query_scalar("SELECT r.user_id FROM booking_resources r WHERE r.id = ANY($1) AND r.user_id IS NOT NULL").bind(&b.resource_ids).fetch_all(&state.db).await.unwrap_or_default();
+    let mut who: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT r.user_id AS "user_id!" FROM booking_resources r WHERE r.id = ANY($1) AND r.user_id IS NOT NULL"#, &b.resource_ids).fetch_all(&state.db).await.unwrap_or_default();
     who.extend(waiting.iter().filter_map(|w| w.3));
     who.sort();
     who.dedup();
@@ -623,7 +581,7 @@ pub(crate) async fn freed(state: &AppState, b: &Booking) {
 /// Emails clients a reminder the set number of hours before (once). A new link goes with it.
 pub async fn run_reminders(state: &AppState) -> Result<()> {
     let (first, extra, follow_h, follow_t, no_show): (i32, Vec<i32>, i32, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT remind_hours, extra_reminders, follow_up_hours, follow_up_text, no_show_text FROM booking_settings WHERE id").fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT remind_hours, extra_reminders, follow_up_hours, follow_up_text, no_show_text FROM booking_settings WHERE id"#).map(|r| (r.remind_hours, r.extra_reminders, r.follow_up_hours, r.follow_up_text, r.no_show_text)).fetch_one(&state.db).await?;
     let mut hours: Vec<i32> = extra.into_iter().chain(std::iter::once(first)).filter(|h| *h > 0).collect();
     hours.sort_unstable();
     hours.dedup();
@@ -632,38 +590,33 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
     // Reminders: of those due, only the nearest is sent (a booking made two hours ahead gets
     // the two-hour reminder, not also the day-before one); the others count as sent.
     if let Some(max) = hours.last().copied() {
-        let due: Vec<(Uuid, DateTime<Utc>)> = sqlx::query_as(
-            "SELECT id, starts_at FROM bookings WHERE status IN ('booked', 'confirmed') AND client_email IS NOT NULL
-               AND starts_at > now() AND starts_at <= now() + make_interval(hours => $1)",
-        )
-        .bind(max)
+        let due: Vec<(Uuid, DateTime<Utc>)> = sqlx::query!(r#"SELECT id, starts_at FROM bookings WHERE status IN ('booked', 'confirmed') AND client_email IS NOT NULL
+               AND starts_at > now() AND starts_at <= now() + make_interval(hours => $1)"#, max).map(|r| (r.id, r.starts_at))
         .fetch_all(&state.db)
         .await?;
         for (id, starts) in due {
             let left = (starts - Utc::now()).num_minutes();
             let applicable: Vec<i32> = hours.iter().copied().filter(|h| (*h as i64) * 60 >= left).collect();
-            let sent: Vec<String> = sqlx::query_scalar("SELECT kind FROM booking_notices WHERE booking_id = $1").bind(id).fetch_all(&state.db).await?;
+            let sent: Vec<String> = sqlx::query_scalar!("SELECT kind FROM booking_notices WHERE booking_id = $1", id).fetch_all(&state.db).await?;
             let Some(nearest) = applicable.iter().min().copied() else { continue };
             if sent.contains(&format!("remind:{nearest}")) {
                 continue;
             }
             // Claim it (one server sends it), with the further-out ones it replaces.
-            let claimed = sqlx::query("INSERT INTO booking_notices (booking_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-                .bind(id)
-                .bind(format!("remind:{nearest}"))
+            let claimed = sqlx::query!("INSERT INTO booking_notices (booking_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, format!("remind:{nearest}"))
                 .execute(&state.db)
                 .await?
                 .rows_affected();
             for h in applicable.iter().filter(|h| **h != nearest) {
-                sqlx::query("INSERT INTO booking_notices (booking_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(format!("remind:{h}")).execute(&state.db).await?;
+                sqlx::query!("INSERT INTO booking_notices (booking_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, format!("remind:{h}")).execute(&state.db).await?;
             }
             if claimed == 0 {
                 continue;
             }
-            sqlx::query("UPDATE bookings SET reminded_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("UPDATE bookings SET reminded_at = now() WHERE id = $1", id).execute(&state.db).await?;
             let Ok(b) = load(state, id).await else { continue };
             let token = random_token(24);
-            sqlx::query("UPDATE bookings SET token_hash = $2 WHERE id = $1").bind(id).bind(hash(&token)).execute(&state.db).await?;
+            sqlx::query!("UPDATE bookings SET token_hash = $2 WHERE id = $1", id, hash(&token)).execute(&state.db).await?;
             let (what, when) = what_and_when(state, &b).await;
             let link = format!("{}/book/manage/{token}", state.config.public_url);
             let mail = crate::mail::customer_notice(b.client_email.as_deref().unwrap(), &name, &format!("Reminder: {when}"), "See you soon", &[format!("Hi {},", b.client_name), format!("A reminder of your booking: {what}, {when}."), "Can't make it? Let us know:".into()], Some(("Confirm or cancel", &link)));
@@ -673,13 +626,10 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
 
     // After the visit: the follow-up, once.
     if follow_h > 0 && let Some(text) = follow_t.as_deref() {
-        let due: Vec<Uuid> = sqlx::query_scalar(
-            "INSERT INTO booking_notices (booking_id, kind)
+        let due: Vec<Uuid> = sqlx::query_scalar!("INSERT INTO booking_notices (booking_id, kind)
              SELECT id, 'follow_up' FROM bookings WHERE status = 'came' AND client_email IS NOT NULL
                AND ends_at + make_interval(hours => $1) <= now() AND ends_at > now() - interval '30 days'
-             ON CONFLICT DO NOTHING RETURNING booking_id",
-        )
-        .bind(follow_h)
+             ON CONFLICT DO NOTHING RETURNING booking_id", follow_h)
         .fetch_all(&state.db)
         .await?;
         for id in due {
@@ -693,11 +643,9 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
 
     // Clients marked as not having come: the message, once.
     if let Some(text) = no_show.as_deref() {
-        let due: Vec<Uuid> = sqlx::query_scalar(
-            "INSERT INTO booking_notices (booking_id, kind)
+        let due: Vec<Uuid> = sqlx::query_scalar!("INSERT INTO booking_notices (booking_id, kind)
              SELECT id, 'no_show' FROM bookings WHERE status = 'no_show' AND client_email IS NOT NULL AND starts_at > now() - interval '7 days'
-             ON CONFLICT DO NOTHING RETURNING booking_id",
-        )
+             ON CONFLICT DO NOTHING RETURNING booking_id")
         .fetch_all(&state.db)
         .await?;
         for id in due {

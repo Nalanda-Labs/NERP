@@ -19,9 +19,9 @@ use crate::{
 pub const JOB: &str = "crm.sla";
 
 pub async fn stage_entered(state: &AppState, item: Uuid, stage: Uuid) -> AppResult<()> {
-    let limit: Option<i32> = sqlx::query_scalar("SELECT sla_minutes FROM crm_stages WHERE id = $1").bind(stage).fetch_optional(&state.db).await?.flatten();
+    let limit: Option<i32> = sqlx::query_scalar!("SELECT sla_minutes FROM crm_stages WHERE id = $1", stage).fetch_optional(&state.db).await?.flatten();
     let Some(minutes) = limit else { return Ok(()) };
-    let since: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT stage_changed_at FROM crm_items WHERE id = $1 AND stage_id = $2").bind(item).bind(stage).fetch_optional(&state.db).await?;
+    let since: Option<DateTime<Utc>> = sqlx::query_scalar!("SELECT stage_changed_at FROM crm_items WHERE id = $1 AND stage_id = $2", item, stage).fetch_optional(&state.db).await?;
     let Some(since) = since else { return Ok(()) };
     jobs::enqueue(&state.db, JOB, json!({ "item_id": item, "stage_id": stage, "since": since }), Some(since + Duration::minutes(minutes as i64))).await?;
     Ok(())
@@ -32,14 +32,11 @@ pub async fn stage_entered(state: &AppState, item: Uuid, stage: Uuid) -> AppResu
 async fn recipients(state: &AppState, assigned: Uuid, escalate: bool) -> AppResult<Vec<Uuid>> {
     let mut to = vec![assigned];
     if escalate {
-        let heads: Vec<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT DISTINCT CASE WHEN d.head_user_id = $1 THEN p.head_user_id ELSE d.head_user_id END
+        let heads: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT DISTINCT CASE WHEN d.head_user_id = $1 THEN p.head_user_id ELSE d.head_user_id END AS "v?"
                FROM user_departments ud
                JOIN departments d ON d.id = ud.department_id
                LEFT JOIN departments p ON p.id = d.parent_id
-              WHERE ud.user_id = $1",
-        )
-        .bind(assigned)
+              WHERE ud.user_id = $1"#, assigned)
         .fetch_all(&state.db)
         .await?
         .into_iter()
@@ -70,15 +67,14 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     let stage: Uuid = serde_json::from_value(payload["stage_id"].clone())?;
     let since: DateTime<Utc> = serde_json::from_value(payload["since"].clone())?;
     let row: Option<(Option<Uuid>, DateTime<Utc>, Option<Uuid>, String, i16)> =
-        sqlx::query_as("SELECT stage_id, stage_changed_at, assigned_to, title, entity_type FROM crm_items WHERE id = $1 AND deleted_at IS NULL")
-            .bind(item)
+        sqlx::query!(r#"SELECT stage_id, stage_changed_at, assigned_to, title, entity_type FROM crm_items WHERE id = $1 AND deleted_at IS NULL"#, item).map(|r| (r.stage_id, r.stage_changed_at, r.assigned_to, r.title, r.entity_type))
             .fetch_optional(&state.db)
             .await?;
     let Some((current, changed, assigned, title, et)) = row else { return Ok(()) };
     if current != Some(stage) || (changed - since).num_milliseconds().abs() > 1 {
         return Ok(()); // moved on (or left and came back: that visit has its own check)
     }
-    let s: Option<(String, Option<i32>, bool)> = sqlx::query_as("SELECT name, sla_minutes, sla_escalate FROM crm_stages WHERE id = $1").bind(stage).fetch_optional(&state.db).await?;
+    let s: Option<(String, Option<i32>, bool)> = sqlx::query!(r#"SELECT name, sla_minutes, sla_escalate FROM crm_stages WHERE id = $1"#, stage).map(|r| (r.name, r.sla_minutes, r.sla_escalate)).fetch_optional(&state.db).await?;
     let Some((name, Some(minutes), escalate)) = s else { return Ok(()) }; // limit removed meanwhile
     // The limit may have been shortened or lengthened since the check was queued.
     let due = since + Duration::minutes(minutes as i64);

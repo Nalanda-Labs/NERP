@@ -87,7 +87,7 @@ pub(crate) struct Rendered {
 }
 
 pub(crate) async fn company_name(state: &AppState) -> String {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "NERP".into())
 }
 
@@ -156,8 +156,8 @@ fn ready(c: &Campaign) -> AppResult<()> {
 
 /// Turns the segments into recipients and queues sending. Returns how many.
 async fn start(state: &AppState, c: &Campaign) -> AppResult<i64> {
-    let optouts: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT email FROM mkt_optouts").fetch_all(&state.db).await?.into_iter().collect();
-    let segments: Vec<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query_as("SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1)").bind(&c.segment_ids).fetch_all(&state.db).await?;
+    let optouts: HashSet<String> = sqlx::query_scalar!("SELECT email FROM mkt_optouts").fetch_all(&state.db).await?.into_iter().collect();
+    let segments: Vec<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query!(r#"SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1)"#, &c.segment_ids).map(|r| (r.entity_type, r.filter, r.item_ids)).fetch_all(&state.db).await?;
     let mut seen: HashSet<String> = HashSet::new();
     let (mut items, mut emails, mut toks) = (Vec::new(), Vec::new(), Vec::new());
     let mut considered = 0i64;
@@ -175,16 +175,10 @@ async fn start(state: &AppState, c: &Campaign) -> AppResult<i64> {
         }
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("INSERT INTO mkt_recipients (campaign_id, item_id, email, token) SELECT $1, x.i, x.e, x.t FROM unnest($2::uuid[], $3::text[], $4::text[]) AS x(i, e, t)")
-        .bind(c.id)
-        .bind(&items)
-        .bind(&emails)
-        .bind(&toks)
+    sqlx::query!("INSERT INTO mkt_recipients (campaign_id, item_id, email, token) SELECT $1, x.i, x.e, x.t FROM unnest($2::uuid[], $3::text[], $4::text[]) AS x(i, e, t)", c.id, &items, &emails, &toks)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE mkt_campaigns SET status = 'sending', started_at = now(), skipped = $2, updated_at = now() WHERE id = $1")
-        .bind(c.id)
-        .bind((considered - items.len() as i64) as i32)
+    sqlx::query!("UPDATE mkt_campaigns SET status = 'sending', started_at = now(), skipped = $2, updated_at = now() WHERE id = $1", c.id, (considered - items.len() as i64) as i32)
         .execute(&mut *tx)
         .await?;
     jobs::enqueue(&mut *tx, JOB, json!({ "campaign_id": c.id }), None).await?;
@@ -212,11 +206,11 @@ pub(crate) async fn schedule(State(state): State<AppState>, auth: AuthUser, Path
         if at > Utc::now() + Duration::days(365) {
             return Err(AppError::bad("schedule it within a year"));
         }
-        sqlx::query("UPDATE mkt_campaigns SET status = 'scheduled', send_at = $2, updated_at = now() WHERE id = $1 AND status = 'draft'").bind(id).bind(at).execute(&state.db).await?;
+        sqlx::query!("UPDATE mkt_campaigns SET status = 'scheduled', send_at = $2, updated_at = now() WHERE id = $1 AND status = 'draft'", id, at).execute(&state.db).await?;
         crate::audit::record(&state.db, Some(auth.id), "marketing.campaign.schedule", "campaign", Some(id.to_string()), json!({ "send_at": at }), None).await;
         return Ok(Json(json!({ "status": "scheduled", "send_at": at })));
     }
-    let claimed = sqlx::query("UPDATE mkt_campaigns SET status = 'sending', updated_at = now() WHERE id = $1 AND status = 'draft'").bind(id).execute(&state.db).await?.rows_affected();
+    let claimed = sqlx::query!("UPDATE mkt_campaigns SET status = 'sending', updated_at = now() WHERE id = $1 AND status = 'draft'", id).execute(&state.db).await?.rows_affected();
     if claimed == 0 {
         return Err(AppError::bad("this campaign was already sent or scheduled"));
     }
@@ -231,11 +225,11 @@ pub(crate) async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(i
     let c = load_campaign(&state, id).await?;
     match c.status.as_str() {
         "scheduled" => {
-            sqlx::query("UPDATE mkt_campaigns SET status = 'draft', send_at = NULL, updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("UPDATE mkt_campaigns SET status = 'draft', send_at = NULL, updated_at = now() WHERE id = $1", id).execute(&state.db).await?;
         }
         "sending" => {
-            sqlx::query("UPDATE mkt_campaigns SET status = 'cancelled', finished_at = now(), updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
-            sqlx::query("DELETE FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending'").bind(id).execute(&state.db).await?;
+            sqlx::query!("UPDATE mkt_campaigns SET status = 'cancelled', finished_at = now(), updated_at = now() WHERE id = $1", id).execute(&state.db).await?;
+            sqlx::query!("DELETE FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending'", id).execute(&state.db).await?;
         }
         _ => return Err(AppError::bad("only scheduled campaigns or ones being sent can be cancelled")),
     }
@@ -250,11 +244,11 @@ pub async fn run_due(state: &AppState) -> anyhow::Result<()> {
     .fetch_all(&state.db)
     .await?;
     for c in due {
-        let claimed = sqlx::query("UPDATE mkt_campaigns SET status = 'sending' WHERE id = $1 AND status = 'scheduled'").bind(c.id).execute(&state.db).await?.rows_affected();
+        let claimed = sqlx::query!("UPDATE mkt_campaigns SET status = 'sending' WHERE id = $1 AND status = 'scheduled'", c.id).execute(&state.db).await?.rows_affected();
         if claimed == 1
             && let Err(e) = start(state, &c).await {
                 tracing::warn!(campaign = %c.id, error = ?e, "could not start a scheduled campaign");
-                sqlx::query("UPDATE mkt_campaigns SET status = 'draft' WHERE id = $1").bind(c.id).execute(&state.db).await?;
+                sqlx::query!("UPDATE mkt_campaigns SET status = 'draft' WHERE id = $1", c.id).execute(&state.db).await?;
             }
     }
     Ok(())
@@ -269,17 +263,15 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
         return Ok(());
     }
     let batch: Vec<(Uuid, Option<Uuid>, String, String)> =
-        sqlx::query_as("SELECT id, item_id, email, token FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending' ORDER BY email LIMIT $2")
-            .bind(id)
-            .bind(BATCH)
+        sqlx::query!(r#"SELECT id, item_id, email, token FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending' ORDER BY email LIMIT $2"#, id, BATCH).map(|r| (r.id, r.item_id, r.email, r.token))
             .fetch_all(&state.db)
             .await?;
     let company = company_name(state).await;
     for (rid, item, email, token) in &batch {
         // An address may have opted out since sending started.
-        let out: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mkt_optouts WHERE email = $1)").bind(email).fetch_one(&state.db).await?;
+        let out: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM mkt_optouts WHERE email = $1) AS "v!""#, email).fetch_one(&state.db).await?;
         if out {
-            sqlx::query("UPDATE mkt_recipients SET status = 'failed', error = 'unsubscribed before it was sent' WHERE id = $1").bind(rid).execute(&state.db).await?;
+            sqlx::query!("UPDATE mkt_recipients SET status = 'failed', error = 'unsubscribed before it was sent' WHERE id = $1", rid).execute(&state.db).await?;
             continue;
         }
         let result = match render(state, &c, *item, token, &company).await {
@@ -300,22 +292,22 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
         };
         match result {
             Ok(()) => {
-                sqlx::query("UPDATE mkt_recipients SET status = 'sent', sent_at = now(), error = NULL WHERE id = $1").bind(rid).execute(&state.db).await?;
+                sqlx::query!("UPDATE mkt_recipients SET status = 'sent', sent_at = now(), error = NULL WHERE id = $1", rid).execute(&state.db).await?;
                 if let Some(item) = item {
                     let _ = timeline(&state.db, *item, "campaign", None, None, json!({ "campaign_id": c.id, "name": c.name, "event": "sent" })).await;
                 }
             }
             Err(e) => {
-                sqlx::query("UPDATE mkt_recipients SET status = 'failed', error = $2 WHERE id = $1").bind(rid).bind(e.chars().take(500).collect::<String>()).execute(&state.db).await?;
+                sqlx::query!("UPDATE mkt_recipients SET status = 'failed', error = $2 WHERE id = $1", rid, e.chars().take(500).collect::<String>()).execute(&state.db).await?;
             }
         }
     }
-    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending'").bind(id).fetch_one(&state.db).await?;
+    let left: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM mkt_recipients WHERE campaign_id = $1 AND status = 'pending'"#, id).fetch_one(&state.db).await?;
     if left > 0 {
         let pause = Duration::milliseconds((batch.len() as i64 * 60_000) / PER_MINUTE);
         jobs::enqueue(&state.db, JOB, json!({ "campaign_id": id }), Some(Utc::now() + pause)).await?;
     } else {
-        sqlx::query("UPDATE mkt_campaigns SET status = 'sent', finished_at = now(), updated_at = now() WHERE id = $1 AND status = 'sending'").bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE mkt_campaigns SET status = 'sent', finished_at = now(), updated_at = now() WHERE id = $1 AND status = 'sending'", id).execute(&state.db).await?;
     }
     Ok(())
 }
@@ -341,7 +333,7 @@ pub(crate) async fn test_send(State(state): State<AppState>, auth: AuthUser, Pat
     let item = match b.item_id {
         Some(i) => Some(i),
         None => {
-            let first: Option<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query_as("SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1) LIMIT 1").bind(&c.segment_ids).fetch_optional(&state.db).await?;
+            let first: Option<(i16, Value, Option<Vec<Uuid>>)> = sqlx::query!(r#"SELECT entity_type, filter, item_ids FROM mkt_segments WHERE id = ANY($1) LIMIT 1"#, &c.segment_ids).map(|r| (r.entity_type, r.filter, r.item_ids)).fetch_optional(&state.db).await?;
             match first {
                 Some((et, f, ids)) => members(&state, &entity_type_by_id(&state, et).await?, &parse_filter(&f)?, ids.as_deref(), 1).await?.first().map(|m| m.0),
                 None => None,

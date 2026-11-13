@@ -86,7 +86,7 @@ const FROM: &str = " FROM crm_documents d
 
 /// The record types the caller can read, with their scope.
 async fn scopes(state: &AppState, auth: &AuthUser) -> AppResult<Vec<(i16, Visible)>> {
-    let types: Vec<i16> = sqlx::query_scalar("SELECT id FROM crm_entity_types ORDER BY id").fetch_all(&state.db).await?;
+    let types: Vec<i16> = sqlx::query_scalar!("SELECT id FROM crm_entity_types ORDER BY id").fetch_all(&state.db).await?;
     let mut out = Vec::new();
     for t in types {
         let v = visible(state, auth, t, "read").await?;

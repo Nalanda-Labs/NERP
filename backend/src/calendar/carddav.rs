@@ -75,16 +75,13 @@ impl Person {
 /// Everyone in the address book; with `with_gone`, also people who left (to tell apps to
 /// drop them).
 pub(crate) async fn people(state: &AppState, with_gone: bool) -> sqlx::Result<Vec<Person>> {
-    sqlx::query_as(
-        "SELECT u.id, u.first_name, u.last_name, u.middle_name, u.email, u.position, u.phone, u.mobile, u.birthday,
-                GREATEST(u.updated_at, COALESCE((SELECT MAX(d.updated_at) FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id), u.updated_at)) AS updated_at,
-                COALESCE((SELECT array_agg(d.name ORDER BY d.name) FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id AND NOT d.hidden), '{}') AS departments,
-                (u.is_active AND NOT u.join_pending) AS is_active
+    sqlx::query_as!(Person, r#"SELECT u.id AS "id!", u.first_name AS "first_name!", u.last_name AS "last_name!", u.middle_name AS "middle_name?", u.email AS "email!", u.position AS "position?", u.phone AS "phone?", u.mobile AS "mobile?", u.birthday AS "birthday?",
+                GREATEST(u.updated_at, COALESCE((SELECT MAX(d.updated_at) FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id), u.updated_at)) AS "updated_at!",
+                COALESCE((SELECT array_agg(d.name ORDER BY d.name) FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id AND NOT d.hidden), '{}') AS "departments!",
+                (u.is_active AND NOT u.join_pending) AS "is_active!"
          FROM users u
          WHERE NOT u.is_guest AND NOT u.is_system AND ($1 OR (u.is_active AND NOT u.join_pending))
-         ORDER BY u.last_name, u.first_name",
-    )
-    .bind(with_gone)
+         ORDER BY u.last_name, u.first_name"#, with_gone)
     .fetch_all(&state.db)
     .await
 }

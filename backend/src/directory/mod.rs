@@ -71,9 +71,7 @@ pub(crate) struct Stored {
 
 pub(crate) async fn load(state: &AppState) -> AppResult<Stored> {
     type Row = (Value, Option<Vec<u8>>, Value, Option<Vec<u8>>, Option<chrono::DateTime<chrono::Utc>>, Option<Value>);
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT ldap, ldap_secret, sso, sso_secret, ldap_synced_at, ldap_sync_result FROM directory_config WHERE id = 1",
-    )
+    let row: Option<Row> = sqlx::query!(r#"SELECT ldap, ldap_secret, sso, sso_secret, ldap_synced_at, ldap_sync_result FROM directory_config WHERE id = 1"#).map(|r| (r.ldap, r.ldap_secret, r.sso, r.sso_secret, r.ldap_synced_at, r.ldap_sync_result))
     .fetch_optional(&state.db)
     .await?;
     let (l, ls, s, ss, at, res) = row.unwrap_or((json!({}), None, json!({}), None, None, None));
@@ -104,7 +102,7 @@ async fn get_config(State(state): State<AppState>, auth: AuthUser) -> AppResult<
     auth.require(perm::SETTINGS_MANAGE)?;
     let s = load(&state).await?;
     let counts: Vec<(String, i64)> =
-        sqlx::query_as("SELECT auth_source, count(*) FROM users WHERE is_active GROUP BY auth_source").fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT auth_source AS "auth_source!", count(*) AS "c1!" FROM users WHERE is_active GROUP BY auth_source"#).map(|r| (r.auth_source, r.c1)).fetch_all(&state.db).await?;
     Ok(Json(json!({
         "ldap_available": state.config.ldap_enabled,
         "ldap": s.ldap,
@@ -121,7 +119,7 @@ async fn get_config(State(state): State<AppState>, auth: AuthUser) -> AppResult<
 
 /// Accounts whose password lives elsewhere cannot change or reset it here.
 pub async fn external_source(state: &AppState, user: uuid::Uuid) -> AppResult<Option<String>> {
-    let s: Option<String> = sqlx::query_scalar("SELECT auth_source FROM users WHERE id = $1").bind(user).fetch_optional(&state.db).await?;
+    let s: Option<String> = sqlx::query_scalar!("SELECT auth_source FROM users WHERE id = $1", user).fetch_optional(&state.db).await?;
     Ok(s.filter(|s| s != "local"))
 }
 

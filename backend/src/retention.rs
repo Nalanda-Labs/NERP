@@ -168,7 +168,7 @@ fn rule(key: &str) -> AppResult<&'static Rule> {
 }
 
 async fn config(state: &AppState) -> AppResult<Vec<(String, bool, i32, String, DateTime<Utc>)>> {
-    Ok(sqlx::query_as("SELECT key, enabled, keep_days, action, updated_at FROM retention_rules").fetch_all(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT key, enabled, keep_days, action, updated_at FROM retention_rules"#).map(|r| (r.key, r.enabled, r.keep_days, r.action, r.updated_at)).fetch_all(&state.db).await?)
 }
 
 /// How many rows are past the cutoff now (counted up to 100 000).
@@ -231,14 +231,14 @@ async fn apply(state: &AppState, r: &Rule, days: i32, action: &str) -> anyhow::R
 async fn discard_rows(tx: &mut sqlx::PgConnection, files: &mut Vec<(Uuid, String)>) -> sqlx::Result<()> {
     let mut gone = vec![];
     for (id, rel) in files.drain(..) {
-        sqlx::query("SAVEPOINT f").execute(&mut *tx).await?;
-        match sqlx::query("DELETE FROM files WHERE id = $1").bind(id).execute(&mut *tx).await {
+        sqlx::query!("SAVEPOINT f").execute(&mut *tx).await?;
+        match sqlx::query!("DELETE FROM files WHERE id = $1", id).execute(&mut *tx).await {
             Ok(_) => {
-                sqlx::query("RELEASE SAVEPOINT f").execute(&mut *tx).await?;
+                sqlx::query!("RELEASE SAVEPOINT f").execute(&mut *tx).await?;
                 gone.push((id, rel));
             }
             Err(_) => {
-                sqlx::query("ROLLBACK TO SAVEPOINT f").execute(&mut *tx).await?;
+                sqlx::query!("ROLLBACK TO SAVEPOINT f").execute(&mut *tx).await?;
             }
         }
     }
@@ -248,7 +248,7 @@ async fn discard_rows(tx: &mut sqlx::PgConnection, files: &mut Vec<(Uuid, String
 
 /// Runs every rule that is on; logs each.
 pub async fn run(state: &AppState, by: Option<Uuid>) -> anyhow::Result<Vec<Value>> {
-    let rules: Vec<(String, i32, String)> = sqlx::query_as("SELECT key, keep_days, action FROM retention_rules WHERE enabled ORDER BY key").fetch_all(&state.db).await?;
+    let rules: Vec<(String, i32, String)> = sqlx::query!(r#"SELECT key, keep_days, action FROM retention_rules WHERE enabled ORDER BY key"#).map(|r| (r.key, r.keep_days, r.action)).fetch_all(&state.db).await?;
     let mut out = vec![];
     for (key, days, action) in rules {
         let Ok(r) = rule(&key) else { continue };
@@ -259,13 +259,7 @@ pub async fn run(state: &AppState, by: Option<Uuid>) -> anyhow::Result<Vec<Value
                 (0, Some(format!("{e:#}")))
             }
         };
-        sqlx::query("INSERT INTO retention_runs (key, action, keep_days, affected, error, run_by) VALUES ($1, $2, $3, $4, $5, $6)")
-            .bind(&key)
-            .bind(&action)
-            .bind(days)
-            .bind(affected)
-            .bind(&error)
-            .bind(by)
+        sqlx::query!("INSERT INTO retention_runs (key, action, keep_days, affected, error, run_by) VALUES ($1, $2, $3, $4, $5, $6)", &key, &action, days, affected, error.as_deref(), by)
             .execute(&state.db)
             .await?;
         if affected > 0 || error.is_some() {
@@ -273,7 +267,7 @@ pub async fn run(state: &AppState, by: Option<Uuid>) -> anyhow::Result<Vec<Value
         }
         out.push(json!({ "key": key, "action": action, "affected": affected, "error": error }));
     }
-    sqlx::query("DELETE FROM retention_runs WHERE ran_at < now() - interval '2 years'").execute(&state.db).await?;
+    sqlx::query!("DELETE FROM retention_runs WHERE ran_at < now() - interval '2 years'").execute(&state.db).await?;
     Ok(out)
 }
 
@@ -288,8 +282,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
     for r in RULES {
         let c = cfg.iter().find(|c| c.0 == r.key);
         let days = c.map(|c| c.2).unwrap_or(r.default_days);
-        let last: Option<(DateTime<Utc>, i64, Option<String>)> = sqlx::query_as("SELECT ran_at, affected, error FROM retention_runs WHERE key = $1 ORDER BY ran_at DESC LIMIT 1")
-            .bind(r.key)
+        let last: Option<(DateTime<Utc>, i64, Option<String>)> = sqlx::query!(r#"SELECT ran_at, affected, error FROM retention_runs WHERE key = $1 ORDER BY ran_at DESC LIMIT 1"#, r.key).map(|r| (r.ran_at, r.affected, r.error))
             .fetch_optional(&state.db)
             .await?;
         rules.push(json!({
@@ -299,10 +292,8 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
             "last_run": last.map(|(at, n, e)| json!({ "at": at, "affected": n, "error": e })),
         }));
     }
-    let log: Vec<(String, String, i32, i64, Option<String>, DateTime<Utc>, Option<String>)> = sqlx::query_as(
-        "SELECT r.key, r.action, r.keep_days, r.affected, r.error, r.ran_at, trim(u.first_name || ' ' || u.last_name)
-         FROM retention_runs r LEFT JOIN users u ON u.id = r.run_by WHERE r.affected > 0 OR r.error IS NOT NULL ORDER BY r.ran_at DESC LIMIT 50",
-    )
+    let log: Vec<(String, String, i32, i64, Option<String>, DateTime<Utc>, Option<String>)> = sqlx::query!(r#"SELECT r.key, r.action, r.keep_days, r.affected, r.error, r.ran_at, trim(u.first_name || ' ' || u.last_name) AS "c6"
+         FROM retention_runs r LEFT JOIN users u ON u.id = r.run_by WHERE r.affected > 0 OR r.error IS NOT NULL ORDER BY r.ran_at DESC LIMIT 50"#).map(|r| (r.key, r.action, r.keep_days, r.affected, r.error, r.ran_at, r.c6))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -328,15 +319,8 @@ async fn save(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clien
     if !r.actions.contains(&b.action.as_str()) {
         return Err(AppError::bad(format!("{}: can't {}", r.title, b.action)));
     }
-    sqlx::query(
-        "INSERT INTO retention_rules (key, enabled, keep_days, action, updated_by, updated_at) VALUES ($1, $2, $3, $4, $5, now())
-         ON CONFLICT (key) DO UPDATE SET enabled = EXCLUDED.enabled, keep_days = EXCLUDED.keep_days, action = EXCLUDED.action, updated_by = EXCLUDED.updated_by, updated_at = now()",
-    )
-    .bind(&key)
-    .bind(b.enabled)
-    .bind(b.keep_days)
-    .bind(&b.action)
-    .bind(auth.id)
+    sqlx::query!("INSERT INTO retention_rules (key, enabled, keep_days, action, updated_by, updated_at) VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (key) DO UPDATE SET enabled = EXCLUDED.enabled, keep_days = EXCLUDED.keep_days, action = EXCLUDED.action, updated_by = EXCLUDED.updated_by, updated_at = now()", &key, b.enabled, b.keep_days, &b.action, auth.id)
     .execute(&state.db)
     .await?;
     audit::record(&state.db, Some(auth.id), "retention.rule", "retention_rule", Some(key.clone()), json!({ "enabled": b.enabled, "keep_days": b.keep_days, "action": b.action }), ip.as_deref()).await;

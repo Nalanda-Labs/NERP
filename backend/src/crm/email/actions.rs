@@ -40,11 +40,8 @@ async fn mail(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Mail> {
         return Err(AppError::NotFound("email"));
     }
     let (subject, from_name, from_addr, text, snippet): (String, String, String, Option<String>, String) =
-        sqlx::query_as("SELECT subject, from_name, from_addr, body_text, snippet FROM crm_emails WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    let items: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT l.item_id, t.code FROM crm_email_links l JOIN crm_items i ON i.id = l.item_id JOIN crm_entity_types t ON t.id = i.entity_type WHERE l.email_id = $1",
-    )
-    .bind(id)
+        sqlx::query!(r#"SELECT subject, from_name, from_addr, body_text, snippet FROM crm_emails WHERE id = $1"#, id).map(|r| (r.subject, r.from_name, r.from_addr, r.body_text, r.snippet)).fetch_one(&state.db).await?;
+    let items: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT l.item_id, t.code FROM crm_email_links l JOIN crm_items i ON i.id = l.item_id JOIN crm_entity_types t ON t.id = i.entity_type WHERE l.email_id = $1"#, id).map(|r| (r.item_id, r.code))
     .fetch_all(&state.db)
     .await?;
     let mut visible = Vec::new();
@@ -87,7 +84,7 @@ async fn make_task(State(state): State<AppState>, auth: AuthUser, Path(id): Path
         ..Default::default()
     })
     .await?;
-    let number: i64 = sqlx::query_scalar("SELECT number FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+    let number: i64 = sqlx::query_scalar!("SELECT number FROM tasks WHERE id = $1", task).fetch_one(&state.db).await?;
     Ok(Json(json!({ "task_id": task, "number": number })))
 }
 
