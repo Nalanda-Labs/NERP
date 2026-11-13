@@ -90,20 +90,13 @@ async fn duplicates(State(state): State<AppState>, auth: AuthUser, Path(code): P
     let phones = split(&q.phones, "phone");
     let emails = split(&q.emails, "email");
     let name = clean(q.name).map(|n| n.to_lowercase());
-    let found: Vec<Dup> = sqlx::query_as(
-        "SELECT DISTINCT ON (i.id) i.id, i.number, i.title, i.assigned_to, d.reason FROM (
+    let found: Vec<Dup> = sqlx::query_as!(Dup, r#"SELECT DISTINCT ON (i.id) i.id AS "id!", i.number AS "number!", i.title AS "title!", i.assigned_to AS "assigned_to?", d.reason AS "reason!" FROM (
              SELECT m.item_id AS id, 'phone' AS reason FROM crm_multifields m WHERE m.kind = 'phone' AND m.normalized = ANY($2)
              UNION ALL SELECT m.item_id, 'email' FROM crm_multifields m WHERE m.kind = 'email' AND m.normalized = ANY($3)
              UNION ALL SELECT i2.id, 'name' FROM crm_items i2 WHERE $4::text IS NOT NULL AND i2.entity_type = $1 AND lower(i2.title) = $4
          ) d JOIN crm_items i ON i.id = d.id
          WHERE i.entity_type = $1 AND i.deleted_at IS NULL AND ($5::uuid IS NULL OR i.id <> $5)
-         LIMIT 50",
-    )
-    .bind(t.id)
-    .bind(&phones)
-    .bind(&emails)
-    .bind(&name)
-    .bind(q.exclude)
+         LIMIT 50"#, t.id, &phones, &emails, name.as_deref(), q.exclude)
     .fetch_all(&state.db)
     .await?;
     let scope = visible(&state, &auth, t.id, "read").await?;
@@ -145,63 +138,42 @@ async fn merge_records(state: &AppState, auth: &AuthUser, t: &EntityType, b: &Me
     let mut tx = state.db.begin().await?;
     for s in &b.source_ids {
         // Contact details the target doesn't have yet.
-        sqlx::query(
-            "UPDATE crm_multifields m SET item_id = $1, sort = sort + 100 WHERE m.item_id = $2
-             AND NOT EXISTS (SELECT 1 FROM crm_multifields x WHERE x.item_id = $1 AND x.kind = m.kind AND x.normalized = m.normalized)",
-        )
-        .bind(b.target_id)
-        .bind(s)
+        sqlx::query!("UPDATE crm_multifields m SET item_id = $1, sort = sort + 100 WHERE m.item_id = $2
+             AND NOT EXISTS (SELECT 1 FROM crm_multifields x WHERE x.item_id = $1 AND x.kind = m.kind AND x.normalized = m.normalized)", b.target_id, s)
         .execute(&mut *tx)
         .await?;
         // Links: deals/leads/companies pointing at a merged contact or company.
-        sqlx::query(
-            "INSERT INTO crm_item_contacts (item_id, contact_id, is_primary, sort)
-             SELECT item_id, $1, is_primary, sort FROM crm_item_contacts WHERE contact_id = $2 ON CONFLICT DO NOTHING",
-        )
-        .bind(b.target_id)
-        .bind(s)
+        sqlx::query!("INSERT INTO crm_item_contacts (item_id, contact_id, is_primary, sort)
+             SELECT item_id, $1, is_primary, sort FROM crm_item_contacts WHERE contact_id = $2 ON CONFLICT DO NOTHING", b.target_id, s)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO crm_item_contacts (item_id, contact_id, is_primary, sort)
-             SELECT $1, contact_id, FALSE, sort + 100 FROM crm_item_contacts WHERE item_id = $2 ON CONFLICT DO NOTHING",
-        )
-        .bind(b.target_id)
-        .bind(s)
+        sqlx::query!("INSERT INTO crm_item_contacts (item_id, contact_id, is_primary, sort)
+             SELECT $1, contact_id, FALSE, sort + 100 FROM crm_item_contacts WHERE item_id = $2 ON CONFLICT DO NOTHING", b.target_id, s)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE crm_items SET company_id = $1 WHERE company_id = $2").bind(b.target_id).bind(s).execute(&mut *tx).await?;
-        sqlx::query("UPDATE crm_timeline SET item_id = $1 WHERE item_id = $2").bind(b.target_id).bind(s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_items SET company_id = $1 WHERE company_id = $2", b.target_id, s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_timeline SET item_id = $1 WHERE item_id = $2", b.target_id, s).execute(&mut *tx).await?;
         // Requisites move over (never as the default if the target already has one), and
         // so do generated documents.
-        sqlx::query("UPDATE crm_requisites SET item_id = $1, is_default = is_default AND NOT EXISTS (SELECT 1 FROM crm_requisites x WHERE x.item_id = $1) WHERE item_id = $2")
-            .bind(b.target_id)
-            .bind(s)
+        sqlx::query!("UPDATE crm_requisites SET item_id = $1, is_default = is_default AND NOT EXISTS (SELECT 1 FROM crm_requisites x WHERE x.item_id = $1) WHERE item_id = $2", b.target_id, s)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE crm_requisite_ids SET item_id = $1 WHERE item_id = $2").bind(b.target_id).bind(s).execute(&mut *tx).await?;
-        sqlx::query("UPDATE crm_documents SET item_id = $1 WHERE item_id = $2").bind(b.target_id).bind(s).execute(&mut *tx).await?;
-        sqlx::query("UPDATE sign_requests SET item_id = $1 WHERE item_id = $2").bind(b.target_id).bind(s).execute(&mut *tx).await?;
-        sqlx::query("UPDATE chat_sessions SET item_id = $1 WHERE item_id = $2").bind(b.target_id).bind(s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_requisite_ids SET item_id = $1 WHERE item_id = $2", b.target_id, s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_documents SET item_id = $1 WHERE item_id = $2", b.target_id, s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE sign_requests SET item_id = $1 WHERE item_id = $2", b.target_id, s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE chat_sessions SET item_id = $1 WHERE item_id = $2", b.target_id, s).execute(&mut *tx).await?;
         crate::accounting::merged(&mut tx, *s, b.target_id).await?;
         // A merged shop order keeps its customer's order page (one per record).
-        sqlx::query("UPDATE shop_orders SET item_id = $1 WHERE item_id = $2 AND NOT EXISTS (SELECT 1 FROM shop_orders WHERE item_id = $1)")
-            .bind(b.target_id)
-            .bind(s)
+        sqlx::query!("UPDATE shop_orders SET item_id = $1 WHERE item_id = $2 AND NOT EXISTS (SELECT 1 FROM shop_orders WHERE item_id = $1)", b.target_id, s)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE crm_activities SET item_id = $1 WHERE item_id = $2").bind(b.target_id).bind(s).execute(&mut *tx).await?;
-        sqlx::query(
-            "UPDATE crm_item_products SET item_id = $1 WHERE item_id = $2
-             AND NOT EXISTS (SELECT 1 FROM crm_item_products x WHERE x.item_id = $1)",
-        )
-        .bind(b.target_id)
-        .bind(s)
+        sqlx::query!("UPDATE crm_activities SET item_id = $1 WHERE item_id = $2", b.target_id, s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_item_products SET item_id = $1 WHERE item_id = $2
+             AND NOT EXISTS (SELECT 1 FROM crm_item_products x WHERE x.item_id = $1)", b.target_id, s)
         .execute(&mut *tx)
         .await?;
         // Fill the target's empty fields; the target's custom field values win.
-        sqlx::query(
-            "UPDATE crm_items t SET
+        sqlx::query!("UPDATE crm_items t SET
                 honorific = COALESCE(t.honorific, s.honorific), first_name = COALESCE(t.first_name, s.first_name),
                 middle_name = COALESCE(t.middle_name, s.middle_name), last_name = COALESCE(t.last_name, s.last_name),
                 job_title = COALESCE(t.job_title, s.job_title), birthdate = COALESCE(t.birthdate, s.birthdate),
@@ -211,16 +183,13 @@ async fn merge_records(state: &AppState, auth: &AuthUser, t: &EntityType, b: &Me
                 source_details = COALESCE(t.source_details, s.source_details), address = COALESCE(t.address, s.address),
                 comments = COALESCE(t.comments, s.comments), company_id = COALESCE(t.company_id, s.company_id),
                 close_date = COALESCE(t.close_date, s.close_date), uf = s.uf || t.uf, updated_at = now()
-             FROM crm_items s WHERE t.id = $1 AND s.id = $2",
-        )
-        .bind(b.target_id)
-        .bind(s)
+             FROM crm_items s WHERE t.id = $1 AND s.id = $2", b.target_id, s)
         .execute(&mut *tx)
         .await?;
-        let title: String = sqlx::query_scalar("SELECT title FROM crm_items WHERE id = $1").bind(s).fetch_one(&mut *tx).await?;
+        let title: String = sqlx::query_scalar!("SELECT title FROM crm_items WHERE id = $1", s).fetch_one(&mut *tx).await?;
         timeline(&mut *tx, b.target_id, "merged", Some(auth.id), None, json!({ "from": s, "title": title })).await?;
-        sqlx::query("DELETE FROM crm_item_contacts WHERE item_id = $1 OR contact_id = $1").bind(s).execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM crm_items WHERE id = $1").bind(s).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM crm_item_contacts WHERE item_id = $1 OR contact_id = $1", s).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM crm_items WHERE id = $1", s).execute(&mut *tx).await?;
     }
     refresh_derived(&state, &mut tx, t, b.target_id).await?;
     tx.commit().await?;
@@ -326,15 +295,12 @@ async fn duplicate_groups(State(state): State<AppState>, auth: AuthUser, Path(co
     let groups: Vec<GroupRow> = qb.build_query_as().fetch_all(&state.db).await?;
     let total = groups.first().map(|g| g.total).unwrap_or(0);
     let all: Vec<Uuid> = groups.iter().flat_map(|g| g.ids.iter().copied()).collect();
-    let items: Vec<GroupItem> = sqlx::query_as(
-        "SELECT i.id, i.number, i.title, i.assigned_to,
-                CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS assigned_name, i.created_at,
-                (SELECT string_agg(value, ', ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'phone') AS phones,
-                (SELECT string_agg(value, ', ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'email') AS emails,
-                (SELECT COUNT(*) FROM crm_items d WHERE d.deleted_at IS NULL AND (d.company_id = i.id OR EXISTS (SELECT 1 FROM crm_item_contacts c WHERE c.item_id = d.id AND c.contact_id = i.id)))::int8 AS deals
-         FROM crm_items i LEFT JOIN users u ON u.id = i.assigned_to WHERE i.id = ANY($1)",
-    )
-    .bind(&all)
+    let items: Vec<GroupItem> = sqlx::query_as!(GroupItem, r#"SELECT i.id AS "id!", i.number AS "number!", i.title AS "title!", i.assigned_to AS "assigned_to?",
+                CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS "assigned_name?", i.created_at AS "created_at!",
+                (SELECT string_agg(value, ', ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'phone') AS "phones?",
+                (SELECT string_agg(value, ', ') FROM crm_multifields m WHERE m.item_id = i.id AND m.kind = 'email') AS "emails?",
+                (SELECT COUNT(*) FROM crm_items d WHERE d.deleted_at IS NULL AND (d.company_id = i.id OR EXISTS (SELECT 1 FROM crm_item_contacts c WHERE c.item_id = d.id AND c.contact_id = i.id)))::int8 AS "deals!"
+         FROM crm_items i LEFT JOIN users u ON u.id = i.assigned_to WHERE i.id = ANY($1)"#, &all)
     .fetch_all(&state.db)
     .await?;
     let by_id: HashMap<Uuid, &GroupItem> = items.iter().map(|i| (i.id, i)).collect();
@@ -365,21 +331,14 @@ async fn ignore_group(State(state): State<AppState>, auth: AuthUser, Path(code):
         return Err(AppError::bad("a group has between 2 and 1000 records"));
     }
     // Only records the person may change, of this type.
-    let rows: Vec<(Uuid, i16, Option<Uuid>)> = sqlx::query_as("SELECT id, entity_type, assigned_to FROM crm_items WHERE id = ANY($1) AND deleted_at IS NULL").bind(&b.item_ids).fetch_all(&state.db).await?;
+    let rows: Vec<(Uuid, i16, Option<Uuid>)> = sqlx::query!(r#"SELECT id, entity_type, assigned_to FROM crm_items WHERE id = ANY($1) AND deleted_at IS NULL"#, &b.item_ids).map(|r| (r.id, r.entity_type, r.assigned_to)).fetch_all(&state.db).await?;
     let scope = visible(&state, &auth, t.id, "write").await?;
     if rows.len() != b.item_ids.len() || rows.iter().any(|r| r.1 != t.id || !scope.allows(r.2)) {
         return Err(AppError::Forbidden);
     }
-    sqlx::query(
-        "INSERT INTO crm_duplicate_ignores (entity_type, kind, value, item_ids, created_by) VALUES ($1, $2, $3, $4, $5)
+    sqlx::query!("INSERT INTO crm_duplicate_ignores (entity_type, kind, value, item_ids, created_by) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (entity_type, kind, value) DO UPDATE SET item_ids = (SELECT array_agg(DISTINCT x) FROM unnest(crm_duplicate_ignores.item_ids || EXCLUDED.item_ids) x),
-             created_by = EXCLUDED.created_by, created_at = now()",
-    )
-    .bind(t.id)
-    .bind(&b.kind)
-    .bind(&b.value)
-    .bind(&b.item_ids)
-    .bind(auth.id)
+             created_by = EXCLUDED.created_by, created_at = now()", t.id, &b.kind, &b.value, &b.item_ids, auth.id)
     .execute(&state.db)
     .await?;
     Ok(Json(json!({ "ok": true })))
@@ -411,9 +370,7 @@ async fn merge_groups(State(state): State<AppState>, auth: AuthUser, Path(code):
         ids.sort();
         ids.dedup();
         let present: Vec<(Uuid, DateTime<Utc>)> =
-            sqlx::query_as("SELECT id, created_at FROM crm_items WHERE id = ANY($1) AND entity_type = $2 AND deleted_at IS NULL ORDER BY created_at, number")
-                .bind(&ids)
-                .bind(t.id)
+            sqlx::query!(r#"SELECT id, created_at FROM crm_items WHERE id = ANY($1) AND entity_type = $2 AND deleted_at IS NULL ORDER BY created_at, number"#, &ids, t.id).map(|r| (r.id, r.created_at))
                 .fetch_all(&state.db)
                 .await?;
         if present.len() < 2 {
@@ -476,7 +433,7 @@ async fn start_import(State(state): State<AppState>, auth: AuthUser, Path(code):
     if !["skip", "update", "create"].contains(&b.duplicates.as_str()) {
         return Err(AppError::bad("duplicates must be skip, update or create"));
     }
-    let owner: Option<Option<Uuid>> = sqlx::query_scalar("SELECT owner_id FROM files WHERE id = $1").bind(b.file_id).fetch_optional(&state.db).await?;
+    let owner: Option<Option<Uuid>> = sqlx::query_scalar!(r#"SELECT owner_id AS "owner_id?" FROM files WHERE id = $1"#, b.file_id).fetch_optional(&state.db).await?;
     if owner != Some(Some(auth.id)) {
         return Err(AppError::bad("upload the file first"));
     }
@@ -561,18 +518,14 @@ async fn row_body(state: &AppState, t: &EntityType, map: &Map<String, Value>, re
                 uf.insert(f.to_string(), json!(raw));
             }
             "assigned_email" => {
-                let u: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE email = $1 AND is_active").bind(raw.to_lowercase()).fetch_optional(&state.db).await?;
+                let u: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM users WHERE email = $1 AND is_active", raw.to_lowercase()).fetch_optional(&state.db).await?;
                 if let Some(u) = u {
                     body.insert("assigned_to".into(), json!(u));
                 }
             }
             "stage_name" if t.has_stages => {
-                let s: Option<Uuid> = sqlx::query_scalar(
-                    "SELECT s.id FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id
-                     WHERE c.entity_type = $1 AND lower(s.name) = lower($2) ORDER BY c.is_default DESC, s.sort LIMIT 1",
-                )
-                .bind(t.id)
-                .bind(raw)
+                let s: Option<Uuid> = sqlx::query_scalar!("SELECT s.id FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id
+                     WHERE c.entity_type = $1 AND lower(s.name) = lower($2) ORDER BY c.is_default DESC, s.sort LIMIT 1", t.id, raw)
                 .fetch_optional(&state.db)
                 .await?;
                 if let Some(s) = s {
@@ -581,10 +534,7 @@ async fn row_body(state: &AppState, t: &EntityType, map: &Map<String, Value>, re
             }
             "company" if t.id != COMPANY => {
                 // Link to an existing company by exact name, or create one.
-                let existing: Option<Uuid> = sqlx::query_scalar(
-                    "SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) LIMIT 1",
-                )
-                .bind(raw)
+                let existing: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) LIMIT 1", raw)
                 .fetch_optional(&state.db)
                 .await?;
                 body.insert("company_id".into(), json!(existing.map(|e| e.to_string()).unwrap_or_else(|| format!("new:{raw}"))));
@@ -634,15 +584,10 @@ async fn import_one(state: &AppState, auth: &AuthUser, t: &EntityType, company_t
     } else {
         let (phones, emails): (Vec<String>, Vec<String>) = keys.iter().cloned().partition(|k| k.starts_with("phone:"));
         let strip = |v: Vec<String>| v.into_iter().map(|k| k.split_once(':').unwrap().1.to_string()).collect::<Vec<_>>();
-        sqlx::query_scalar(
-            "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+        sqlx::query_scalar!("SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
              WHERE i.entity_type = $1 AND i.deleted_at IS NULL
                AND ((m.kind = 'phone' AND m.normalized = ANY($2)) OR (m.kind = 'email' AND m.normalized = ANY($3)))
-             LIMIT 1",
-        )
-        .bind(t.id)
-        .bind(strip(phones))
-        .bind(strip(emails))
+             LIMIT 1", t.id, &(strip(phones)), &(strip(emails)))
         .fetch_optional(&state.db)
         .await?
     };
@@ -677,8 +622,7 @@ async fn card_body(state: &AppState, c: super::vcard::Card) -> Result<(Map<Strin
         })
         .unwrap_or_default();
     if let Some(org) = c.company.filter(|o| !o.is_empty()) {
-        let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) LIMIT 1")
-            .bind(&org)
+        let existing: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) LIMIT 1", &org)
             .fetch_optional(&state.db)
             .await?;
         body.insert("company_id".into(), json!(existing.map(|e| e.to_string()).unwrap_or_else(|| format!("new:{org}"))));
@@ -1069,26 +1013,14 @@ async fn recycle_list(State(state): State<AppState>, auth: AuthUser, Query(q): Q
         None => None,
     };
     let admin = is_crm_admin(&auth);
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM crm_items WHERE deleted_at IS NOT NULL AND ($1::smallint IS NULL OR entity_type = $1) AND ($2 OR deleted_by = $3)",
-    )
-    .bind(t)
-    .bind(admin)
-    .bind(auth.id)
+    let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_items WHERE deleted_at IS NOT NULL AND ($1::smallint IS NULL OR entity_type = $1) AND ($2 OR deleted_by = $3)"#, t, admin, auth.id)
     .fetch_one(&state.db)
     .await?;
-    let items: Vec<Deleted> = sqlx::query_as(
-        "SELECT i.id, i.entity_type, i.number, i.title, i.assigned_to, i.deleted_at,
-                CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS deleted_by_name
+    let items: Vec<Deleted> = sqlx::query_as!(Deleted, r#"SELECT i.id AS "id!", i.entity_type AS "entity_type!", i.number AS "number!", i.title AS "title!", i.assigned_to AS "assigned_to?", i.deleted_at AS "deleted_at!",
+                CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS "deleted_by_name?"
          FROM crm_items i LEFT JOIN users u ON u.id = i.deleted_by
          WHERE i.deleted_at IS NOT NULL AND ($1::smallint IS NULL OR i.entity_type = $1) AND ($2 OR i.deleted_by = $3)
-         ORDER BY i.deleted_at DESC LIMIT $4 OFFSET $5",
-    )
-    .bind(t)
-    .bind(admin)
-    .bind(auth.id)
-    .bind(limit)
-    .bind(offset)
+         ORDER BY i.deleted_at DESC LIMIT $4 OFFSET $5"#, t, admin, auth.id, limit, offset)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "page": Page { items, total, limit, offset }, "retention_days": RECYCLE_DAYS })))
@@ -1096,8 +1028,7 @@ async fn recycle_list(State(state): State<AppState>, auth: AuthUser, Query(q): Q
 
 async fn deleted_row(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(i16, Option<Uuid>)> {
     let (t, owner, deleted_by, deleted): (i16, Option<Uuid>, Option<Uuid>, Option<DateTime<Utc>>) =
-        sqlx::query_as("SELECT entity_type, assigned_to, deleted_by, deleted_at FROM crm_items WHERE id = $1")
-            .bind(id)
+        sqlx::query!(r#"SELECT entity_type, assigned_to, deleted_by, deleted_at FROM crm_items WHERE id = $1"#, id).map(|r| (r.entity_type, r.assigned_to, r.deleted_by, r.deleted_at))
             .fetch_optional(&state.db)
             .await?
             .ok_or(AppError::NotFound("record"))?;
@@ -1112,7 +1043,7 @@ async fn deleted_row(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(
 
 async fn restore(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let (t, _) = deleted_row(&state, &auth, id).await?;
-    sqlx::query("UPDATE crm_items SET deleted_at = NULL, deleted_by = NULL, updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_items SET deleted_at = NULL, deleted_by = NULL, updated_at = now() WHERE id = $1", id).execute(&state.db).await?;
     timeline(&state.db, id, "restored", Some(auth.id), None, json!({})).await?;
     broadcast(&state, t, id, false).await;
     let et = entity_type_by_id(&state, t).await?;
@@ -1135,26 +1066,20 @@ async fn purge(state: &AppState, ids: &[Uuid]) -> AppResult<u64> {
     let keep = crate::accounting::in_books(state, ids).await?;
     let ids: Vec<Uuid> = ids.iter().copied().filter(|i| !keep.contains(i)).collect();
     let ids = &ids[..];
-    let files: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT f FROM crm_documents d, LATERAL unnest(ARRAY[d.pdf_file_id, d.source_file_id]) f WHERE d.item_id = ANY($1) AND f IS NOT NULL
+    let files: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT f AS "f!" FROM crm_documents d, LATERAL unnest(ARRAY[d.pdf_file_id, d.source_file_id]) f WHERE d.item_id = ANY($1) AND f IS NOT NULL
          UNION ALL SELECT f FROM sign_requests r, LATERAL unnest(ARRAY[r.original_file_id, r.signed_file_id]) f WHERE r.item_id = ANY($1) AND f IS NOT NULL
-         UNION ALL SELECT s.signature_file_id FROM sign_signers s JOIN sign_requests r ON r.id = s.request_id WHERE r.item_id = ANY($1) AND s.signature_file_id IS NOT NULL",
-    )
-    .bind(ids)
+         UNION ALL SELECT s.signature_file_id FROM sign_signers s JOIN sign_requests r ON r.id = s.request_id WHERE r.item_id = ANY($1) AND s.signature_file_id IS NOT NULL"#, ids)
     .fetch_all(&state.db)
     .await?;
     // Emails that only these records show go too, with their attachments.
-    let emails: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT l.email_id FROM crm_email_links l WHERE l.item_id = ANY($1)
-           AND NOT EXISTS (SELECT 1 FROM crm_email_links o WHERE o.email_id = l.email_id AND NOT o.item_id = ANY($1))",
-    )
-    .bind(ids)
+    let emails: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT l.email_id FROM crm_email_links l WHERE l.item_id = ANY($1)
+           AND NOT EXISTS (SELECT 1 FROM crm_email_links o WHERE o.email_id = l.email_id AND NOT o.item_id = ANY($1))", ids)
     .fetch_all(&state.db)
     .await?;
     let mut files = files;
-    files.extend(sqlx::query_scalar::<_, Uuid>("SELECT file_id FROM crm_email_files WHERE email_id = ANY($1)").bind(&emails).fetch_all(&state.db).await?);
-    let n = sqlx::query("DELETE FROM crm_items WHERE id = ANY($1)").bind(ids).execute(&state.db).await?.rows_affected();
-    sqlx::query("DELETE FROM crm_emails WHERE id = ANY($1)").bind(&emails).execute(&state.db).await?;
+    files.extend(sqlx::query_scalar!("SELECT file_id FROM crm_email_files WHERE email_id = ANY($1)", &emails).fetch_all(&state.db).await?);
+    let n = sqlx::query!("DELETE FROM crm_items WHERE id = ANY($1)", ids).execute(&state.db).await?.rows_affected();
+    sqlx::query!("DELETE FROM crm_emails WHERE id = ANY($1)", &emails).execute(&state.db).await?;
     for f in files {
         crate::routes::files::delete_stored(state, f).await;
     }
@@ -1165,8 +1090,7 @@ async fn purge(state: &AppState, ids: &[Uuid]) -> AppResult<u64> {
 pub async fn run_purge(state: &AppState) -> Result<()> {
     let mut total = 0u64;
     loop {
-        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM crm_items WHERE deleted_at < now() - make_interval(days => $1) LIMIT 1000")
-            .bind(RECYCLE_DAYS as i32)
+        let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_items WHERE deleted_at < now() - make_interval(days => $1) LIMIT 1000", RECYCLE_DAYS as i32)
             .fetch_all(&state.db)
             .await?;
         let n = if ids.is_empty() { 0 } else { purge(state, &ids).await.map_err(|e| anyhow::anyhow!("{e:?}"))? };
@@ -1216,17 +1140,13 @@ async fn save_filter(State(state): State<AppState>, auth: AuthUser, Path(code): 
     let f: Filter = serde_json::from_value(Value::Object(b.filter.clone())).map_err(|_| AppError::bad("invalid filter"))?;
     push_filter(&mut QueryBuilder::new(""), &t, &f, auth.id)?;
     super::items::guard_filter(&state, &auth, &t, &f).await?;
-    sqlx::query("INSERT INTO crm_saved_filters (user_id, entity_type, name, filter) VALUES ($1, $2, $3, $4)")
-        .bind(auth.id)
-        .bind(t.id)
-        .bind(name)
-        .bind(Value::Object(b.filter))
+    sqlx::query!("INSERT INTO crm_saved_filters (user_id, entity_type, name, filter) VALUES ($1, $2, $3, $4)", auth.id, t.id, name, Value::Object(b.filter))
         .execute(&state.db)
         .await?;
     list_filters(State(state), auth, Path(code)).await
 }
 
 async fn delete_filter(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    sqlx::query("DELETE FROM crm_saved_filters WHERE id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_saved_filters WHERE id = $1 AND user_id = $2", id, auth.id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }

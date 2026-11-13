@@ -43,11 +43,11 @@ fn check_background(b: &str) -> AppResult<()> {
 }
 
 async fn company(state: &AppState) -> AppResult<Value> {
-    Ok(sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = 'ui_default'").fetch_optional(&state.db).await?.unwrap_or(json!({})))
+    Ok(sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'ui_default'").fetch_optional(&state.db).await?.unwrap_or(json!({})))
 }
 
 async fn get_mine(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let mine: Option<(Option<Value>, Option<String>)> = sqlx::query_as("SELECT menu, background FROM user_ui_prefs WHERE user_id = $1").bind(auth.id).fetch_optional(&state.db).await?;
+    let mine: Option<(Option<Value>, Option<String>)> = sqlx::query!(r#"SELECT menu, background FROM user_ui_prefs WHERE user_id = $1"#, auth.id).map(|r| (r.menu, r.background)).fetch_optional(&state.db).await?;
     let (menu, background) = mine.unwrap_or((None, None));
     let c = company(&state).await?;
     Ok(Json(json!({
@@ -75,16 +75,9 @@ async fn put_mine(State(state): State<AppState>, auth: AuthUser, Json(b): Json<M
     if let Some(Some(bg)) = &b.background {
         check_background(bg)?;
     }
-    sqlx::query(
-        "INSERT INTO user_ui_prefs (user_id, menu, background) VALUES ($1, $3, $5)
+    sqlx::query!("INSERT INTO user_ui_prefs (user_id, menu, background) VALUES ($1, $3, $5)
          ON CONFLICT (user_id) DO UPDATE SET menu = CASE WHEN $2 THEN $3 ELSE user_ui_prefs.menu END,
-             background = CASE WHEN $4 THEN $5 ELSE user_ui_prefs.background END, updated_at = now()",
-    )
-    .bind(auth.id)
-    .bind(menu.is_some())
-    .bind(menu.flatten())
-    .bind(b.background.is_some())
-    .bind(b.background.flatten())
+             background = CASE WHEN $4 THEN $5 ELSE user_ui_prefs.background END, updated_at = now()", auth.id, menu.is_some(), menu.flatten(), b.background.is_some(), b.background.flatten())
     .execute(&state.db)
     .await?;
     get_mine(State(state), auth).await
@@ -110,13 +103,13 @@ async fn put_default(State(state): State<AppState>, auth: AuthUser, ClientIp(ip)
         c["background"] = json!(bg);
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("INSERT INTO settings (key, value) VALUES ('ui_default', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()").bind(&c).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO settings (key, value) VALUES ('ui_default', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", &c).execute(&mut *tx).await?;
     if b.apply_to_all {
         if b.menu.is_some() {
-            sqlx::query("UPDATE user_ui_prefs SET menu = NULL").execute(&mut *tx).await?;
+            sqlx::query!("UPDATE user_ui_prefs SET menu = NULL").execute(&mut *tx).await?;
         }
         if b.background.is_some() {
-            sqlx::query("UPDATE user_ui_prefs SET background = NULL").execute(&mut *tx).await?;
+            sqlx::query!("UPDATE user_ui_prefs SET background = NULL").execute(&mut *tx).await?;
         }
     }
     audit::record(&mut *tx, Some(auth.id), "settings.ui_default", "settings", None, json!({ "menu": b.menu.is_some(), "background": b.background, "apply_to_all": b.apply_to_all }), ip.as_deref()).await;
@@ -131,7 +124,7 @@ async fn put_default(State(state): State<AppState>, auth: AuthUser, ClientIp(ip)
 const TOURS: &[&str] = &["welcome", "crm", "tasks"];
 
 async fn tours(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let done: Vec<String> = sqlx::query_scalar("SELECT tours_done FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let done: Vec<String> = sqlx::query_scalar!("SELECT tours_done FROM users WHERE id = $1", auth.id).fetch_one(&state.db).await?;
     Ok(Json(json!({ "done": done, "tours": TOURS })))
 }
 
@@ -140,12 +133,12 @@ async fn tour_done(State(state): State<AppState>, auth: AuthUser, axum::extract:
     if !TOURS.contains(&name.as_str()) {
         return Err(AppError::NotFound("tour"));
     }
-    sqlx::query("UPDATE users SET tours_done = array_append(tours_done, $2) WHERE id = $1 AND NOT ($2 = ANY(tours_done))").bind(auth.id).bind(&name).execute(&state.db).await?;
+    sqlx::query!("UPDATE users SET tours_done = array_append(tours_done, $2) WHERE id = $1 AND NOT ($2 = ANY(tours_done))", auth.id, &name).execute(&state.db).await?;
     tours(State(state), auth).await
 }
 
 /// "Take the tours again".
 async fn reset_tours(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    sqlx::query("UPDATE users SET tours_done = '{}' WHERE id = $1").bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("UPDATE users SET tours_done = '{}' WHERE id = $1", auth.id).execute(&state.db).await?;
     tours(State(state), auth).await
 }

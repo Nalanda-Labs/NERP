@@ -106,18 +106,8 @@ async fn create(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cli
         return Err(AppError::bad("the expiry date has passed"));
     }
     let token = random_token(24);
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO join_links (token_hash, note, department_id, email_domains, needs_approval, max_uses, expires_at, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-    )
-    .bind(hash(&token))
-    .bind(b.note.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.chars().take(200).collect::<String>()))
-    .bind(b.department_id)
-    .bind(domains(&b.email_domains)?)
-    .bind(b.needs_approval)
-    .bind(b.max_uses)
-    .bind(b.expires_at)
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO join_links (token_hash, note, department_id, email_domains, needs_approval, max_uses, expires_at, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id", hash(&token), b.note.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.chars().take(200).collect::<String>()), b.department_id, &(domains(&b.email_domains)?), b.needs_approval, b.max_uses, b.expires_at, auth.id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| if crate::error::is_unique_violation(&e) { e.into() } else { AppError::bad("no such department") })?;
@@ -136,10 +126,7 @@ struct LinkChange {
 
 async fn change(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<LinkChange>) -> AppResult<Json<Value>> {
     may_invite(&auth)?;
-    let n = sqlx::query("UPDATE join_links SET disabled = COALESCE($2, disabled), note = COALESCE($3, note) WHERE id = $1")
-        .bind(id)
-        .bind(b.disabled)
-        .bind(b.note.as_deref().map(str::trim))
+    let n = sqlx::query!("UPDATE join_links SET disabled = COALESCE($2, disabled), note = COALESCE($3, note) WHERE id = $1", id, b.disabled, b.note.as_deref().map(str::trim))
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -152,7 +139,7 @@ async fn change(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     may_invite(&auth)?;
-    sqlx::query("DELETE FROM join_links WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM join_links WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -162,11 +149,9 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn requests(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     may_invite(&auth)?;
-    let rows: Vec<(Uuid, String, String, DateTime<Utc>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.email, u.created_at, l.note,
-            (SELECT string_agg(d.name, ', ') FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id)
-         FROM users u LEFT JOIN join_links l ON l.id = u.joined_via WHERE u.join_pending ORDER BY u.created_at DESC LIMIT 500",
-    )
+    let rows: Vec<(Uuid, String, String, DateTime<Utc>, Option<String>, Option<String>)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.email AS "email!", u.created_at AS "created_at!", l.note AS "note?",
+            (SELECT string_agg(d.name, ', ') FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = u.id) AS "c5?"
+         FROM users u LEFT JOIN join_links l ON l.id = u.joined_via WHERE u.join_pending ORDER BY u.created_at DESC LIMIT 500"#).map(|r| (r.id, r.c1, r.email, r.created_at, r.note, r.c5))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, n, e, at, note, dep)| json!({ "id": id, "name": n, "email": e, "created_at": at, "link_note": note, "department": dep })).collect::<Vec<_>>() })))
@@ -174,7 +159,7 @@ async fn requests(State(state): State<AppState>, auth: AuthUser) -> AppResult<Js
 
 async fn approve(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     may_invite(&auth)?;
-    let n = sqlx::query("UPDATE users SET join_pending = FALSE, is_active = TRUE, updated_at = now() WHERE id = $1 AND join_pending").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("UPDATE users SET join_pending = FALSE, is_active = TRUE, updated_at = now() WHERE id = $1 AND join_pending", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("request"));
     }
@@ -187,7 +172,7 @@ async fn approve(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cl
 
 async fn reject(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     may_invite(&auth)?;
-    let email: Option<String> = sqlx::query_scalar("DELETE FROM users WHERE id = $1 AND join_pending RETURNING email").bind(id).fetch_optional(&state.db).await?;
+    let email: Option<String> = sqlx::query_scalar!("DELETE FROM users WHERE id = $1 AND join_pending RETURNING email", id).fetch_optional(&state.db).await?;
     let email = email.ok_or(AppError::NotFound("request"))?;
     audit::record(&state.db, Some(auth.id), "user.join_rejected", "user", None, json!({ "email": email }), ip.as_deref()).await;
     requests(State(state), auth).await
@@ -206,11 +191,8 @@ struct Link {
 }
 
 async fn usable(state: &AppState, token: &str) -> AppResult<Link> {
-    let row: Option<(Uuid, Option<Uuid>, Vec<String>, bool, Option<Uuid>)> = sqlx::query_as(
-        "SELECT id, department_id, email_domains, needs_approval, created_by FROM join_links
-         WHERE token_hash = $1 AND NOT disabled AND (expires_at IS NULL OR expires_at > now()) AND (max_uses IS NULL OR uses < max_uses)",
-    )
-    .bind(hash(token))
+    let row: Option<(Uuid, Option<Uuid>, Vec<String>, bool, Option<Uuid>)> = sqlx::query!(r#"SELECT id, department_id, email_domains, needs_approval, created_by FROM join_links
+         WHERE token_hash = $1 AND NOT disabled AND (expires_at IS NULL OR expires_at > now()) AND (max_uses IS NULL OR uses < max_uses)"#, hash(token)).map(|r| (r.id, r.department_id, r.email_domains, r.needs_approval, r.created_by))
     .fetch_optional(&state.db)
     .await?;
     match row {
@@ -252,31 +234,23 @@ async fn join(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(token)
     }
     let answer = json!({ "ok": true, "needs_approval": l.needs_approval });
     // Someone who already has an account hears the same (nobody learns who works here).
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)").bind(&email).fetch_one(&state.db).await?;
+    let exists: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE email = $1) AS "v!""#, &email).fetch_one(&state.db).await?;
     if exists {
         return Ok(Json(answer));
     }
     let mut tx = state.db.begin().await?;
-    let used = sqlx::query("UPDATE join_links SET uses = uses + 1 WHERE id = $1 AND (max_uses IS NULL OR uses < max_uses)").bind(l.id).execute(&mut *tx).await?.rows_affected();
+    let used = sqlx::query!("UPDATE join_links SET uses = uses + 1 WHERE id = $1 AND (max_uses IS NULL OR uses < max_uses)", l.id).execute(&mut *tx).await?.rows_affected();
     if used == 0 {
         return Err(AppError::NotFound("link"));
     }
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (email, password_hash, first_name, last_name, invite_pending, is_active, join_pending, joined_via)
-         VALUES ($1, '!invited', $2, $3, TRUE, $4, $5, $6) RETURNING id",
-    )
-    .bind(&email)
-    .bind(&first_name)
-    .bind(&last_name)
-    .bind(!l.needs_approval)
-    .bind(l.needs_approval)
-    .bind(l.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO users (email, password_hash, first_name, last_name, invite_pending, is_active, join_pending, joined_via)
+         VALUES ($1, '!invited', $2, $3, TRUE, $4, $5, $6) RETURNING id", &email, &first_name, &last_name, !l.needs_approval, l.needs_approval, l.id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| if crate::error::is_unique_violation(&e) { AppError::Conflict("already asked".into()) } else { e.into() })?;
-    sqlx::query("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO user_roles (user_id, role_id) SELECT $1, id FROM roles WHERE code = 'employee'", id).execute(&mut *tx).await?;
     if let Some(d) = l.department_id {
-        sqlx::query("INSERT INTO user_departments (user_id, department_id) SELECT $1, id FROM departments WHERE id = $2").bind(id).bind(d).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO user_departments (user_id, department_id) SELECT $1, id FROM departments WHERE id = $2", id, d).execute(&mut *tx).await?;
     }
     audit::record(&mut *tx, None, "user.join_request", "user", Some(id.to_string()), json!({ "email": email, "link": l.id }), ip.as_deref()).await;
     tx.commit().await?;

@@ -89,7 +89,7 @@ pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> App
     if need(auth, Level::View).is_err() {
         return Ok(false);
     }
-    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_bills WHERE $1 = ANY(file_ids))").bind(file).fetch_one(&state.db).await?)
+    Ok(sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_bills WHERE $1 = ANY(file_ids)) AS "v!""#, file).fetch_one(&state.db).await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -112,10 +112,8 @@ pub struct Settings {
 }
 
 pub async fn settings(state: &AppState) -> AppResult<Settings> {
-    Ok(sqlx::query_as(
-        "SELECT ready, fiscal_year_start, lock_date, receivable_account, payable_account, sales_account, retained_earnings,
-                opening_balances, fx_account, rounding_account, mark_invoices_paid FROM acc_settings WHERE id = 1",
-    )
+    Ok(sqlx::query_as!(Settings, r#"SELECT ready, fiscal_year_start, lock_date AS "lock_date?", receivable_account AS "receivable_account?", payable_account AS "payable_account?", sales_account AS "sales_account?", retained_earnings AS "retained_earnings?",
+                opening_balances AS "opening_balances?", fx_account AS "fx_account?", rounding_account AS "rounding_account?", mark_invoices_paid FROM acc_settings WHERE id = 1"#)
     .fetch_one(&state.db)
     .await?)
 }
@@ -158,7 +156,7 @@ pub async fn fx_rate(state: &AppState, currency: &str, given: Option<Decimal>) -
 async fn get_settings(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     need(&auth, Level::View)?;
     let s = settings(&state).await?;
-    let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_entries)").fetch_one(&state.db).await?;
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_entries) AS "v!""#).fetch_one(&state.db).await?;
     Ok(Json(json!({ "settings": s, "base_currency": base_currency(&state).await?, "has_entries": used })))
 }
 
@@ -197,34 +195,21 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     ];
     for (a, kinds, what) in checks {
         if let Some(id) = a {
-            let sub: Option<String> = sqlx::query_scalar("SELECT subtype FROM acc_accounts WHERE id = $1 AND is_active").bind(id).fetch_optional(&state.db).await?;
+            let sub: Option<String> = sqlx::query_scalar!("SELECT subtype FROM acc_accounts WHERE id = $1 AND is_active", id).fetch_optional(&state.db).await?;
             if !sub.is_some_and(|s| kinds.contains(&s.as_str())) {
                 return Err(AppError::bad(format!("the {what} account must be a {} account", kinds.join(" or "))));
             }
         }
     }
     let lock_change = b.lock_date.is_some();
-    sqlx::query(
-        "UPDATE acc_settings SET
+    sqlx::query!("UPDATE acc_settings SET
             fiscal_year_start = COALESCE($1, fiscal_year_start),
             lock_date = CASE WHEN $2 THEN $3 ELSE lock_date END,
             receivable_account = COALESCE($4, receivable_account), payable_account = COALESCE($5, payable_account),
             sales_account = COALESCE($6, sales_account), retained_earnings = COALESCE($7, retained_earnings),
             opening_balances = COALESCE($8, opening_balances), fx_account = COALESCE($9, fx_account),
             rounding_account = COALESCE($10, rounding_account), mark_invoices_paid = COALESCE($11, mark_invoices_paid)
-         WHERE id = 1",
-    )
-    .bind(b.fiscal_year_start)
-    .bind(lock_change)
-    .bind(b.lock_date.flatten())
-    .bind(b.receivable_account)
-    .bind(b.payable_account)
-    .bind(b.sales_account)
-    .bind(b.retained_earnings)
-    .bind(b.opening_balances)
-    .bind(b.fx_account)
-    .bind(b.rounding_account)
-    .bind(b.mark_invoices_paid)
+         WHERE id = 1", b.fiscal_year_start, lock_change, b.lock_date.flatten(), b.receivable_account, b.payable_account, b.sales_account, b.retained_earnings, b.opening_balances, b.fx_account, b.rounding_account, b.mark_invoices_paid)
     .execute(&state.db)
     .await?;
     if lock_change {
@@ -281,7 +266,7 @@ async fn setup(State(state): State<AppState>, auth: AuthUser, body: Option<Json<
     need(&auth, Level::Admin)?;
     let b = body.map(|b| b.0).unwrap_or_default();
     let mut tx = state.db.begin().await?;
-    let done: bool = sqlx::query_scalar("SELECT ready FROM acc_settings WHERE id = 1 FOR UPDATE").fetch_one(&mut *tx).await?;
+    let done: bool = sqlx::query_scalar!("SELECT ready FROM acc_settings WHERE id = 1 FOR UPDATE").fetch_one(&mut *tx).await?;
     if done {
         return Err(AppError::Conflict("accounting is already set up".into()));
     }
@@ -293,33 +278,18 @@ async fn setup(State(state): State<AppState>, auth: AuthUser, body: Option<Json<
         let mut ids = std::collections::HashMap::new();
         for (code, name, kind, sub) in CHART {
             // An account with that code already there (made before setup) is kept.
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO acc_accounts (code, name, type, subtype) VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (code) DO UPDATE SET code = EXCLUDED.code RETURNING id",
-            )
-            .bind(code)
-            .bind(name)
-            .bind(kind)
-            .bind(sub)
+            let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_accounts (code, name, type, subtype) VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (code) DO UPDATE SET code = EXCLUDED.code RETURNING id", code, name, kind, sub)
             .fetch_one(&mut *tx)
             .await?;
             ids.insert(*code, id);
         }
-        sqlx::query(
-            "UPDATE acc_settings SET receivable_account = $1, payable_account = $2, sales_account = $3, retained_earnings = $4,
-                opening_balances = $5, fx_account = $6, rounding_account = $7 WHERE id = 1",
-        )
-        .bind(ids["1100"])
-        .bind(ids["2000"])
-        .bind(ids["4000"])
-        .bind(ids["3100"])
-        .bind(ids["3200"])
-        .bind(ids["7900"])
-        .bind(ids["7910"])
+        sqlx::query!("UPDATE acc_settings SET receivable_account = $1, payable_account = $2, sales_account = $3, retained_earnings = $4,
+                opening_balances = $5, fx_account = $6, rounding_account = $7 WHERE id = 1", ids["1100"], ids["2000"], ids["4000"], ids["3100"], ids["3200"], ids["7900"], ids["7910"])
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("UPDATE acc_settings SET ready = TRUE, fiscal_year_start = $1 WHERE id = 1").bind(fy).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_settings SET ready = TRUE, fiscal_year_start = $1 WHERE id = 1", fy).execute(&mut *tx).await?;
     audit::record(&mut *tx, Some(auth.id), "accounting.setup", "settings", None, json!({ "fiscal_year_start": fy }), None).await;
     tx.commit().await?;
     get_settings(State(state), auth).await
@@ -444,14 +414,7 @@ async fn create_account(State(state): State<AppState>, auth: AuthUser, Json(b): 
     if currency.is_some() && !["bank", "cash"].contains(&subtype.as_str()) {
         return Err(AppError::bad("only bank and cash accounts can be kept in another currency"));
     }
-    let id: Uuid = sqlx::query_scalar("INSERT INTO acc_accounts (code, name, type, subtype, parent_id, currency, description) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id")
-        .bind(&code)
-        .bind(&name)
-        .bind(kind)
-        .bind(&subtype)
-        .bind(b.parent_id.flatten())
-        .bind(currency)
-        .bind(clean(b.description.flatten()))
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_accounts (code, name, type, subtype, parent_id, currency, description) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id", &code, &name, kind, &subtype, b.parent_id.flatten(), currency, clean(b.description.flatten()))
         .fetch_one(&state.db)
         .await
         .map_err(|e| if crate::error::is_unique_violation(&e) { AppError::Conflict(format!("there is already an account {code}")) } else { e.into() })?;
@@ -461,8 +424,7 @@ async fn create_account(State(state): State<AppState>, auth: AuthUser, Json(b): 
 
 async fn update_account(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<AccountBody>) -> AppResult<Json<Value>> {
     need(&auth, Level::Admin)?;
-    let (subtype, used): (String, bool) = sqlx::query_as("SELECT subtype, EXISTS (SELECT 1 FROM acc_lines WHERE account_id = $1) FROM acc_accounts WHERE id = $1")
-        .bind(id)
+    let (subtype, used): (String, bool) = sqlx::query!(r#"SELECT subtype AS "subtype!", EXISTS (SELECT 1 FROM acc_lines WHERE account_id = $1) AS "c1!" FROM acc_accounts WHERE id = $1"#, id).map(|r| (r.subtype, r.c1))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("account"))?;
@@ -520,20 +482,17 @@ async fn update_account(State(state): State<AppState>, auth: AuthUser, Path(id):
 
 async fn delete_account(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need(&auth, Level::Admin)?;
-    let refs: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM acc_lines WHERE account_id = $1) OR EXISTS (SELECT 1 FROM acc_taxes WHERE account_id = $1)
+    let refs: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_lines WHERE account_id = $1) OR EXISTS (SELECT 1 FROM acc_taxes WHERE account_id = $1)
              OR EXISTS (SELECT 1 FROM acc_bill_lines WHERE account_id = $1) OR EXISTS (SELECT 1 FROM acc_payments WHERE account_id = $1)
              OR EXISTS (SELECT 1 FROM acc_bank_lines WHERE account_id = $1)
              OR EXISTS (SELECT 1 FROM acc_settings WHERE $1 IN (receivable_account, payable_account, sales_account, retained_earnings, opening_balances, fx_account, rounding_account))
-             OR EXISTS (SELECT 1 FROM acc_product_accounts WHERE income_account_id = $1)",
-    )
-    .bind(id)
+             OR EXISTS (SELECT 1 FROM acc_product_accounts WHERE income_account_id = $1) AS "v!""#, id)
     .fetch_one(&state.db)
     .await?;
     if refs {
         return Err(AppError::bad("this account is in use; make it inactive instead"));
     }
-    let n = sqlx::query("DELETE FROM acc_accounts WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM acc_accounts WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("account"));
     }
@@ -556,7 +515,7 @@ pub struct TaxRow {
 
 async fn list_taxes(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     need(&auth, Level::View)?;
-    let rows: Vec<TaxRow> = sqlx::query_as("SELECT id, name, rate, scope, account_id, is_active FROM acc_taxes ORDER BY scope, rate, name").fetch_all(&state.db).await?;
+    let rows: Vec<TaxRow> = sqlx::query_as!(TaxRow, "SELECT id, name, rate, scope, account_id, is_active FROM acc_taxes ORDER BY scope, rate, name").fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": rows })))
 }
 
@@ -570,7 +529,7 @@ struct TaxBody {
 }
 
 async fn check_tax_account(state: &AppState, scope: &str, account: Uuid) -> AppResult<()> {
-    let sub: Option<String> = sqlx::query_scalar("SELECT subtype FROM acc_accounts WHERE id = $1 AND is_active").bind(account).fetch_optional(&state.db).await?;
+    let sub: Option<String> = sqlx::query_scalar!("SELECT subtype FROM acc_accounts WHERE id = $1 AND is_active", account).fetch_optional(&state.db).await?;
     let want = if scope == "sales" { "tax_payable" } else { "tax_receivable" };
     if sub.as_deref() != Some(want) && sub.as_deref() != Some("tax_payable") {
         return Err(AppError::bad(format!("a {scope} tax goes to a tax {} account", if scope == "sales" { "payable" } else { "receivable (or payable)" })));
@@ -592,11 +551,7 @@ async fn create_tax(State(state): State<AppState>, auth: AuthUser, Json(b): Json
     }
     let account = b.account_id.ok_or_else(|| AppError::bad("choose the tax account"))?;
     check_tax_account(&state, &scope, account).await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO acc_taxes (name, rate, scope, account_id) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(&name)
-        .bind(rate)
-        .bind(&scope)
-        .bind(account)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_taxes (name, rate, scope, account_id) VALUES ($1, $2, $3, $4) RETURNING id", &name, rate, &scope, account)
         .fetch_one(&state.db)
         .await?;
     Ok(Json(json!({ "id": id })))
@@ -604,8 +559,7 @@ async fn create_tax(State(state): State<AppState>, auth: AuthUser, Json(b): Json
 
 async fn update_tax(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<TaxBody>) -> AppResult<Json<Value>> {
     need(&auth, Level::Admin)?;
-    let (scope, used): (String, bool) = sqlx::query_as("SELECT scope, EXISTS (SELECT 1 FROM acc_lines WHERE tax_id = $1) OR EXISTS (SELECT 1 FROM acc_bill_lines WHERE tax_id = $1) FROM acc_taxes WHERE id = $1")
-        .bind(id)
+    let (scope, used): (String, bool) = sqlx::query!(r#"SELECT scope AS "scope!", EXISTS (SELECT 1 FROM acc_lines WHERE tax_id = $1) OR EXISTS (SELECT 1 FROM acc_bill_lines WHERE tax_id = $1) AS "c1!" FROM acc_taxes WHERE id = $1"#, id).map(|r| (r.scope, r.c1))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("tax"))?;
@@ -615,20 +569,14 @@ async fn update_tax(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     if let Some(a) = b.account_id {
         check_tax_account(&state, b.scope.as_deref().unwrap_or(&scope), a).await?;
     }
-    sqlx::query("UPDATE acc_taxes SET name = COALESCE($2, name), rate = COALESCE($3, rate), scope = COALESCE($4, scope), account_id = COALESCE($5, account_id), is_active = COALESCE($6, is_active) WHERE id = $1")
-        .bind(id)
-        .bind(b.name.as_deref().map(|n| required("name", n, 100)).transpose()?)
-        .bind(b.rate)
-        .bind(b.scope)
-        .bind(b.account_id)
-        .bind(b.is_active)
+    sqlx::query!("UPDATE acc_taxes SET name = COALESCE($2, name), rate = COALESCE($3, rate), scope = COALESCE($4, scope), account_id = COALESCE($5, account_id), is_active = COALESCE($6, is_active) WHERE id = $1", id, b.name.as_deref().map(|n| required("name", n, 100)).transpose()?, b.rate, b.scope, b.account_id, b.is_active)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn tax(state: &AppState, id: Uuid) -> AppResult<TaxRow> {
-    sqlx::query_as("SELECT id, name, rate, scope, account_id, is_active FROM acc_taxes WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("tax"))
+    sqlx::query_as!(TaxRow, "SELECT id, name, rate, scope, account_id, is_active FROM acc_taxes WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("tax"))
 }
 
 // ---------------------------------------------------------------------------
@@ -651,24 +599,14 @@ async fn list_entries(State(state): State<AppState>, auth: AuthUser, Query(q): Q
     need(&auth, Level::View)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let term = q.q.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(|t| format!("%{}%", t.to_lowercase().replace('%', "\\%").replace('_', "\\_")));
-    let rows: Vec<(Uuid, Option<i64>, NaiveDate, Option<String>, String, Option<Uuid>, String, Decimal, Option<Uuid>)> = sqlx::query_as(
-        "SELECT e.id, e.number, e.date, e.memo, e.source, e.source_id, e.status,
-                COALESCE((SELECT SUM(debit) FROM acc_lines l WHERE l.entry_id = e.id), 0), e.reverses
+    let rows: Vec<(Uuid, Option<i64>, NaiveDate, Option<String>, String, Option<Uuid>, String, Decimal, Option<Uuid>)> = sqlx::query!(r#"SELECT e.id AS "id!", e.number AS "number?", e.date AS "date!", e.memo AS "memo?", e.source AS "source!", e.source_id AS "source_id?", e.status AS "status!",
+                COALESCE((SELECT SUM(debit) FROM acc_lines l WHERE l.entry_id = e.id), 0) AS "c7!", e.reverses AS "reverses?"
          FROM acc_entries e
          WHERE ($1::date IS NULL OR e.date >= $1) AND ($2::date IS NULL OR e.date <= $2) AND ($3::text IS NULL OR e.source = $3)
            AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM acc_lines l WHERE l.entry_id = e.id AND l.account_id = $4))
            AND ($5::text IS NULL OR e.status = $5)
            AND ($6::text IS NULL OR lower(COALESCE(e.memo, '')) LIKE $6 OR e.number::text = trim(both '%' from $6))
-         ORDER BY e.date DESC, e.number DESC NULLS FIRST LIMIT $7 OFFSET $8",
-    )
-    .bind(q.from)
-    .bind(q.to)
-    .bind(q.source)
-    .bind(q.account_id)
-    .bind(q.status)
-    .bind(term)
-    .bind(limit + 1)
-    .bind(q.offset.unwrap_or(0).max(0))
+         ORDER BY e.date DESC, e.number DESC NULLS FIRST LIMIT $7 OFFSET $8"#, q.from, q.to, q.source, q.account_id, q.status, term, limit + 1, q.offset.unwrap_or(0).max(0)).map(|r| (r.id, r.number, r.date, r.memo, r.source, r.source_id, r.status, r.c7, r.reverses))
     .fetch_all(&state.db)
     .await?;
     let more = rows.len() as i64 > limit;
@@ -680,12 +618,9 @@ async fn list_entries(State(state): State<AppState>, auth: AuthUser, Query(q): Q
 
 pub async fn entry_json(state: &AppState, id: Uuid) -> AppResult<Value> {
     type E = (Uuid, Option<i64>, NaiveDate, Option<String>, String, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<String>, chrono::DateTime<Utc>);
-    let e: E = sqlx::query_as(
-        "SELECT e.id, e.number, e.date, e.memo, e.source, e.source_id, e.status, e.reverses, e.reversed_by,
-                trim(u.first_name || ' ' || u.last_name), e.created_at
-         FROM acc_entries e LEFT JOIN users u ON u.id = e.created_by WHERE e.id = $1",
-    )
-    .bind(id)
+    let e: E = sqlx::query!(r#"SELECT e.id AS "id!", e.number AS "number?", e.date AS "date!", e.memo AS "memo?", e.source AS "source!", e.source_id AS "source_id?", e.status AS "status!", e.reverses AS "reverses?", e.reversed_by AS "reversed_by?",
+                trim(u.first_name || ' ' || u.last_name) AS "c9?", e.created_at AS "created_at!"
+         FROM acc_entries e LEFT JOIN users u ON u.id = e.created_by WHERE e.id = $1"#, id).map(|r| (r.id, r.number, r.date, r.memo, r.source, r.source_id, r.status, r.reverses, r.reversed_by, r.c9, r.created_at))
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("entry"))?;
@@ -700,7 +635,7 @@ pub async fn entry_json(state: &AppState, id: Uuid) -> AppResult<Value> {
     .await?;
     let reversal_no = |x: Option<Uuid>| async move {
         match x {
-            Some(r) => sqlx::query_scalar::<_, Option<i64>>("SELECT number FROM acc_entries WHERE id = $1").bind(r).fetch_one(&state.db).await.ok().flatten(),
+            Some(r) => sqlx::query_scalar!(r#"SELECT number AS "number?" FROM acc_entries WHERE id = $1"#, r).fetch_one(&state.db).await.ok().flatten(),
             None => None,
         }
     };
@@ -746,7 +681,7 @@ async fn check_parties(state: &AppState, lines: &[LineIn]) -> AppResult<()> {
     if ids.is_empty() {
         return Ok(());
     }
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT id) FROM crm_items WHERE id = ANY($1) AND entity_type IN (3, 4) AND deleted_at IS NULL").bind(&ids).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(DISTINCT id) AS "v!" FROM crm_items WHERE id = ANY($1) AND entity_type IN (3, 4) AND deleted_at IS NULL"#, &ids).fetch_one(&state.db).await?;
     if n as usize != ids.iter().collect::<std::collections::HashSet<_>>().len() {
         return Err(AppError::bad("a customer or supplier on the entry is not a CRM contact or company"));
     }
@@ -774,10 +709,7 @@ async fn create_entry(State(state): State<AppState>, auth: AuthUser, Json(b): Js
         ledger::post(&mut tx, b.date, memo.as_deref(), "manual", None, &lines, Some(auth.id)).await?
     } else {
         // A draft: checked when it is posted (it may still be unbalanced).
-        let id: Uuid = sqlx::query_scalar("INSERT INTO acc_entries (date, memo, source, status, created_by) VALUES ($1, $2, 'manual', 'draft', $3) RETURNING id")
-            .bind(b.date)
-            .bind(&memo)
-            .bind(auth.id)
+        let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_entries (date, memo, source, status, created_by) VALUES ($1, $2, 'manual', 'draft', $3) RETURNING id", b.date, memo.as_deref(), auth.id)
             .fetch_one(&mut *tx)
             .await?;
         ledger::insert_lines(&mut tx, id, b.date, &lines).await?;
@@ -791,7 +723,7 @@ async fn create_entry(State(state): State<AppState>, auth: AuthUser, Json(b): Js
 }
 
 async fn draft(state: &AppState, id: Uuid) -> AppResult<()> {
-    let st: Option<String> = sqlx::query_scalar("SELECT status FROM acc_entries WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let st: Option<String> = sqlx::query_scalar!("SELECT status FROM acc_entries WHERE id = $1", id).fetch_optional(&state.db).await?;
     match st.as_deref() {
         Some("draft") => Ok(()),
         Some(_) => Err(AppError::bad("posted entries can't be changed; reverse them instead")),
@@ -805,7 +737,7 @@ async fn update_entry(State(state): State<AppState>, auth: AuthUser, Path(id): P
     check_parties(&state, &b.lines).await?;
     let lines = to_lines(&b.lines)?;
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE acc_entries SET date = $2, memo = $3 WHERE id = $1 AND status = 'draft'").bind(id).bind(b.date).bind(clean(b.memo)).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_entries SET date = $2, memo = $3 WHERE id = $1 AND status = 'draft'", id, b.date, clean(b.memo)).execute(&mut *tx).await?;
     ledger::insert_lines(&mut tx, id, b.date, &lines).await?;
     tx.commit().await?;
     if b.post {
@@ -817,7 +749,7 @@ async fn update_entry(State(state): State<AppState>, auth: AuthUser, Path(id): P
 async fn post_entry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
     let mut tx = state.db.begin().await?;
-    let row: Option<(String, NaiveDate)> = sqlx::query_as("SELECT status, date FROM acc_entries WHERE id = $1 FOR UPDATE").bind(id).fetch_optional(&mut *tx).await?;
+    let row: Option<(String, NaiveDate)> = sqlx::query!(r#"SELECT status, date FROM acc_entries WHERE id = $1 FOR UPDATE"#, id).map(|r| (r.status, r.date)).fetch_optional(&mut *tx).await?;
     let (status, date) = row.ok_or(AppError::NotFound("entry"))?;
     if status != "draft" {
         return Err(AppError::bad("this entry is already posted"));
@@ -828,7 +760,7 @@ async fn post_entry(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     ledger::check_open(&mut tx, date).await?;
     ledger::validate(&mut tx, &lines).await?;
     let n = ledger::next_number(&mut tx, "entry").await?;
-    sqlx::query("UPDATE acc_entries SET status = 'posted', number = $2, posted_at = now() WHERE id = $1").bind(id).bind(n).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_entries SET status = 'posted', number = $2, posted_at = now() WHERE id = $1", id, n).execute(&mut *tx).await?;
     tx.commit().await?;
     audit::record(&state.db, Some(auth.id), "accounting.entry_post", "entry", Some(id.to_string()), json!({ "number": n }), None).await;
     Ok(Json(entry_json(&state, id).await?))
@@ -837,7 +769,7 @@ async fn post_entry(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 async fn delete_entry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
     draft(&state, id).await?;
-    sqlx::query("DELETE FROM acc_entries WHERE id = $1 AND status = 'draft'").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM acc_entries WHERE id = $1 AND status = 'draft'", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -849,7 +781,7 @@ struct ReverseBody {
 /// Manual and opening entries; documents are voided through their own pages.
 async fn reverse_entry(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, body: Option<Json<ReverseBody>>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
-    let (source, date): (String, NaiveDate) = sqlx::query_as("SELECT source, date FROM acc_entries WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("entry"))?;
+    let (source, date): (String, NaiveDate) = sqlx::query!(r#"SELECT source, date FROM acc_entries WHERE id = $1"#, id).map(|r| (r.source, r.date)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("entry"))?;
     if !["manual", "opening", "bank", "closing"].contains(&source.as_str()) {
         return Err(AppError::bad(format!("this entry belongs to a {source}; void the {source} instead")));
     }
@@ -860,7 +792,7 @@ async fn reverse_entry(State(state): State<AppState>, auth: AuthUser, Path(id): 
     let when = body.and_then(|b| b.0.date).unwrap_or(date);
     let mut tx = state.db.begin().await?;
     // A bank-statement line matched to this entry goes back to unmatched.
-    sqlx::query("UPDATE acc_bank_lines SET status = 'unmatched', line_id = NULL WHERE line_id IN (SELECT id FROM acc_lines WHERE entry_id = $1)").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_bank_lines SET status = 'unmatched', line_id = NULL WHERE line_id IN (SELECT id FROM acc_lines WHERE entry_id = $1)", id).execute(&mut *tx).await?;
     let rid = ledger::reverse(&mut tx, id, when, Some(auth.id)).await?;
     tx.commit().await?;
     audit::record(&state.db, Some(auth.id), "accounting.entry_reverse", "entry", Some(id.to_string()), json!({ "reversal": rid }), None).await;
@@ -904,11 +836,8 @@ struct PartyQuery {
 async fn parties(State(state): State<AppState>, auth: AuthUser, Query(q): Query<PartyQuery>) -> AppResult<Json<Value>> {
     need(&auth, Level::View)?;
     let term = format!("%{}%", q.q.unwrap_or_default().trim().to_lowercase().replace('%', "\\%").replace('_', "\\_"));
-    let rows: Vec<(Uuid, String, i16, Option<String>)> = sqlx::query_as(
-        "SELECT id, title, entity_type, company_kind FROM crm_items WHERE entity_type IN (3, 4) AND deleted_at IS NULL AND lower(title) LIKE $1
-         ORDER BY entity_type DESC, title LIMIT 30",
-    )
-    .bind(term)
+    let rows: Vec<(Uuid, String, i16, Option<String>)> = sqlx::query!(r#"SELECT id, title, entity_type, company_kind FROM crm_items WHERE entity_type IN (3, 4) AND deleted_at IS NULL AND lower(title) LIKE $1
+         ORDER BY entity_type DESC, title LIMIT 30"#, term).map(|r| (r.id, r.title, r.entity_type, r.company_kind))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, t, e, k)| json!({ "id": id, "name": t, "kind": if e == 4 { "company" } else { "contact" }, "company_kind": k })).collect::<Vec<_>>() })))
@@ -917,12 +846,9 @@ async fn parties(State(state): State<AppState>, auth: AuthUser, Query(q): Query<
 /// CRM records the books refer to (posted invoices, customers and suppliers on entries,
 /// bills and payments): they can't be deleted for good.
 pub async fn in_books(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<Uuid>> {
-    Ok(sqlx::query_scalar(
-        "SELECT x FROM unnest($1::uuid[]) x WHERE EXISTS (SELECT 1 FROM acc_invoices WHERE item_id = x)
+    Ok(sqlx::query_scalar!(r#"SELECT x AS "x!" FROM unnest($1::uuid[]) x WHERE EXISTS (SELECT 1 FROM acc_invoices WHERE item_id = x)
             OR EXISTS (SELECT 1 FROM acc_lines WHERE party_id = x) OR EXISTS (SELECT 1 FROM acc_bills WHERE party_id = x)
-            OR EXISTS (SELECT 1 FROM acc_payments WHERE party_id = x) OR EXISTS (SELECT 1 FROM acc_invoices WHERE party_id = x)",
-    )
-    .bind(ids)
+            OR EXISTS (SELECT 1 FROM acc_payments WHERE party_id = x) OR EXISTS (SELECT 1 FROM acc_invoices WHERE party_id = x)"#, ids)
     .fetch_all(&state.db)
     .await?)
 }
@@ -936,6 +862,6 @@ pub async fn merged(tx: &mut ledger::Tx<'_>, from: Uuid, into: Uuid) -> AppResul
 }
 
 pub async fn party_exists(state: &AppState, id: Uuid) -> AppResult<()> {
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND entity_type IN (3, 4) AND deleted_at IS NULL)").bind(id).fetch_one(&state.db).await?;
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND entity_type IN (3, 4) AND deleted_at IS NULL) AS "v!""#, id).fetch_one(&state.db).await?;
     if ok { Ok(()) } else { Err(AppError::bad("the customer or supplier must be a CRM contact or company")) }
 }

@@ -67,11 +67,8 @@ use axum::{
     response::Response,
     Router,
 };
-use sqlx::{
-    postgres::{PgConnectOptions, PgPoolOptions},
-    ConnectOptions, Connection,
-};
-use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use sqlx::postgres::PgPoolOptions;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tower_http::{
     compression::{
         predicate::{DefaultPredicate, Predicate},
@@ -112,7 +109,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("creating upload dir {}", config.upload_dir.display()))?;
 
-    ensure_database(&config.database_url).await?;
+    migrate::ensure_database(&config.database_url).await?;
     let db = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .acquire_timeout(Duration::from_secs(10))
@@ -267,34 +264,6 @@ async fn static_cache_headers(uri: Uri, mut res: Response) -> Response {
 }
 
 /// Creates the target database on first start if it does not exist yet.
-async fn ensure_database(url: &str) -> Result<()> {
-    let opts = PgConnectOptions::from_str(url).context("parsing DATABASE_URL")?;
-    let Some(name) = opts.get_database().map(str::to_owned) else {
-        return Ok(());
-    };
-    // Connect to the default "postgres" database to check for / create ours.
-    let mut conn = opts
-        .clone()
-        .database("postgres")
-        .connect()
-        .await
-        .context("connecting to PostgreSQL")?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
-        .bind(&name)
-        .fetch_one(&mut conn)
-        .await?;
-    if !exists {
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            anyhow::bail!("database name must be alphanumeric/underscore: {name}");
-        }
-        // `name` was validated as alphanumeric/underscore above.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}"))).execute(&mut conn).await?;
-        tracing::info!("created database {name}");
-    }
-    conn.close().await?;
-    Ok(())
-}
-
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

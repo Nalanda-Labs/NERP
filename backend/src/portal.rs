@@ -51,16 +51,13 @@ fn hash(t: &str) -> String {
 }
 
 async fn emails_of(state: &AppState, contact: Uuid) -> AppResult<Vec<String>> {
-    Ok(sqlx::query_scalar("SELECT normalized FROM crm_multifields WHERE item_id = $1 AND kind = 'email' ORDER BY sort").bind(contact).fetch_all(&state.db).await?)
+    Ok(sqlx::query_scalar!("SELECT normalized FROM crm_multifields WHERE item_id = $1 AND kind = 'email' ORDER BY sort", contact).fetch_all(&state.db).await?)
 }
 
 /// Makes a sign-in link for a contact and emails it.
 async fn send_link(state: &AppState, contact: Uuid, to: &str) -> AppResult<String> {
     let token = crate::auth::tokens::random_token(32);
-    sqlx::query("INSERT INTO portal_links (hash, contact_id, expires_at) VALUES ($1, $2, now() + make_interval(days => $3::int))")
-        .bind(hash(&token))
-        .bind(contact)
-        .bind(LINK_DAYS as i32)
+    sqlx::query!("INSERT INTO portal_links (hash, contact_id, expires_at) VALUES ($1, $2, now() + make_interval(days => $3::int))", hash(&token), contact, LINK_DAYS as i32)
         .execute(&state.db)
         .await?;
     let url = format!("{}/portal/sign-in?token={token}", state.config.public_url);
@@ -97,7 +94,7 @@ async fn contact_for_staff(state: &AppState, auth: &AuthUser, id: Uuid, write: b
 async fn staff_get(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     contact_for_staff(&state, &auth, id, false).await?;
     let a: Option<(bool, bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT enabled, company_wide, invited_at, last_seen_at FROM portal_access WHERE contact_id = $1").bind(id).fetch_optional(&state.db).await?;
+        sqlx::query!(r#"SELECT enabled, company_wide, invited_at, last_seen_at FROM portal_access WHERE contact_id = $1"#, id).map(|r| (r.enabled, r.company_wide, r.invited_at, r.last_seen_at)).fetch_optional(&state.db).await?;
     Ok(Json(json!({
         "enabled": a.as_ref().is_some_and(|a| a.0), "company_wide": a.as_ref().is_some_and(|a| a.1),
         "invited_at": a.as_ref().and_then(|a| a.2), "last_seen_at": a.as_ref().and_then(|a| a.3), "emails": emails_of(&state, id).await?,
@@ -113,19 +110,14 @@ struct AccessInput {
 
 async fn staff_put(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Path(id): Path<Uuid>, Json(b): Json<AccessInput>) -> AppResult<Json<Value>> {
     contact_for_staff(&state, &auth, id, true).await?;
-    sqlx::query(
-        "INSERT INTO portal_access (contact_id, enabled, company_wide) VALUES ($1, $2, $3)
-         ON CONFLICT (contact_id) DO UPDATE SET enabled = EXCLUDED.enabled, company_wide = EXCLUDED.company_wide",
-    )
-    .bind(id)
-    .bind(b.enabled)
-    .bind(b.company_wide)
+    sqlx::query!("INSERT INTO portal_access (contact_id, enabled, company_wide) VALUES ($1, $2, $3)
+         ON CONFLICT (contact_id) DO UPDATE SET enabled = EXCLUDED.enabled, company_wide = EXCLUDED.company_wide", id, b.enabled, b.company_wide)
     .execute(&state.db)
     .await?;
     if !b.enabled {
         // Turning it off signs them out at once.
-        sqlx::query("DELETE FROM portal_sessions WHERE contact_id = $1").bind(id).execute(&state.db).await?;
-        sqlx::query("DELETE FROM portal_links WHERE contact_id = $1").bind(id).execute(&state.db).await?;
+        sqlx::query!("DELETE FROM portal_sessions WHERE contact_id = $1", id).execute(&state.db).await?;
+        sqlx::query!("DELETE FROM portal_links WHERE contact_id = $1", id).execute(&state.db).await?;
     }
     audit::record(&state.db, Some(auth.id), "portal.access", "crm_item", Some(id.to_string()), json!({ "enabled": b.enabled, "company_wide": b.company_wide }), ip.as_deref()).await;
     staff_get(State(state), auth, Path(id)).await
@@ -151,12 +143,8 @@ async fn staff_invite(State(state): State<AppState>, auth: AuthUser, ClientIp(ip
         }
         None => emails.first().cloned().ok_or_else(|| AppError::bad("the contact has no email address"))?,
     };
-    sqlx::query(
-        "INSERT INTO portal_access (contact_id, enabled, invited_by, invited_at) VALUES ($1, TRUE, $2, now())
-         ON CONFLICT (contact_id) DO UPDATE SET enabled = TRUE, invited_by = EXCLUDED.invited_by, invited_at = now()",
-    )
-    .bind(id)
-    .bind(auth.id)
+    sqlx::query!("INSERT INTO portal_access (contact_id, enabled, invited_by, invited_at) VALUES ($1, TRUE, $2, now())
+         ON CONFLICT (contact_id) DO UPDATE SET enabled = TRUE, invited_by = EXCLUDED.invited_by, invited_at = now()", id, auth.id)
     .execute(&state.db)
     .await?;
     let url = send_link(&state, id, &to).await?;
@@ -186,11 +174,8 @@ async fn request_link(State(state): State<AppState>, ClientIp(ip): ClientIp, Jso
     if limited(&state, format!("portal:ip:{}", ip.as_deref().unwrap_or("unknown")), 10, 3600).await? || limited(&state, format!("portal:email:{email}"), 3, 3600).await? {
         return Err(AppError::TooManyRequests("too many requests; try again later".into()));
     }
-    let contact: Option<Uuid> = sqlx::query_scalar(
-        "SELECT a.contact_id FROM portal_access a JOIN crm_multifields m ON m.item_id = a.contact_id JOIN crm_items i ON i.id = a.contact_id
-         WHERE a.enabled AND m.kind = 'email' AND m.normalized = $1 AND i.deleted_at IS NULL ORDER BY a.last_seen_at DESC NULLS LAST LIMIT 1",
-    )
-    .bind(&email)
+    let contact: Option<Uuid> = sqlx::query_scalar!("SELECT a.contact_id FROM portal_access a JOIN crm_multifields m ON m.item_id = a.contact_id JOIN crm_items i ON i.id = a.contact_id
+         WHERE a.enabled AND m.kind = 'email' AND m.normalized = $1 AND i.deleted_at IS NULL ORDER BY a.last_seen_at DESC NULLS LAST LIMIT 1", &email)
     .fetch_optional(&state.db)
     .await?;
     if let Some(c) = contact {
@@ -215,22 +200,16 @@ async fn sign_in(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b):
     if limited(&state, format!("portal:signin:{}", ip.as_deref().unwrap_or("unknown")), 30, 3600).await? {
         return Err(AppError::TooManyRequests("too many attempts; try again later".into()));
     }
-    let contact: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE portal_links l SET used_at = now() FROM portal_access a
-         WHERE l.hash = $1 AND l.used_at IS NULL AND l.expires_at > now() AND a.contact_id = l.contact_id AND a.enabled RETURNING l.contact_id",
-    )
-    .bind(hash(b.token.trim()))
+    let contact: Option<Uuid> = sqlx::query_scalar!("UPDATE portal_links l SET used_at = now() FROM portal_access a
+         WHERE l.hash = $1 AND l.used_at IS NULL AND l.expires_at > now() AND a.contact_id = l.contact_id AND a.enabled RETURNING l.contact_id", hash(b.token.trim()))
     .fetch_optional(&state.db)
     .await?;
     let contact = contact.ok_or(AppError::NotFound("link"))?;
     let token = crate::auth::tokens::random_token(32);
-    sqlx::query("INSERT INTO portal_sessions (hash, contact_id, expires_at) VALUES ($1, $2, now() + make_interval(days => $3::int))")
-        .bind(hash(&token))
-        .bind(contact)
-        .bind(SESSION_DAYS as i32)
+    sqlx::query!("INSERT INTO portal_sessions (hash, contact_id, expires_at) VALUES ($1, $2, now() + make_interval(days => $3::int))", hash(&token), contact, SESSION_DAYS as i32)
         .execute(&state.db)
         .await?;
-    sqlx::query("UPDATE portal_access SET last_seen_at = now() WHERE contact_id = $1").bind(contact).execute(&state.db).await?;
+    sqlx::query!("UPDATE portal_access SET last_seen_at = now() WHERE contact_id = $1", contact).execute(&state.db).await?;
     audit::record(&state.db, None, "portal.sign_in", "crm_item", Some(contact.to_string()), json!({}), ip.as_deref()).await;
     Ok((AppendHeaders([(header::SET_COOKIE, session_cookie(&state, &token, SESSION_DAYS * 86400))]), Json(json!({ "ok": true }))).into_response())
 }
@@ -249,7 +228,7 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 
 async fn sign_out(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Response> {
     if let Some(t) = cookie_token(&headers) {
-        sqlx::query("DELETE FROM portal_sessions WHERE hash = $1").bind(hash(&t)).execute(&state.db).await?;
+        sqlx::query!("DELETE FROM portal_sessions WHERE hash = $1", hash(&t)).execute(&state.db).await?;
     }
     Ok((AppendHeaders([(header::SET_COOKIE, session_cookie(&state, "", 0))]), Json(json!({ "ok": true }))).into_response())
 }
@@ -257,17 +236,13 @@ async fn sign_out(State(state): State<AppState>, headers: HeaderMap) -> AppResul
 /// The signed-in contact (and whether they see their company's records).
 async fn client(state: &AppState, headers: &HeaderMap) -> AppResult<(Uuid, bool)> {
     let t = cookie_token(headers).ok_or(AppError::Unauthorized)?;
-    let row: Option<(Uuid, bool)> = sqlx::query_as(
-        "UPDATE portal_sessions s SET last_seen_at = now() FROM portal_access a, crm_items i
+    let row: Option<(Uuid, bool)> = sqlx::query!(r#"UPDATE portal_sessions s SET last_seen_at = now() FROM portal_access a, crm_items i
          WHERE s.hash = $1 AND s.expires_at > now() AND a.contact_id = s.contact_id AND a.enabled AND i.id = s.contact_id AND i.deleted_at IS NULL
-         RETURNING s.contact_id, a.company_wide",
-    )
-    .bind(hash(&t))
+         RETURNING s.contact_id, a.company_wide"#, hash(&t)).map(|r| (r.contact_id, r.company_wide))
     .fetch_optional(&state.db)
     .await?;
     let (contact, wide) = row.ok_or(AppError::Unauthorized)?;
-    sqlx::query("UPDATE portal_access SET last_seen_at = now() WHERE contact_id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')")
-        .bind(contact)
+    sqlx::query!("UPDATE portal_access SET last_seen_at = now() WHERE contact_id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '5 minutes')", contact)
         .execute(&state.db)
         .await?;
     Ok((contact, wide))
@@ -282,11 +257,8 @@ const VISIBLE: &str = "SELECT i.id FROM crm_items i WHERE i.deleted_at IS NULL A
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
     let (contact, wide) = client(&state, &headers).await?;
     let emails = emails_of(&state, contact).await?;
-    let who: (String, Option<String>) = sqlx::query_as(
-        "SELECT COALESCE(NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), ''), c.title), co.title
-         FROM crm_items c LEFT JOIN crm_items co ON co.id = c.company_id WHERE c.id = $1",
-    )
-    .bind(contact)
+    let who: (String, Option<String>) = sqlx::query!(r#"SELECT COALESCE(NULLIF(trim(concat_ws(' ', c.first_name, c.last_name)), ''), c.title) AS "c0!", co.title AS "title?"
+         FROM crm_items c LEFT JOIN crm_items co ON co.id = c.company_id WHERE c.id = $1"#, contact).map(|r| (r.c0, r.title))
     .fetch_one(&state.db)
     .await?;
     let base = crate::crm::money::base_currency(&state).await.unwrap_or_default();
@@ -314,14 +286,10 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json
     };
     let invoices: Vec<Value> = docs.iter().filter(|d| d.1 == 6).map(doc).collect();
     let quotes: Vec<Value> = docs.iter().filter(|d| d.1 == 5).map(doc).collect();
-    let payments: Vec<(i64, NaiveDate, Decimal, String, Option<String>)> = sqlx::query_as(
-        "SELECT p.number, p.date, p.amount, p.currency, p.reference FROM acc_payments p
+    let payments: Vec<(i64, NaiveDate, Decimal, String, Option<String>)> = sqlx::query!(r#"SELECT p.number, p.date, p.amount, p.currency, p.reference FROM acc_payments p
          WHERE p.direction = 'in' AND p.status = 'posted'
            AND (p.party_id = $1 OR ($2 AND p.party_id = (SELECT company_id FROM crm_items WHERE id = $1)))
-         ORDER BY p.date DESC LIMIT 200",
-    )
-    .bind(contact)
-    .bind(wide)
+         ORDER BY p.date DESC LIMIT 200"#, contact, wide).map(|r| (r.number, r.date, r.amount, r.currency, r.reference))
     .fetch_all(&state.db)
     .await?;
     let signatures: Vec<(Uuid, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Option<Uuid>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -334,20 +302,12 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json
     .bind(&emails)
     .fetch_all(&state.db)
     .await?;
-    let tickets: Vec<(i64, String, Option<DateTime<Utc>>, DateTime<Utc>, Option<DateTime<Utc>>, Option<Vec<u8>>)> = sqlx::query_as(
-        "SELECT number, title, closed_at, created_at, last_message_at, access_secret FROM support_tickets
-         WHERE NOT is_spam AND (contact_id = $1 OR lower(requester_email) = ANY($2)) ORDER BY created_at DESC LIMIT 100",
-    )
-    .bind(contact)
-    .bind(&emails)
+    let tickets: Vec<(i64, String, Option<DateTime<Utc>>, DateTime<Utc>, Option<DateTime<Utc>>, Option<Vec<u8>>)> = sqlx::query!(r#"SELECT number AS "number!", title AS "title!", closed_at AS "closed_at?", created_at AS "created_at!", last_message_at AS "last_message_at?", access_secret AS "access_secret?" FROM support_tickets
+         WHERE NOT is_spam AND (contact_id = $1 OR lower(requester_email) = ANY($2)) ORDER BY created_at DESC LIMIT 100"#, contact, &emails).map(|r| (r.number, r.title, r.closed_at, r.created_at, r.last_message_at, r.access_secret))
     .fetch_all(&state.db)
     .await?;
-    let bookings: Vec<(i64, DateTime<Utc>, DateTime<Utc>, String, Option<String>)> = sqlx::query_as(
-        "SELECT b.number, b.starts_at, b.ends_at, b.status, s.name FROM bookings b LEFT JOIN booking_services s ON s.id = b.service_id
-         WHERE b.contact_id = $1 OR lower(b.client_email) = ANY($2) ORDER BY b.starts_at DESC LIMIT 100",
-    )
-    .bind(contact)
-    .bind(&emails)
+    let bookings: Vec<(i64, DateTime<Utc>, DateTime<Utc>, String, Option<String>)> = sqlx::query!(r#"SELECT b.number AS "number!", b.starts_at AS "starts_at!", b.ends_at AS "ends_at!", b.status AS "status!", s.name AS "name?" FROM bookings b LEFT JOIN booking_services s ON s.id = b.service_id
+         WHERE b.contact_id = $1 OR lower(b.client_email) = ANY($2) ORDER BY b.starts_at DESC LIMIT 100"#, contact, &emails).map(|r| (r.number, r.starts_at, r.ends_at, r.status, r.name))
     .fetch_all(&state.db)
     .await?;
     let company = crate::routes::auth::company_name(&state).await;
@@ -382,6 +342,6 @@ async fn file(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<
     if !ok {
         return Err(AppError::NotFound("file"));
     }
-    let name: String = sqlx::query_scalar("SELECT original_name FROM files WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let name: String = sqlx::query_scalar!("SELECT original_name FROM files WHERE id = $1", id).fetch_one(&state.db).await?;
     crate::routes::files::stream_id(&state, id, &name, &headers).await
 }

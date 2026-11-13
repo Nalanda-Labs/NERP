@@ -508,7 +508,7 @@ struct AnalyzeInput {
 
 /// Employees (active, not guests): id, email, full name.
 async fn employees(state: &AppState) -> AppResult<Vec<(Uuid, String, String)>> {
-    Ok(sqlx::query_as("SELECT id, lower(email), lower(trim(first_name || ' ' || last_name)) FROM users WHERE is_active AND NOT is_guest").fetch_all(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT id AS "id!", lower(email) AS "c1!", lower(trim(first_name || ' ' || last_name)) AS "c2!" FROM users WHERE is_active AND NOT is_guest"#).map(|r| (r.id, r.c1, r.c2)).fetch_all(&state.db).await?)
 }
 
 /// An owner value from the export → an employee: by the export's users file, email, or name.
@@ -612,7 +612,7 @@ async fn analyze(State(state): State<AppState>, auth: AuthUser, Json(b): Json<An
         }
     }
     // Suggestions: pipelines and stages by name.
-    let cats: Vec<(Uuid, String, bool)> = sqlx::query_as("SELECT id, name, is_default FROM crm_categories WHERE entity_type = $1 ORDER BY sort").bind(DEAL).fetch_all(&state.db).await?;
+    let cats: Vec<(Uuid, String, bool)> = sqlx::query!(r#"SELECT id, name, is_default FROM crm_categories WHERE entity_type = $1 ORDER BY sort"#, DEAL).map(|r| (r.id, r.name, r.is_default)).fetch_all(&state.db).await?;
     let default_cat = cats.iter().find(|c| c.2).map(|c| c.0);
     let pipe_for = |p: &str| -> Value {
         if p.is_empty() {
@@ -620,9 +620,7 @@ async fn analyze(State(state): State<AppState>, auth: AuthUser, Json(b): Json<An
         }
         cats.iter().find(|c| c.1.eq_ignore_ascii_case(p)).map(|c| json!(c.0)).unwrap_or(json!("new"))
     };
-    let all_stages: Vec<(Uuid, Uuid, i16, String, String)> = sqlx::query_as(
-        "SELECT s.id, s.category_id, c.entity_type, s.name, s.semantics FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE c.entity_type IN (1, 2) ORDER BY s.sort",
-    )
+    let all_stages: Vec<(Uuid, Uuid, i16, String, String)> = sqlx::query!(r#"SELECT s.id, s.category_id, c.entity_type, s.name, s.semantics FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE c.entity_type IN (1, 2) ORDER BY s.sort"#).map(|r| (r.id, r.category_id, r.entity_type, r.name, r.semantics))
     .fetch_all(&state.db)
     .await?;
     let lead_cat: Option<Uuid> = all_stages.iter().find(|s| s.2 == LEAD).map(|s| s.1);
@@ -642,7 +640,7 @@ async fn analyze(State(state): State<AppState>, auth: AuthUser, Json(b): Json<An
             })
         })
         .collect();
-    let enabled: Vec<String> = sqlx::query_scalar("SELECT code FROM crm_currencies").fetch_all(&state.db).await?;
+    let enabled: Vec<String> = sqlx::query_scalar!("SELECT code FROM crm_currencies").fetch_all(&state.db).await?;
     Ok(Json(json!({
         "source": source,
         "files": mapped.iter().map(|(kind, t, m)| json!({
@@ -732,10 +730,7 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Json(p): Json<Plan
             return Err(AppError::bad("stages and pipelines map to an id or \"new\""));
         }
     }
-    let id: Uuid = sqlx::query_scalar("INSERT INTO crm_migrations (source, plan, created_by) VALUES ($1, $2, $3) RETURNING id")
-        .bind(&p.source)
-        .bind(json!(p))
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_migrations (source, plan, created_by) VALUES ($1, $2, $3) RETURNING id", &p.source, json!(p), auth.id)
         .fetch_one(&state.db)
         .await?;
     jobs::enqueue(&state.db, JOB, json!({ "migration_id": id }), None).await?;
@@ -744,13 +739,10 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Json(p): Json<Plan
 }
 
 async fn load(state: &AppState, id: Uuid) -> AppResult<Value> {
-    let row: Option<Value> = sqlx::query_scalar(
-        "SELECT jsonb_build_object('id', m.id, 'source', m.source, 'status', m.status, 'progress', m.progress, 'created_at', m.created_at,
+    let row: Option<Value> = sqlx::query_scalar!(r#"SELECT jsonb_build_object('id', m.id, 'source', m.source, 'status', m.status, 'progress', m.progress, 'created_at', m.created_at,
                 'finished_at', m.finished_at, 'undone_at', m.undone_at, 'files', (SELECT jsonb_agg(f->>'name') FROM jsonb_array_elements(m.plan->'files') f),
-                'created_by', m.created_by, 'created_by_name', trim(u.first_name || ' ' || u.last_name))
-         FROM crm_migrations m LEFT JOIN users u ON u.id = m.created_by WHERE m.id = $1",
-    )
-    .bind(id)
+                'created_by', m.created_by, 'created_by_name', trim(u.first_name || ' ' || u.last_name)) AS "v!"
+         FROM crm_migrations m LEFT JOIN users u ON u.id = m.created_by WHERE m.id = $1"#, id)
     .fetch_optional(&state.db)
     .await?;
     row.ok_or(AppError::NotFound("migration"))
@@ -763,7 +755,7 @@ async fn one(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM crm_migrations ORDER BY created_at DESC LIMIT 50").fetch_all(&state.db).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_migrations ORDER BY created_at DESC LIMIT 50").fetch_all(&state.db).await?;
     let mut items = Vec::new();
     for id in ids {
         items.push(load(&state, id).await?);
@@ -773,7 +765,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
 
 async fn undo(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM crm_migrations WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let status: Option<String> = sqlx::query_scalar!("SELECT status FROM crm_migrations WHERE id = $1", id).fetch_optional(&state.db).await?;
     match status.as_deref() {
         None => return Err(AppError::NotFound("migration")),
         Some("queued") | Some("running") => return Err(AppError::Conflict("the migration is still running".into())),
@@ -781,45 +773,32 @@ async fn undo(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
         _ => {}
     }
     let mut tx = state.db.begin().await?;
-    let records = sqlx::query(
-        "UPDATE crm_items SET deleted_at = now(), deleted_by = $2 WHERE deleted_at IS NULL AND id IN
-           (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind IN ('company', 'contact', 'lead', 'deal'))",
-    )
-    .bind(id)
-    .bind(auth.id)
+    let records = sqlx::query!("UPDATE crm_items SET deleted_at = now(), deleted_by = $2 WHERE deleted_at IS NULL AND id IN
+           (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind IN ('company', 'contact', 'lead', 'deal'))", id, auth.id)
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    let activities = sqlx::query("DELETE FROM crm_activities WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'activity')")
-        .bind(id)
+    let activities = sqlx::query!("DELETE FROM crm_activities WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'activity')", id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
-    let notes = sqlx::query("DELETE FROM crm_timeline WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'note')")
-        .bind(id)
+    let notes = sqlx::query!("DELETE FROM crm_timeline WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'note')", id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
-    let attached: Vec<Vec<Uuid>> = sqlx::query_scalar(
-        "DELETE FROM crm_timeline WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'attachment') RETURNING file_ids",
-    )
-    .bind(id)
+    let attached: Vec<Vec<Uuid>> = sqlx::query_scalar!("DELETE FROM crm_timeline WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'attachment') RETURNING file_ids", id)
     .fetch_all(&mut *tx)
     .await?;
     let attached: Vec<Uuid> = attached.into_iter().flatten().collect();
-    let lines: Vec<Uuid> = sqlx::query_scalar(
-        "DELETE FROM crm_item_products WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'line') RETURNING item_id",
-    )
-    .bind(id)
+    let lines: Vec<Uuid> = sqlx::query_scalar!("DELETE FROM crm_item_products WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'line') RETURNING item_id", id)
     .fetch_all(&mut *tx)
     .await?;
-    let products = sqlx::query("DELETE FROM crm_products WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'product')")
-        .bind(id)
+    let products = sqlx::query!("DELETE FROM crm_products WHERE id IN (SELECT item_id FROM crm_migration_ids WHERE migration_id = $1 AND created AND kind = 'product')", id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
-    sqlx::query("DELETE FROM crm_migration_ids WHERE migration_id = $1").bind(id).execute(&mut *tx).await?;
-    sqlx::query("UPDATE crm_migrations SET status = 'undone', undone_at = now() WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM crm_migration_ids WHERE migration_id = $1", id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE crm_migrations SET status = 'undone', undone_at = now() WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     for f in &attached {
         crate::routes::files::delete_stored(&state, *f).await;
@@ -893,42 +872,31 @@ struct Run<'a> {
 
 impl Run<'_> {
     async fn known(&self, kind: &str, source_id: &str) -> Result<Option<Uuid>> {
-        let id: Option<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_migration_ids WHERE source = $1 AND kind = $2 AND source_id = $3")
-            .bind(&self.plan.source)
-            .bind(kind)
-            .bind(source_id)
+        let id: Option<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_migration_ids WHERE source = $1 AND kind = $2 AND source_id = $3", &self.plan.source, kind, source_id)
             .fetch_optional(&self.state.db)
             .await?;
         // Records deleted since don't count.
         Ok(match (id, kind) {
             (Some(i), "company" | "contact" | "lead" | "deal") => {
-                let alive: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND deleted_at IS NULL)").bind(i).fetch_one(&self.state.db).await?;
+                let alive: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND deleted_at IS NULL) AS "v!""#, i).fetch_one(&self.state.db).await?;
                 alive.then_some(i)
             }
-            (Some(i), "activity") => sqlx::query_scalar("SELECT id FROM crm_activities WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
-            (Some(i), "note" | "attachment") => sqlx::query_scalar("SELECT id FROM crm_timeline WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
-            (Some(i), "product") => sqlx::query_scalar("SELECT id FROM crm_products WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
-            (Some(i), "line") => sqlx::query_scalar("SELECT id FROM crm_item_products WHERE id = $1").bind(i).fetch_optional(&self.state.db).await?,
+            (Some(i), "activity") => sqlx::query_scalar!("SELECT id FROM crm_activities WHERE id = $1", i).fetch_optional(&self.state.db).await?,
+            (Some(i), "note" | "attachment") => sqlx::query_scalar!("SELECT id FROM crm_timeline WHERE id = $1", i).fetch_optional(&self.state.db).await?,
+            (Some(i), "product") => sqlx::query_scalar!("SELECT id FROM crm_products WHERE id = $1", i).fetch_optional(&self.state.db).await?,
+            (Some(i), "line") => sqlx::query_scalar!("SELECT id FROM crm_item_products WHERE id = $1", i).fetch_optional(&self.state.db).await?,
             _ => None,
         })
     }
 
     async fn remember(&self, kind: &str, source_id: Option<&str>, item: Uuid, created: bool) -> Result<()> {
         let Some(sid) = source_id else { return Ok(()) };
-        sqlx::query(
-            "INSERT INTO crm_migration_ids (source, kind, source_id, item_id, migration_id, created) VALUES ($1, $2, $3, $4, $5, $6)
+        sqlx::query!("INSERT INTO crm_migration_ids (source, kind, source_id, item_id, migration_id, created) VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (source, kind, source_id) DO UPDATE SET
                -- The same record seen again: it stays with the migration that made it.
                migration_id = CASE WHEN crm_migration_ids.item_id = EXCLUDED.item_id AND crm_migration_ids.created THEN crm_migration_ids.migration_id ELSE EXCLUDED.migration_id END,
                created = CASE WHEN crm_migration_ids.item_id = EXCLUDED.item_id THEN crm_migration_ids.created OR EXCLUDED.created ELSE EXCLUDED.created END,
-               item_id = EXCLUDED.item_id",
-        )
-        .bind(&self.plan.source)
-        .bind(kind)
-        .bind(sid)
-        .bind(item)
-        .bind(self.id)
-        .bind(created)
+               item_id = EXCLUDED.item_id", &self.plan.source, kind, sid, item, self.id, created)
         .execute(&self.state.db)
         .await?;
         Ok(())
@@ -964,8 +932,7 @@ impl Run<'_> {
     }
 
     async fn company_named(&self, name: &str) -> Result<Uuid> {
-        let found: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) ORDER BY created_at LIMIT 1")
-            .bind(name)
+        let found: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) ORDER BY created_at LIMIT 1", name)
             .fetch_optional(&self.state.db)
             .await?;
         if let Some(f) = found {
@@ -985,15 +952,11 @@ impl Run<'_> {
         let choice = self.plan.pipelines.get(pipeline).cloned().unwrap_or_default();
         let id = if choice == "new" {
             let name = if pipeline.is_empty() { format!("From {}", self.plan.source) } else { pipeline.chars().take(100).collect() };
-            let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_categories WHERE entity_type = $1 AND lower(name) = lower($2)").bind(DEAL).bind(&name).fetch_optional(&self.state.db).await?;
+            let existing: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_categories WHERE entity_type = $1 AND lower(name) = lower($2)", DEAL, &name).fetch_optional(&self.state.db).await?;
             match existing {
                 Some(e) => e,
                 None => {
-                    let c: Uuid = sqlx::query_scalar(
-                        "INSERT INTO crm_categories (entity_type, name, sort) VALUES ($1, $2, COALESCE((SELECT MAX(sort) FROM crm_categories WHERE entity_type = $1), 0) + 10) RETURNING id",
-                    )
-                    .bind(DEAL)
-                    .bind(&name)
+                    let c: Uuid = sqlx::query_scalar!("INSERT INTO crm_categories (entity_type, name, sort) VALUES ($1, $2, COALESCE((SELECT MAX(sort) FROM crm_categories WHERE entity_type = $1), 0) + 10) RETURNING id", DEAL, &name)
                     .fetch_one(&self.state.db)
                     .await?;
                     // Its stages: the ones the export uses there, in the order first seen;
@@ -1019,12 +982,7 @@ impl Run<'_> {
                     }
                     for (i, (n, sem)) in ordered.iter().enumerate() {
                         let color = match *sem { "success" => "#22c55e", "failure" => "#ef4444", _ => "#3b82f6" };
-                        sqlx::query("INSERT INTO crm_stages (category_id, name, color, sort, semantics) VALUES ($1, $2, $3, $4, $5)")
-                            .bind(c)
-                            .bind(n.chars().take(60).collect::<String>())
-                            .bind(color)
-                            .bind((i as i32 + 1) * 10)
-                            .bind(sem)
+                        sqlx::query!("INSERT INTO crm_stages (category_id, name, color, sort, semantics) VALUES ($1, $2, $3, $4, $5)", c, n.chars().take(60).collect::<String>(), color, (i as i32 + 1) * 10, sem)
                             .execute(&self.state.db)
                             .await?;
                     }
@@ -1050,26 +1008,20 @@ impl Run<'_> {
         let cat = if kind == "deal" {
             self.category(pipeline).await?
         } else {
-            sqlx::query_scalar("SELECT id FROM crm_categories WHERE entity_type = $1 ORDER BY is_default DESC, sort LIMIT 1").bind(LEAD).fetch_optional(&self.state.db).await?
+            sqlx::query_scalar!("SELECT id FROM crm_categories WHERE entity_type = $1 ORDER BY is_default DESC, sort LIMIT 1", LEAD).fetch_optional(&self.state.db).await?
         };
         let id = if let Ok(u) = Uuid::parse_str(&choice) {
             Some(u)
         } else if let Some(c) = cat {
             // "new", or nothing chosen: the stage of that name in the pipeline, else a new one.
-            let found: Option<Uuid> = sqlx::query_scalar("SELECT id FROM crm_stages WHERE category_id = $1 AND lower(name) = lower($2)").bind(c).bind(value).fetch_optional(&self.state.db).await?;
+            let found: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_stages WHERE category_id = $1 AND lower(name) = lower($2)", c, value).fetch_optional(&self.state.db).await?;
             match found {
                 Some(f) => Some(f),
                 None if choice == "new" => {
                     let sem = semantics_of(value);
                     Some(
-                        sqlx::query_scalar(
-                            "INSERT INTO crm_stages (category_id, name, color, semantics, sort)
-                             VALUES ($1, $2, $3, $4, COALESCE((SELECT MAX(sort) FROM crm_stages WHERE category_id = $1 AND (semantics = 'process' OR $4 <> 'process')), 0) + 5) RETURNING id",
-                        )
-                        .bind(c)
-                        .bind(value.chars().take(60).collect::<String>())
-                        .bind(match sem { "success" => "#22c55e", "failure" => "#ef4444", _ => "#3b82f6" })
-                        .bind(sem)
+                        sqlx::query_scalar!("INSERT INTO crm_stages (category_id, name, color, semantics, sort)
+                             VALUES ($1, $2, $3, $4, COALESCE((SELECT MAX(sort) FROM crm_stages WHERE category_id = $1 AND (semantics = 'process' OR $4 <> 'process')), 0) + 5) RETURNING id", c, value.chars().take(60).collect::<String>(), match sem { "success" => "#22c55e", "failure" => "#ef4444", _ => "#3b82f6" }, sem)
                         .fetch_one(&self.state.db)
                         .await?,
                     )
@@ -1208,14 +1160,12 @@ fn plain(text: &str) -> String {
 pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
     let id: Uuid = serde_json::from_value(payload["migration_id"].clone())?;
     let (plan, progress, created_by, status): (Value, Value, Option<Uuid>, String) =
-        sqlx::query_as("SELECT plan, progress, created_by, status FROM crm_migrations WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT plan, progress, created_by, status FROM crm_migrations WHERE id = $1"#, id).map(|r| (r.plan, r.progress, r.created_by, r.status)).fetch_one(&state.db).await?;
     if !matches!(status.as_str(), "queued" | "running") {
         return Ok(());
     }
     let fail = |msg: String| async move {
-        sqlx::query("UPDATE crm_migrations SET status = 'failed', finished_at = now(), progress = progress || jsonb_build_object('error', $2::text) WHERE id = $1")
-            .bind(id)
-            .bind(msg)
+        sqlx::query!("UPDATE crm_migrations SET status = 'failed', finished_at = now(), progress = progress || jsonb_build_object('error', $2::text) WHERE id = $1", id, msg)
             .execute(&state.db)
             .await
     };
@@ -1235,7 +1185,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
         }
     };
     let all = &export.tables;
-    sqlx::query("UPDATE crm_migrations SET status = 'running' WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_migrations SET status = 'running' WHERE id = $1", id).execute(&state.db).await?;
 
     // Columns to become new custom fields: made once (named after the column, typed by its
     // values), and the plan remembers them for the runs that carry on.
@@ -1250,9 +1200,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
             let i = t.headers.iter().position(|h| h == column);
             let values: Vec<&str> = i.map(|i| t.rows.iter().filter_map(|r| r.get(i)).map(String::as_str).filter(|v| !v.is_empty()).collect()).unwrap_or_default();
             // A field of that name made by an earlier run (or by hand) is used again.
-            let existing: Option<String> = sqlx::query_scalar("SELECT code FROM crm_field_defs WHERE entity_type = $1 AND lower(label) = lower($2) ORDER BY created_at LIMIT 1")
-                .bind(entity)
-                .bind(column.trim())
+            let existing: Option<String> = sqlx::query_scalar!("SELECT code FROM crm_field_defs WHERE entity_type = $1 AND lower(label) = lower($2) ORDER BY created_at LIMIT 1", entity, column.trim())
                 .fetch_optional(&state.db)
                 .await?;
             let code = match existing {
@@ -1264,7 +1212,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
         }
     }
     if made_fields {
-        sqlx::query("UPDATE crm_migrations SET plan = $2 WHERE id = $1").bind(id).bind(json!(plan)).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_migrations SET plan = $2 WHERE id = $1", id, json!(plan)).execute(&state.db).await?;
     }
     let mut defs = HashMap::new();
     for e in [COMPANY, CONTACT, LEAD, DEAL] {
@@ -1290,7 +1238,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
         plan: plan.clone(),
         cats: HashMap::new(),
         stage_ids: HashMap::new(),
-        currencies: sqlx::query_scalar::<_, String>("SELECT trim(code) FROM crm_currencies").fetch_all(&state.db).await?,
+        currencies: sqlx::query_scalar!(r#"SELECT trim(code) AS "v!" FROM crm_currencies"#).fetch_all(&state.db).await?,
         base_currency: super::money::base_currency(state).await.map_err(|e| anyhow!(e.to_string()))?,
         defs,
         export: &export,
@@ -1336,11 +1284,11 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
             ri += 1;
             done += 1;
             if done % 50 == 0 {
-                sqlx::query("UPDATE crm_migrations SET progress = $2 WHERE id = $1").bind(id).bind(save(fi, ri, done, &counts, &errors)).execute(&state.db).await?;
+                sqlx::query!("UPDATE crm_migrations SET progress = $2 WHERE id = $1", id, save(fi, ri, done, &counts, &errors)).execute(&state.db).await?;
             }
             // Jobs have a time limit: carry on in a fresh run.
             if started.elapsed() > std::time::Duration::from_secs(150) {
-                sqlx::query("UPDATE crm_migrations SET progress = $2 WHERE id = $1").bind(id).bind(save(fi, ri, done, &counts, &errors)).execute(&state.db).await?;
+                sqlx::query!("UPDATE crm_migrations SET progress = $2 WHERE id = $1", id, save(fi, ri, done, &counts, &errors)).execute(&state.db).await?;
                 jobs::enqueue(&state.db, JOB, json!({ "migration_id": id }), None).await?;
                 return Ok(());
             }
@@ -1348,7 +1296,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
         fi += 1;
         ri = 0;
     }
-    sqlx::query("UPDATE crm_migrations SET status = 'done', finished_at = now(), progress = $2 WHERE id = $1").bind(id).bind(save(fi, 0, done, &counts, &errors)).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_migrations SET status = 'done', finished_at = now(), progress = $2 WHERE id = $1", id, save(fi, 0, done, &counts, &errors)).execute(&state.db).await?;
     for t in [LEAD, DEAL, CONTACT, COMPANY] {
         super::broadcast(state, t, Uuid::nil(), false).await;
     }
@@ -1380,11 +1328,7 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
                     return Ok(2);
                 }
             // The catalogue's own product of that code (or name), else a new one.
-            let existing: Option<Uuid> = sqlx::query_scalar(
-                "SELECT id FROM crm_products WHERE ($1::text IS NOT NULL AND sku = $1) OR ($1::text IS NULL AND lower(name) = lower($2)) ORDER BY created_at LIMIT 1",
-            )
-            .bind(&sku)
-            .bind(&name)
+            let existing: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_products WHERE ($1::text IS NOT NULL AND sku = $1) OR ($1::text IS NULL AND lower(name) = lower($2)) ORDER BY created_at LIMIT 1", sku.as_deref(), &name)
             .fetch_optional(&run.state.db)
             .await?;
             if let Some(e) = existing {
@@ -1392,17 +1336,7 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
                 return Ok(2);
             }
             let currency = get("currency").map(|c| c.to_uppercase()).filter(|c| run.currencies.contains(c)).unwrap_or_else(|| run.base_currency.clone());
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO crm_products (name, sku, description, price, currency, tax_rate, unit, cost) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'pcs'), $8) RETURNING id",
-            )
-            .bind(name.chars().take(300).collect::<String>())
-            .bind(&sku)
-            .bind(get("description").map(|d| plain(&d)))
-            .bind(decimal(get("price").as_deref()).unwrap_or_default())
-            .bind(&currency)
-            .bind(decimal(get("tax_rate").as_deref()).filter(|t| !t.is_sign_negative() && *t <= rust_decimal::Decimal::ONE_HUNDRED))
-            .bind(get("unit").map(|u| u.chars().take(20).collect::<String>()))
-            .bind(decimal(get("cost").as_deref()).filter(|c| !c.is_sign_negative()))
+            let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_products (name, sku, description, price, currency, tax_rate, unit, cost) VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'pcs'), $8) RETURNING id", name.chars().take(300).collect::<String>(), sku.as_deref(), get("description").map(|d| plain(&d)), decimal(get("price").as_deref()).unwrap_or_default(), &currency, decimal(get("tax_rate").as_deref()).filter(|t| !t.is_sign_negative() && *t <= rust_decimal::Decimal::ONE_HUNDRED), get("unit").map(|u| u.chars().take(20).collect::<String>()), decimal(get("cost").as_deref()).filter(|c| !c.is_sign_negative()))
             .fetch_one(&run.state.db)
             .await?;
             run.remember("product", source_id.as_deref(), id, true).await?;
@@ -1424,7 +1358,7 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
             };
             let product = match (product, get("sku")) {
                 (Some(p), _) => Some(p),
-                (None, Some(sku)) => sqlx::query_scalar("SELECT id FROM crm_products WHERE sku = $1 LIMIT 1").bind(sku).fetch_optional(&run.state.db).await?,
+                (None, Some(sku)) => sqlx::query_scalar!("SELECT id FROM crm_products WHERE sku = $1 LIMIT 1", sku).fetch_optional(&run.state.db).await?,
                 _ => None,
             };
             let catalogue: Option<(String, rust_decimal::Decimal, Option<rust_decimal::Decimal>, String)> = match product {
@@ -1441,23 +1375,12 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
             };
             let tax = decimal(get("tax_rate").as_deref()).or_else(|| catalogue.as_ref().and_then(|c| c.2)).filter(|t| !t.is_sign_negative() && *t <= rust_decimal::Decimal::ONE_HUNDRED);
             let unit = get("unit").or_else(|| catalogue.as_ref().map(|c| c.3.clone())).unwrap_or_else(|| "pcs".into());
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, sort)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT COALESCE(MAX(sort), -1) + 1 FROM crm_item_products WHERE item_id = $1)) RETURNING id",
-            )
-            .bind(deal)
-            .bind(product)
-            .bind(name.chars().take(300).collect::<String>())
-            .bind(price)
-            .bind(quantity)
-            .bind(unit.chars().take(20).collect::<String>())
-            .bind(dkind)
-            .bind(dvalue)
-            .bind(tax)
+            let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, sort)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT COALESCE(MAX(sort), -1) + 1 FROM crm_item_products WHERE item_id = $1)) RETURNING id", deal, product, name.chars().take(300).collect::<String>(), price, quantity, unit.chars().take(20).collect::<String>(), dkind, dvalue, tax)
             .fetch_one(&run.state.db)
             .await?;
             // The deal's amount follows its products, unless the export gave the amount.
-            sqlx::query("UPDATE crm_items SET is_manual_amount = FALSE WHERE id = $1 AND opportunity = 0").bind(deal).execute(&run.state.db).await?;
+            sqlx::query!("UPDATE crm_items SET is_manual_amount = FALSE WHERE id = $1 AND opportunity = 0", deal).execute(&run.state.db).await?;
             super::money::totals(run.state, deal).await.map_err(|e| anyhow!(e.to_string()))?;
             run.remember("line", source_id.as_deref(), id, true).await?;
             Ok(0)
@@ -1494,15 +1417,7 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
             let who = owner.unwrap_or(run.auth.id);
             let file = crate::routes::files::store_bytes(run.state, Some(who), &name, mime, &bytes).await.map_err(|e| anyhow!(e.to_string()))?;
             let body = get("description").map(|d| plain(&d)).unwrap_or_default();
-            let entry_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO crm_timeline (item_id, kind, author_id, body, data, file_ids, created_at) VALUES ($1, 'comment', $2, $3, $4, ARRAY[$5]::uuid[], COALESCE($6, now())) RETURNING id",
-            )
-            .bind(item)
-            .bind(who)
-            .bind(body.chars().take(20_000).collect::<String>())
-            .bind(&note)
-            .bind(file)
-            .bind(created_at)
+            let entry_id: Uuid = sqlx::query_scalar!("INSERT INTO crm_timeline (item_id, kind, author_id, body, data, file_ids, created_at) VALUES ($1, 'comment', $2, $3, $4, ARRAY[$5]::uuid[], COALESCE($6, now())) RETURNING id", item, who, body.chars().take(20_000).collect::<String>(), &note, file, created_at)
             .fetch_one(&run.state.db)
             .await?;
             run.remember("attachment", source_id.as_deref(), entry_id, true).await?;
@@ -1541,12 +1456,7 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
                 if body.trim().is_empty() {
                     return Ok(2);
                 }
-                sqlx::query_scalar("INSERT INTO crm_timeline (item_id, kind, author_id, body, data, created_at) VALUES ($1, 'comment', $2, $3, $4, COALESCE($5, now())) RETURNING id")
-                    .bind(item)
-                    .bind(who)
-                    .bind(body.chars().take(20_000).collect::<String>())
-                    .bind(&note)
-                    .bind(created_at)
+                sqlx::query_scalar!("INSERT INTO crm_timeline (item_id, kind, author_id, body, data, created_at) VALUES ($1, 'comment', $2, $3, $4, COALESCE($5, now())) RETURNING id", item, who, body.chars().take(20_000).collect::<String>(), &note, created_at)
                     .fetch_one(&run.state.db)
                     .await?
             } else {
@@ -1708,7 +1618,7 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
                     let pipeline = get("pipeline").unwrap_or_default();
                     if let Some(s) = get("stage") {
                         if let Some(st) = run.stage("deal", &pipeline, &s).await? {
-                            let cat: Option<Uuid> = sqlx::query_scalar("SELECT category_id FROM crm_stages WHERE id = $1").bind(st).fetch_optional(&run.state.db).await?;
+                            let cat: Option<Uuid> = sqlx::query_scalar!("SELECT category_id FROM crm_stages WHERE id = $1", st).fetch_optional(&run.state.db).await?;
                             if let Some(c) = cat {
                                 body.insert("category_id".into(), json!(c));
                             }
@@ -1742,10 +1652,7 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
                     }
                     if contacts.is_empty()
                         && let Some(n) = get("contact_name") {
-                            let found: Option<Uuid> = sqlx::query_scalar(
-                                "SELECT id FROM crm_items WHERE entity_type = 3 AND deleted_at IS NULL AND lower(trim(coalesce(first_name, '') || ' ' || coalesce(last_name, ''))) = lower(trim($1)) LIMIT 1",
-                            )
-                            .bind(&n)
+                            let found: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_items WHERE entity_type = 3 AND deleted_at IS NULL AND lower(trim(coalesce(first_name, '') || ' ' || coalesce(last_name, ''))) = lower(trim($1)) LIMIT 1", &n)
                             .fetch_optional(&run.state.db)
                             .await?;
                             contacts.extend(found);
@@ -1788,21 +1695,15 @@ async fn one_row(run: &mut Run<'_>, kind: &str, t: &Table, m: &BTreeMap<String, 
                 let phones: Vec<String> = phones.into_iter().map(|x| x.1).collect();
                 let emails: Vec<String> = emails.into_iter().map(|x| x.1).collect();
                 if !phones.is_empty() || !emails.is_empty() {
-                    existing = sqlx::query_scalar(
-                        "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+                    existing = sqlx::query_scalar!("SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
                          WHERE i.entity_type = $1 AND i.deleted_at IS NULL
-                           AND ((m.kind = 'phone' AND m.normalized = ANY($2)) OR (m.kind = 'email' AND m.normalized = ANY($3))) LIMIT 1",
-                    )
-                    .bind(entity)
-                    .bind(&phones)
-                    .bind(&emails)
+                           AND ((m.kind = 'phone' AND m.normalized = ANY($2)) OR (m.kind = 'email' AND m.normalized = ANY($3))) LIMIT 1", entity, &phones, &emails)
                     .fetch_optional(&run.state.db)
                     .await?;
                 }
                 if existing.is_none() && kind == "company"
                     && let Some(n) = get("name") {
-                        existing = sqlx::query_scalar("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) LIMIT 1")
-                            .bind(n)
+                        existing = sqlx::query_scalar!("SELECT id FROM crm_items WHERE entity_type = 4 AND deleted_at IS NULL AND lower(title) = lower($1) LIMIT 1", n)
                             .fetch_optional(&run.state.db)
                             .await?;
                     }

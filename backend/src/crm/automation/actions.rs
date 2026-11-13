@@ -95,7 +95,7 @@ async fn check_person(state: &AppState, v: Option<&Value>) -> AppResult<String> 
         return Ok(s.into());
     }
     let id = Uuid::parse_str(s).map_err(|_| AppError::bad("choose who: the responsible person, the creator or an employee"))?;
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active AND NOT is_system)").bind(id).fetch_one(&state.db).await?;
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active AND NOT is_system) AS "v!""#, id).fetch_one(&state.db).await?;
     if !ok {
         return Err(AppError::bad("that employee is not active"));
     }
@@ -125,13 +125,10 @@ fn opt_uuid(p: &Map<String, Value>, key: &str, msg: &str) -> AppResult<Option<Uu
 /// A copy of the record in another pipeline's stage, linked to it, with its client, amount,
 /// custom fields and products.
 async fn tunnel_copy(state: &AppState, et: &crate::crm::EntityType, source: Uuid, category: Uuid, stage: Uuid) -> AppResult<Uuid> {
-    let (title, assigned, company, currency, amount, manual, uf, comments): (String, Option<Uuid>, Option<Uuid>, Option<String>, rust_decimal::Decimal, bool, Value, Option<String>) = sqlx::query_as(
-        "SELECT title, assigned_to, company_id, currency, opportunity, is_manual_amount, uf, comments FROM crm_items WHERE id = $1",
-    )
-    .bind(source)
+    let (title, assigned, company, currency, amount, manual, uf, comments): (String, Option<Uuid>, Option<Uuid>, Option<String>, rust_decimal::Decimal, bool, Value, Option<String>) = sqlx::query!(r#"SELECT title, assigned_to, company_id, currency, opportunity, is_manual_amount, uf, comments FROM crm_items WHERE id = $1"#, source).map(|r| (r.title, r.assigned_to, r.company_id, r.currency, r.opportunity, r.is_manual_amount, r.uf, r.comments))
     .fetch_one(&state.db)
     .await?;
-    let contacts: Vec<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort").bind(source).fetch_all(&state.db).await?;
+    let contacts: Vec<Uuid> = sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort", source).fetch_all(&state.db).await?;
     let mut m = Map::new();
     m.insert("title".into(), json!(title));
     m.insert("assigned_to".into(), json!(assigned));
@@ -153,12 +150,8 @@ async fn tunnel_copy(state: &AppState, et: &crate::crm::EntityType, source: Uuid
         m.insert("comments".into(), json!(c));
     }
     let id = create_item(state, &system_auth(), et, m, Some(source)).await?;
-    sqlx::query(
-        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
-         SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost FROM crm_item_products WHERE item_id = $2",
-    )
-    .bind(id)
-    .bind(source)
+    sqlx::query!("INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+         SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost FROM crm_item_products WHERE item_id = $2", id, source)
     .execute(&state.db)
     .await?;
     crate::crm::money::totals(state, id).await?;
@@ -168,9 +161,7 @@ async fn tunnel_copy(state: &AppState, et: &crate::crm::EntityType, source: Uuid
 }
 
 async fn check_template(state: &AppState, entity_type: i16, t: Uuid) -> AppResult<()> {
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_doc_templates WHERE id = $1 AND $2 = ANY(entity_types))")
-        .bind(t)
-        .bind(entity_type)
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_doc_templates WHERE id = $1 AND $2 = ANY(entity_types)) AS "v!""#, t, entity_type)
         .fetch_one(&state.db)
         .await?;
     if ok { Ok(()) } else { Err(AppError::bad("that template is not offered for this record type")) }
@@ -200,7 +191,7 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
         "task" => {
             let project = opt_uuid(&p, "project_id", "choose a project")?;
             if let Some(id) = project {
-                let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1)").bind(id).fetch_one(&state.db).await?;
+                let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM projects WHERE id = $1) AS "v!""#, id).fetch_one(&state.db).await?;
                 if !ok {
                     return Err(AppError::bad("that project does not exist"));
                 }
@@ -288,7 +279,7 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
         }
         "move_stage" => {
             let s = p.get("stage_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::bad("choose a stage"))?;
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_stages WHERE id = $1 AND category_id = $2)").bind(s).bind(category).fetch_one(&state.db).await?;
+            let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_stages WHERE id = $1 AND category_id = $2) AS "v!""#, s, category).fetch_one(&state.db).await?;
             if !ok {
                 return Err(AppError::bad("choose a stage of this pipeline"));
             }
@@ -303,7 +294,7 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
             // A stage of another pipeline of the same record type; the record is copied there
             // (linked to this one) or moved there.
             let s = p.get("stage_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::bad("choose the stage to tunnel to"))?;
-            let target: Option<(Uuid, i16)> = sqlx::query_as("SELECT s.category_id, c.entity_type FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1").bind(s).fetch_optional(&state.db).await?;
+            let target: Option<(Uuid, i16)> = sqlx::query!(r#"SELECT s.category_id, c.entity_type FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1"#, s).map(|r| (r.category_id, r.entity_type)).fetch_optional(&state.db).await?;
             match target {
                 Some((c, et)) if et == entity_type && c != category => {}
                 Some(_) => return Err(AppError::bad("tunnel to a stage of another pipeline of the same record type")),
@@ -317,7 +308,7 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
         }
         "sign" => {
             let t = p.get("sign_template_id").and_then(Value::as_str).and_then(|s| Uuid::parse_str(s).ok()).ok_or_else(|| AppError::bad("choose a signing template"))?;
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sign_templates WHERE id = $1 AND (cardinality(entity_types) = 0 OR $2 = ANY(entity_types)))").bind(t).bind(entity_type).fetch_one(&state.db).await?;
+            let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM sign_templates WHERE id = $1 AND (cardinality(entity_types) = 0 OR $2 = ANY(entity_types))) AS "v!""#, t, entity_type).fetch_one(&state.db).await?;
             if !ok {
                 return Err(AppError::bad("that signing template is not offered for this record type"));
             }
@@ -367,7 +358,7 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
             }
             let cat = opt_uuid(&p, "category_id", "choose a pipeline")?;
             if let Some(c) = cat {
-                let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2)").bind(c).bind(tt.id).fetch_one(&state.db).await?;
+                let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2) AS "v!""#, c, tt.id).fetch_one(&state.db).await?;
                 if !ok {
                     return Err(AppError::bad("choose a pipeline of that record type"));
                 }
@@ -402,7 +393,7 @@ pub async fn validate(state: &AppState, entity_type: i16, category: Uuid, action
             }
             let cat = opt_uuid(&p, "deal_category_id", "choose a deal pipeline")?;
             if let Some(c) = cat {
-                let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2)").bind(c).bind(DEAL).fetch_one(&state.db).await?;
+                let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2) AS "v!""#, c, DEAL).fetch_one(&state.db).await?;
                 if !ok {
                     return Err(AppError::bad("choose a deal pipeline"));
                 }
@@ -427,7 +418,7 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 async fn active(state: &AppState, u: Uuid) -> Result<bool, String> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active)").bind(u).fetch_one(&state.db).await.map_err(err)
+    sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active) AS "v!""#, u).fetch_one(&state.db).await.map_err(err)
 }
 
 fn html_escape(s: &str) -> String {
@@ -525,7 +516,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
                     None => crate::crm::docs::api::generate(state, &system_auth(), item, t).await.map_err(err)?,
                 };
                 let (status, pdf, num, error): (String, Option<Uuid>, String, Option<String>) =
-                    sqlx::query_as("SELECT status, pdf_file_id, number, error FROM crm_documents WHERE id = $1").bind(doc).fetch_one(&state.db).await.map_err(err)?;
+                    sqlx::query!(r#"SELECT status, pdf_file_id, number, error FROM crm_documents WHERE id = $1"#, doc).map(|r| (r.status, r.pdf_file_id, r.number, r.error)).fetch_one(&state.db).await.map_err(err)?;
                 match (status.as_str(), pdf) {
                     ("ready", Some(pdf)) => files.push(pdf),
                     ("failed", _) => return Err(format!("the document {num} failed: {}", error.unwrap_or_default()).into()),
@@ -563,7 +554,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
             .await
             .map_err(err)?;
             timeline(&state.db, item, "activity", Some(SYSTEM_USER), Some(subject.clone()), json!({ "activity_id": id, "kind": "email", "event": "completed", "result": format!("sent to {to}") })).await.map_err(err)?;
-            sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(item).execute(&state.db).await.map_err(err)?;
+            sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", item).execute(&state.db).await.map_err(err)?;
             done(format!("emailed “{subject}”{with} to {to}"))
         }
         "comment" => {
@@ -608,19 +599,14 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
                 let mut body = Map::new();
                 body.insert("assigned_to".into(), json!(who));
                 update_item(state, &system_auth(), &et, item, body).await.map_err(err)?;
-                let name: String = sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1").bind(who).fetch_one(&state.db).await.map_err(err)?;
+                let name: String = sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, who).fetch_one(&state.db).await.map_err(err)?;
                 return done(format!("made {name} responsible ({how})"));
             }
             let who = match p["mode"].as_str() {
                 Some("random") => candidates[rand::random_range(0..candidates.len())],
                 Some("least_busy") => {
                     // Fewest open records of this type; ties go to the earlier in the list.
-                    let load: Vec<(Uuid, i64)> = sqlx::query_as(
-                        "SELECT assigned_to, COUNT(*)::int8 FROM crm_items WHERE entity_type = $1 AND assigned_to = ANY($2) AND deleted_at IS NULL AND NOT is_closed AND id <> $3 GROUP BY assigned_to",
-                    )
-                    .bind(et.id)
-                    .bind(&candidates)
-                    .bind(item)
+                    let load: Vec<(Uuid, i64)> = sqlx::query!(r#"SELECT assigned_to AS "assigned_to!", COUNT(*)::int8 AS "c1!" FROM crm_items WHERE entity_type = $1 AND assigned_to = ANY($2) AND deleted_at IS NULL AND NOT is_closed AND id <> $3 GROUP BY assigned_to"#, et.id, &candidates, item).map(|r| (r.assigned_to, r.c1))
                     .fetch_all(&state.db)
                     .await
                     .map_err(err)?;
@@ -637,7 +623,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
             let mut body = Map::new();
             body.insert("assigned_to".into(), json!(who));
             update_item(state, &system_auth(), &et, item, body).await.map_err(err)?;
-            let name: String = sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1").bind(who).fetch_one(&state.db).await.map_err(err)?;
+            let name: String = sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, who).fetch_one(&state.db).await.map_err(err)?;
             done(format!("made {name} responsible"))
         }
         "move_stage" => {
@@ -648,8 +634,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
         }
         "tunnel" => {
             let stage = p["stage_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or("no stage")?;
-            let (category, stage_name, pipeline): (Uuid, String, String) = sqlx::query_as("SELECT s.category_id, s.name, c.name FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1")
-                .bind(stage)
+            let (category, stage_name, pipeline): (Uuid, String, String) = sqlx::query!(r#"SELECT s.category_id, s.name, c.name AS "c2" FROM crm_stages s JOIN crm_categories c ON c.id = s.category_id WHERE s.id = $1"#, stage).map(|r| (r.category_id, r.name, r.c2))
                 .fetch_optional(&state.db)
                 .await
                 .map_err(err)?
@@ -662,14 +647,14 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
                 done(format!("moved to {pipeline}: {stage_name}"))
             } else {
                 let id = tunnel_copy(state, &et, item, category, stage).await.map_err(err)?;
-                let number: i64 = sqlx::query_scalar("SELECT number FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await.map_err(err)?;
+                let number: i64 = sqlx::query_scalar!("SELECT number FROM crm_items WHERE id = $1", id).fetch_one(&state.db).await.map_err(err)?;
                 done(format!("copied to {pipeline}: {stage_name} as #{number}"))
             }
         }
         "document" => {
             let t = p["template_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).ok_or("no template")?;
             let id = crate::crm::docs::api::generate(state, &system_auth(), item, t).await.map_err(err)?;
-            let number: String = sqlx::query_scalar("SELECT number FROM crm_documents WHERE id = $1").bind(id).fetch_one(&state.db).await.map_err(err)?;
+            let number: String = sqlx::query_scalar!("SELECT number FROM crm_documents WHERE id = $1", id).fetch_one(&state.db).await.map_err(err)?;
             broadcast(state, et.id, item, false).await;
             done(format!("created {number}"))
         }
@@ -697,8 +682,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
                 let contacts: Vec<Uuid> = if et.id == CONTACT {
                     vec![item]
                 } else {
-                    sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort")
-                        .bind(item)
+                    sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort", item)
                         .fetch_all(&state.db)
                         .await
                         .map_err(err)?
@@ -716,7 +700,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
                 m.insert("is_manual_amount".into(), json!(true));
             }
             let id = create_item(state, &system_auth(), &tt, m, Some(item)).await.map_err(err)?;
-            let number: i64 = sqlx::query_scalar("SELECT number FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await.map_err(err)?;
+            let number: i64 = sqlx::query_scalar!("SELECT number FROM crm_items WHERE id = $1", id).fetch_one(&state.db).await.map_err(err)?;
             timeline(&state.db, item, "linked", Some(SYSTEM_USER), None, json!({ "item_id": id, "entity_type": tt.id, "code": tt.code, "number": number, "title": f("title") })).await.map_err(err)?;
             done(format!("created {} #{number}", tt.name.to_lowercase()))
         }
@@ -728,10 +712,7 @@ pub async fn execute(state: &AppState, robot: &Robot, ctx: &Ctx, data: &Value) -
                         add.push(u);
                     }
             }
-            let n = sqlx::query("INSERT INTO crm_item_observers (item_id, user_id, added_by) SELECT $1, UNNEST($2::uuid[]), $3 ON CONFLICT DO NOTHING")
-                .bind(item)
-                .bind(&add)
-                .bind(SYSTEM_USER)
+            let n = sqlx::query!("INSERT INTO crm_item_observers (item_id, user_id, added_by) SELECT $1, UNNEST($2::uuid[]), $3 ON CONFLICT DO NOTHING", item, &add, SYSTEM_USER)
                 .execute(&state.db)
                 .await
                 .map_err(err)?

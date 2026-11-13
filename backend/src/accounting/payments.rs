@@ -74,7 +74,7 @@ async fn lock_doc(tx: &mut ledger::Tx<'_>, kind: &str, id: Uuid) -> AppResult<(S
 
 /// The bank or cash account, and its currency.
 async fn money_account(state: &AppState, id: Uuid) -> AppResult<String> {
-    let row: Option<(String, Option<String>, bool)> = sqlx::query_as("SELECT subtype, currency, is_active FROM acc_accounts WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let row: Option<(String, Option<String>, bool)> = sqlx::query!(r#"SELECT subtype, currency, is_active FROM acc_accounts WHERE id = $1"#, id).map(|r| (r.subtype, r.currency, r.is_active)).fetch_optional(&state.db).await?;
     match row {
         Some((s, c, true)) if s == "bank" || s == "cash" => Ok(c.unwrap_or(super::base_currency(state).await?)),
         Some(_) => Err(AppError::bad("payments go through an active bank or cash account")),
@@ -164,29 +164,16 @@ pub async fn record(state: &AppState, auth: &AuthUser, p: PaymentIn) -> AppResul
     }
 
     let number = ledger::next_number(&mut tx, "payment").await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO acc_payments (number, direction, date, account_id, party_id, currency, amount, fx_rate, reference, memo, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
-    )
-    .bind(number)
-    .bind(&p.direction)
-    .bind(p.date)
-    .bind(p.account_id)
-    .bind(party)
-    .bind(&currency)
-    .bind(amount)
-    .bind(fx)
-    .bind(clean(p.reference.clone()))
-    .bind(clean(p.memo.clone()))
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO acc_payments (number, direction, date, account_id, party_id, currency, amount, fx_rate, reference, memo, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id", number, &p.direction, p.date, p.account_id, party, &currency, amount, fx, clean(p.reference.clone()), clean(p.memo.clone()), auth.id)
     .fetch_one(&mut *tx)
     .await?;
     for a in &p.allocations {
-        sqlx::query("INSERT INTO acc_allocations (payment_id, doc_kind, doc_id, amount) VALUES ($1, $2, $3, $4)").bind(id).bind(&a.doc_kind).bind(a.doc_id).bind(a.amount).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO acc_allocations (payment_id, doc_kind, doc_id, amount) VALUES ($1, $2, $3, $4)", id, &a.doc_kind, a.doc_id, a.amount).execute(&mut *tx).await?;
     }
     let memo = format!("Payment {number} {} {}", if inbound { "from" } else { "to" }, party_name(state, party).await);
     let entry = ledger::post(&mut tx, p.date, Some(&memo), "payment", Some(id), &lines, Some(auth.id)).await?;
-    sqlx::query("UPDATE acc_payments SET entry_id = $2 WHERE id = $1").bind(id).bind(entry).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_payments SET entry_id = $2 WHERE id = $1", id, entry).execute(&mut *tx).await?;
     let mut now_paid = vec![];
     for a in &p.allocations {
         if inbound {
@@ -211,7 +198,7 @@ pub async fn record(state: &AppState, auth: &AuthUser, p: PaymentIn) -> AppResul
 }
 
 async fn party_name(state: &AppState, id: Uuid) -> String {
-    sqlx::query_scalar("SELECT title FROM crm_items WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default()
+    sqlx::query_scalar!("SELECT title FROM crm_items WHERE id = $1", id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default()
 }
 
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(p): Json<PaymentIn>) -> AppResult<Json<Value>> {
@@ -230,13 +217,10 @@ pub async fn payment_json(state: &AppState, id: Uuid) -> AppResult<Value> {
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("payment"))?;
-    let allocs: Vec<(String, Uuid, Decimal, Option<String>)> = sqlx::query_as(
-        "SELECT al.doc_kind, al.doc_id, al.amount,
+    let allocs: Vec<(String, Uuid, Decimal, Option<String>)> = sqlx::query!(r#"SELECT al.doc_kind, al.doc_id, al.amount,
                 CASE al.doc_kind WHEN 'invoice' THEN (SELECT 'Invoice ' || i.number || ' · ' || i.title FROM crm_items i WHERE i.id = al.doc_id)
-                                 ELSE (SELECT 'Bill ' || COALESCE(b.number::text, '') || COALESCE(' · ' || b.reference, '') FROM acc_bills b WHERE b.id = al.doc_id) END
-         FROM acc_allocations al WHERE al.payment_id = $1",
-    )
-    .bind(id)
+                                 ELSE (SELECT 'Bill ' || COALESCE(b.number::text, '') || COALESCE(' · ' || b.reference, '') FROM acc_bills b WHERE b.id = al.doc_id) END AS "c3"
+         FROM acc_allocations al WHERE al.payment_id = $1"#, id).map(|r| (r.doc_kind, r.doc_id, r.amount, r.c3))
     .fetch_all(&state.db)
     .await?;
     let allocated: Decimal = allocs.iter().map(|a| a.2).sum();
@@ -307,7 +291,7 @@ struct VoidBody {
 async fn void_payment(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, body: Option<Json<VoidBody>>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
     let mut tx = state.db.begin().await?;
-    let row: Option<(String, Option<Uuid>, NaiveDate)> = sqlx::query_as("SELECT status, entry_id, date FROM acc_payments WHERE id = $1 FOR UPDATE").bind(id).fetch_optional(&mut *tx).await?;
+    let row: Option<(String, Option<Uuid>, NaiveDate)> = sqlx::query!(r#"SELECT status, entry_id, date FROM acc_payments WHERE id = $1 FOR UPDATE"#, id).map(|r| (r.status, r.entry_id, r.date)).fetch_optional(&mut *tx).await?;
     let (status, entry, date) = row.ok_or(AppError::NotFound("payment"))?;
     if status != "posted" {
         return Err(AppError::bad("this payment is already void"));
@@ -317,16 +301,15 @@ async fn void_payment(State(state): State<AppState>, auth: AuthUser, Path(id): P
         None => super::invoices::void_date(&state, date).await?,
     };
     // Every entry this payment made (the payment, and later allocations' exchange differences).
-    let entries: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM acc_entries WHERE source = 'payment' AND source_id = $1 AND status = 'posted' AND reverses IS NULL")
-        .bind(id)
+    let entries: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM acc_entries WHERE source = 'payment' AND source_id = $1 AND status = 'posted' AND reverses IS NULL", id)
         .fetch_all(&mut *tx)
         .await?;
-    sqlx::query("UPDATE acc_bank_lines SET status = 'unmatched', line_id = NULL WHERE line_id IN (SELECT id FROM acc_lines WHERE entry_id = ANY($1))").bind(&entries).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_bank_lines SET status = 'unmatched', line_id = NULL WHERE line_id IN (SELECT id FROM acc_lines WHERE entry_id = ANY($1))", &entries).execute(&mut *tx).await?;
     for e in entries.iter().chain(entry.iter().filter(|e| !entries.contains(e))) {
         ledger::reverse(&mut tx, *e, when, Some(auth.id)).await?;
     }
-    sqlx::query("UPDATE acc_payments SET status = 'void' WHERE id = $1").bind(id).execute(&mut *tx).await?;
-    let docs: Vec<(String, Uuid)> = sqlx::query_as("SELECT doc_kind, doc_id FROM acc_allocations WHERE payment_id = $1").bind(id).fetch_all(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_payments SET status = 'void' WHERE id = $1", id).execute(&mut *tx).await?;
+    let docs: Vec<(String, Uuid)> = sqlx::query!(r#"SELECT doc_kind, doc_id FROM acc_allocations WHERE payment_id = $1"#, id).map(|r| (r.doc_kind, r.doc_id)).fetch_all(&mut *tx).await?;
     for (k, d) in &docs {
         if k == "invoice" {
             super::invoices::refresh(&mut tx, *d).await?;
@@ -360,8 +343,7 @@ async fn allocate_later(State(state): State<AppState>, auth: AuthUser, Path(id):
     let mut tx = state.db.begin().await?;
     type P = (String, String, Option<Uuid>, String, Decimal, Decimal, NaiveDate);
     let (status, direction, party, currency, amount, pfx, pdate): P =
-        sqlx::query_as("SELECT status, direction, party_id, currency, amount, fx_rate, date FROM acc_payments WHERE id = $1 FOR UPDATE")
-            .bind(id)
+        sqlx::query!(r#"SELECT status, direction, party_id, currency, amount, fx_rate, date FROM acc_payments WHERE id = $1 FOR UPDATE"#, id).map(|r| (r.status, r.direction, r.party_id, r.currency, r.amount, r.fx_rate, r.date))
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(AppError::NotFound("payment"))?;
@@ -371,7 +353,7 @@ async fn allocate_later(State(state): State<AppState>, auth: AuthUser, Path(id):
     let inbound = direction == "in";
     let doc_kind = if inbound { "invoice" } else { "bill" };
     let control = if inbound { default_account(s.receivable_account, "receivables")? } else { default_account(s.payable_account, "payables")? };
-    let done: Decimal = sqlx::query_scalar("SELECT COALESCE(SUM(amount), 0) FROM acc_allocations WHERE payment_id = $1").bind(id).fetch_one(&mut *tx).await?;
+    let done: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(amount), 0) AS "v!" FROM acc_allocations WHERE payment_id = $1"#, id).fetch_one(&mut *tx).await?;
     let mut free = amount - done;
     let mut fx_lines = vec![];
     let mut now_paid = vec![];
@@ -387,11 +369,7 @@ async fn allocate_later(State(state): State<AppState>, auth: AuthUser, Path(id):
             return Err(AppError::bad("that is more than is left to pay, or left on the payment"));
         }
         free -= a.amount;
-        sqlx::query("INSERT INTO acc_allocations (payment_id, doc_kind, doc_id, amount) VALUES ($1, $2, $3, $4) ON CONFLICT (payment_id, doc_kind, doc_id) DO UPDATE SET amount = acc_allocations.amount + EXCLUDED.amount")
-            .bind(id)
-            .bind(doc_kind)
-            .bind(a.doc_id)
-            .bind(a.amount)
+        sqlx::query!("INSERT INTO acc_allocations (payment_id, doc_kind, doc_id, amount) VALUES ($1, $2, $3, $4) ON CONFLICT (payment_id, doc_kind, doc_id) DO UPDATE SET amount = acc_allocations.amount + EXCLUDED.amount", id, doc_kind, a.doc_id, a.amount)
             .execute(&mut *tx)
             .await?;
         // The advance was booked at the payment's rate, the document at its own.

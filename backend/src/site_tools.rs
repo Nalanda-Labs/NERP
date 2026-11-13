@@ -91,7 +91,7 @@ async fn free_path(state: &AppState, site: Uuid, base: &str) -> AppResult<String
     for n in 1..100 {
         let p = if n == 1 { format!("{base}-copy") } else { format!("{base}-copy-{n}") };
         let p: String = p.chars().take(60).collect();
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM site_pages WHERE site_id = $1 AND path = $2)").bind(site).bind(&p).fetch_one(&state.db).await?;
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM site_pages WHERE site_id = $1 AND path = $2) AS "v!""#, site, &p).fetch_one(&state.db).await?;
         if !taken {
             return Ok(p);
         }
@@ -103,17 +103,10 @@ async fn free_path(state: &AppState, site: Uuid, base: &str) -> AppResult<String
 async fn copy_page(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let (site, path, title, description, blocks, in_menu): (Uuid, String, String, Option<String>, Value, bool) =
-        sqlx::query_as("SELECT site_id, path, title, description, blocks, in_menu FROM site_pages WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("page"))?;
+        sqlx::query!(r#"SELECT site_id, path, title, description, blocks, in_menu FROM site_pages WHERE id = $1"#, id).map(|r| (r.site_id, r.path, r.title, r.description, r.blocks, r.in_menu)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("page"))?;
     let new_path = free_path(&state, site, &path).await?;
-    let sort: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) + 10 FROM site_pages WHERE site_id = $1").bind(site).fetch_one(&state.db).await?;
-    let nid: Uuid = sqlx::query_scalar("INSERT INTO site_pages (site_id, path, title, description, blocks, in_menu, sort) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id")
-        .bind(site)
-        .bind(&new_path)
-        .bind(format!("{title} (copy)").chars().take(120).collect::<String>())
-        .bind(description)
-        .bind(blocks)
-        .bind(in_menu)
-        .bind(sort)
+    let sort: i32 = sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) + 10 AS "v!" FROM site_pages WHERE site_id = $1"#, site).fetch_one(&state.db).await?;
+    let nid: Uuid = sqlx::query_scalar!("INSERT INTO site_pages (site_id, path, title, description, blocks, in_menu, sort) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id", site, &new_path, format!("{title} (copy)").chars().take(120).collect::<String>(), description, blocks, in_menu, sort)
         .fetch_one(&state.db)
         .await?;
     get_page(State(state), auth, Path(nid)).await
@@ -129,21 +122,19 @@ struct CopyInput {
 async fn copy_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, body: Option<Json<CopyInput>>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let b = body.map(|b| b.0).unwrap_or_default();
-    let (name, slug, settings): (String, String, Value) = sqlx::query_as("SELECT name, slug, settings FROM site_sites WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))?;
+    let (name, slug, settings): (String, String, Value) = sqlx::query!(r#"SELECT name, slug, settings FROM site_sites WHERE id = $1"#, id).map(|r| (r.name, r.slug, r.settings)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))?;
     let name = required("name", b.name.as_deref().unwrap_or(&format!("{name} (copy)")), 120)?;
     let mut slug = slug_ok(b.slug.as_deref().unwrap_or(&format!("{}-copy", &slug[..slug.len().min(34)])))?;
     for n in 2..50 {
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM site_sites WHERE slug = $1)").bind(&slug).fetch_one(&state.db).await?;
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM site_sites WHERE slug = $1) AS "v!""#, &slug).fetch_one(&state.db).await?;
         if !taken {
             break;
         }
         slug = slug_ok(&format!("{}-{n}", slug.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end_matches('-')))?;
     }
     let mut tx = state.db.begin().await?;
-    let nid: Uuid = sqlx::query_scalar("INSERT INTO site_sites (name, slug, settings, created_by) VALUES ($1, $2, $3, $4) RETURNING id").bind(&name).bind(&slug).bind(settings).bind(auth.id).fetch_one(&mut *tx).await?;
-    sqlx::query("INSERT INTO site_pages (site_id, path, title, description, blocks, in_menu, sort) SELECT $2, path, title, description, blocks, in_menu, sort FROM site_pages WHERE site_id = $1")
-        .bind(id)
-        .bind(nid)
+    let nid: Uuid = sqlx::query_scalar!("INSERT INTO site_sites (name, slug, settings, created_by) VALUES ($1, $2, $3, $4) RETURNING id", &name, &slug, settings, auth.id).fetch_one(&mut *tx).await?;
+    sqlx::query!("INSERT INTO site_pages (site_id, path, title, description, blocks, in_menu, sort) SELECT $2, path, title, description, blocks, in_menu, sort FROM site_pages WHERE site_id = $1", id, nid)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -156,9 +147,7 @@ async fn copy_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path
 
 async fn saved(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let rows: Vec<(Uuid, String, Value, Option<String>)> = sqlx::query_as(
-        "SELECT b.id, b.name, b.blocks, trim(u.first_name || ' ' || u.last_name) FROM site_saved_blocks b LEFT JOIN users u ON u.id = b.created_by ORDER BY lower(b.name)",
-    )
+    let rows: Vec<(Uuid, String, Value, Option<String>)> = sqlx::query!(r#"SELECT b.id, b.name, b.blocks, trim(u.first_name || ' ' || u.last_name) AS "c3" FROM site_saved_blocks b LEFT JOIN users u ON u.id = b.created_by ORDER BY lower(b.name)"#).map(|r| (r.id, r.name, r.blocks, r.c3))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, n, b, by)| json!({ "id": id, "name": n, "blocks": b, "created_by": by })).collect::<Vec<_>>() })))
@@ -177,13 +166,13 @@ async fn save_blocks(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
     if blocks.as_array().is_none_or(|a| a.is_empty()) {
         return Err(AppError::bad("pick at least one block"));
     }
-    sqlx::query("INSERT INTO site_saved_blocks (name, blocks, created_by) VALUES ($1, $2, $3)").bind(name).bind(blocks).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO site_saved_blocks (name, blocks, created_by) VALUES ($1, $2, $3)", name, blocks, auth.id).execute(&state.db).await?;
     saved(State(state), auth).await
 }
 
 async fn drop_saved(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    sqlx::query("DELETE FROM site_saved_blocks WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM site_saved_blocks WHERE id = $1", id).execute(&state.db).await?;
     saved(State(state), auth).await
 }
 
@@ -196,9 +185,9 @@ const FORMAT: &str = "nerp-site/1";
 /// The whole site as one JSON file: look, pages (drafts) and the pictures they use.
 async fn export(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Response> {
     require(&auth)?;
-    let (name, slug, settings): (String, String, Value) = sqlx::query_as("SELECT name, slug, settings FROM site_sites WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))?;
+    let (name, slug, settings): (String, String, Value) = sqlx::query!(r#"SELECT name, slug, settings FROM site_sites WHERE id = $1"#, id).map(|r| (r.name, r.slug, r.settings)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))?;
     let pages: Vec<(String, String, Option<String>, Value, bool, i32)> =
-        sqlx::query_as("SELECT path, title, description, blocks, in_menu, sort FROM site_pages WHERE site_id = $1 ORDER BY sort, path").bind(id).fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT path, title, description, blocks, in_menu, sort FROM site_pages WHERE site_id = $1 ORDER BY sort, path"#, id).map(|r| (r.path, r.title, r.description, r.blocks, r.in_menu, r.sort)).fetch_all(&state.db).await?;
     let mut files = serde_json::Map::new();
     for f in site_files(&state, id, false).await? {
         if let Ok((fname, mime, _, bytes)) = crate::routes::files::read_bytes(&state, f).await {
@@ -275,11 +264,7 @@ async fn import(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Imp
         return Err(AppError::bad("the site file has no home page"));
     }
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO site_sites (name, slug, settings, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(&name)
-        .bind(&slug)
-        .bind(settings)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO site_sites (name, slug, settings, created_by) VALUES ($1, $2, $3, $4) RETURNING id", &name, &slug, settings, auth.id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| match e {
@@ -287,14 +272,7 @@ async fn import(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Imp
             e => e.into(),
         })?;
     for (path, title, desc, blocks, menu, sort) in clean {
-        sqlx::query("INSERT INTO site_pages (site_id, path, title, description, blocks, in_menu, sort) VALUES ($1, $2, $3, $4, $5, $6, $7)")
-            .bind(id)
-            .bind(path)
-            .bind(title)
-            .bind(desc)
-            .bind(blocks)
-            .bind(menu)
-            .bind(sort)
+        sqlx::query!("INSERT INTO site_pages (site_id, path, title, description, blocks, in_menu, sort) VALUES ($1, $2, $3, $4, $5, $6, $7)", id, path, title, desc, blocks, menu, sort)
             .execute(&mut *tx)
             .await
             .map_err(|e| match e {
@@ -321,14 +299,14 @@ struct HostQuery {
 async fn by_domain(State(state): State<AppState>, Query(q): Query<HostQuery>) -> AppResult<Json<Value>> {
     let host = q.host.trim().trim_end_matches('.').to_lowercase();
     let host = host.split(':').next().unwrap_or("").to_string();
-    let slug: Option<String> = sqlx::query_scalar("SELECT slug FROM site_sites WHERE domain = $1").bind(&host).fetch_optional(&state.db).await?;
+    let slug: Option<String> = sqlx::query_scalar!("SELECT slug FROM site_sites WHERE domain = $1", &host).fetch_optional(&state.db).await?;
     Ok(Json(json!({ "slug": slug.ok_or(AppError::NotFound("site"))? })))
 }
 
 /// An HTML block of a published page, on its own, in a sandbox.
 async fn embed(State(state): State<AppState>, Path((slug, page, n)): Path<(String, Uuid, usize)>) -> AppResult<Response> {
     let (site, _, _) = site_by_slug(&state, &slug).await?;
-    let blocks: Option<Value> = sqlx::query_scalar("SELECT published_blocks FROM site_pages WHERE id = $1 AND site_id = $2").bind(page).bind(site).fetch_optional(&state.db).await?.flatten();
+    let blocks: Option<Value> = sqlx::query_scalar!("SELECT published_blocks FROM site_pages WHERE id = $1 AND site_id = $2", page, site).fetch_optional(&state.db).await?.flatten();
     let b = blocks.as_ref().and_then(|b| b.get(n)).filter(|b| b["kind"] == "html").ok_or(AppError::NotFound("block"))?;
     let html = format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><style>body{{margin:0;font-family:system-ui,sans-serif}}</style></head><body>{}</body></html>", b["html"].as_str().unwrap_or(""));
     let mut r = html.into_response();

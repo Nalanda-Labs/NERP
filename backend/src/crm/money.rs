@@ -42,7 +42,7 @@ pub fn router() -> Router<AppState> {
 // ---------------------------------------------------------------------------
 
 pub async fn base_currency(state: &AppState) -> AppResult<String> {
-    Ok(sqlx::query_scalar("SELECT code FROM crm_currencies WHERE is_base LIMIT 1")
+    Ok(sqlx::query_scalar!("SELECT code FROM crm_currencies WHERE is_base LIMIT 1")
         .fetch_optional(&state.db)
         .await?
         .unwrap_or_else(|| "USD".into()))
@@ -50,7 +50,7 @@ pub async fn base_currency(state: &AppState) -> AppResult<String> {
 
 /// Value of one unit of `code` in the base currency, or None if not enabled.
 pub async fn rate_of(state: &AppState, code: &str) -> AppResult<Option<Decimal>> {
-    Ok(sqlx::query_scalar("SELECT rate FROM crm_currencies WHERE code = $1").bind(code).fetch_optional(&state.db).await?)
+    Ok(sqlx::query_scalar!("SELECT rate FROM crm_currencies WHERE code = $1", code).fetch_optional(&state.db).await?)
 }
 
 #[derive(Serialize, FromRow)]
@@ -63,7 +63,7 @@ struct Currency {
 }
 
 async fn currencies(state: &AppState) -> AppResult<Vec<Currency>> {
-    Ok(sqlx::query_as("SELECT code, rate, is_base, sort, updated_at FROM crm_currencies ORDER BY is_base DESC, sort, code")
+    Ok(sqlx::query_as!(Currency, "SELECT code, rate, is_base, sort, updated_at FROM crm_currencies ORDER BY is_base DESC, sort, code")
         .fetch_all(&state.db)
         .await?)
 }
@@ -101,9 +101,7 @@ async fn add_currency(State(state): State<AppState>, auth: AuthUser, Json(body):
         return Err(AppError::Forbidden);
     }
     let code = iso_code(&body.code)?;
-    sqlx::query("INSERT INTO crm_currencies (code, rate, sort) VALUES ($1, $2, 100) ON CONFLICT (code) DO NOTHING")
-        .bind(&code)
-        .bind(positive(&body.rate)?)
+    sqlx::query!("INSERT INTO crm_currencies (code, rate, sort) VALUES ($1, $2, 100) ON CONFLICT (code) DO NOTHING", &code, positive(&body.rate)?)
         .execute(&state.db)
         .await?;
     Ok(Json(currencies(&state).await?))
@@ -120,15 +118,12 @@ struct UpdateCurrency {
 /// used by millions of records never holds one huge transaction.
 async fn recompute_base(state: &AppState, code: Option<&str>) -> AppResult<()> {
     loop {
-        let n = sqlx::query(
-            "UPDATE crm_items i SET opportunity_base = ROUND(i.opportunity * c.rate, 4)
+        let n = sqlx::query!("UPDATE crm_items i SET opportunity_base = ROUND(i.opportunity * c.rate, 4)
              FROM crm_currencies c
              WHERE i.id IN (SELECT i2.id FROM crm_items i2 JOIN crm_currencies c2 ON c2.code = i2.currency
                             WHERE ($1::text IS NULL OR i2.currency = $1)
                               AND i2.opportunity_base <> ROUND(i2.opportunity * c2.rate, 4) LIMIT 5000)
-               AND c.code = i.currency",
-        )
-        .bind(code)
+               AND c.code = i.currency", code)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -146,7 +141,7 @@ async fn update_currency(State(state): State<AppState>, auth: AuthUser, Path(cod
     let current = rate_of(&state, &code).await?.ok_or(AppError::NotFound("currency"))?;
     if body.is_base == Some(true) && base_currency(&state).await? != code {
         // The books are kept in the base currency: it can't change under them.
-        let posted: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_entries WHERE status <> 'draft')").fetch_one(&state.db).await?;
+        let posted: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_entries WHERE status <> 'draft') AS "v!""#).fetch_one(&state.db).await?;
         if posted {
             return Err(AppError::bad("the accounts are kept in the base currency and have entries, so it can't change"));
         }
@@ -154,21 +149,17 @@ async fn update_currency(State(state): State<AppState>, auth: AuthUser, Path(cod
     if body.is_base == Some(true) {
         // New base B with old rate r_B: every rate r becomes r / r_B (and B becomes 1).
         let mut tx = state.db.begin().await?;
-        sqlx::query("UPDATE crm_currencies SET rate = rate / $1, is_base = (code = $2), updated_at = now()")
-            .bind(current)
-            .bind(&code)
+        sqlx::query!("UPDATE crm_currencies SET rate = rate / $1, is_base = (code = $2), updated_at = now()", current, &code)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         recompute_base(&state, None).await?;
     } else if let Some(r) = &body.rate {
-        let is_base: bool = sqlx::query_scalar("SELECT is_base FROM crm_currencies WHERE code = $1").bind(&code).fetch_one(&state.db).await?;
+        let is_base: bool = sqlx::query_scalar!("SELECT is_base FROM crm_currencies WHERE code = $1", &code).fetch_one(&state.db).await?;
         if is_base {
             return Err(AppError::bad("the base currency's rate is always 1"));
         }
-        sqlx::query("UPDATE crm_currencies SET rate = $1, updated_at = now() WHERE code = $2")
-            .bind(positive(r)?)
-            .bind(&code)
+        sqlx::query!("UPDATE crm_currencies SET rate = $1, updated_at = now() WHERE code = $2", positive(r)?, &code)
             .execute(&state.db)
             .await?;
         recompute_base(&state, Some(&code)).await?;
@@ -181,16 +172,13 @@ async fn remove_currency(State(state): State<AppState>, auth: AuthUser, Path(cod
         return Err(AppError::Forbidden);
     }
     let code = iso_code(&code)?;
-    let used: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM crm_items WHERE currency = $1) OR EXISTS (SELECT 1 FROM crm_products WHERE currency = $1)",
-    )
-    .bind(&code)
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_items WHERE currency = $1) OR EXISTS (SELECT 1 FROM crm_products WHERE currency = $1) AS "v!""#, &code)
     .fetch_one(&state.db)
     .await?;
     if used {
         return Err(AppError::bad("records or products still use this currency"));
     }
-    let n = sqlx::query("DELETE FROM crm_currencies WHERE code = $1 AND NOT is_base").bind(&code).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM crm_currencies WHERE code = $1 AND NOT is_base", &code).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::bad("the base currency cannot be removed"));
     }
@@ -245,11 +233,7 @@ async fn list_products(State(state): State<AppState>, _auth: AuthUser, Query(q):
     let offset: i64 = q.offset.as_deref().and_then(|v| v.parse().ok()).unwrap_or(0).max(0);
     let term = clean(q.q).map(|t| format!("%{}%", t.to_lowercase().replace('%', "\\%").replace('_', "\\_")));
     let all = q.include_inactive.as_deref() == Some("true");
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM crm_products WHERE ($1::text IS NULL OR lower(name) LIKE $1 OR lower(sku) LIKE $1) AND ($2 OR is_active)",
-    )
-    .bind(&term)
-    .bind(all)
+    let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_products WHERE ($1::text IS NULL OR lower(name) LIKE $1 OR lower(sku) LIKE $1) AND ($2 OR is_active)"#, term.as_deref(), all)
     .fetch_one(&state.db)
     .await?;
     let items: Vec<Product> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -304,14 +288,10 @@ pub(super) async fn may_edit_section(state: &AppState, auth: &AuthUser, section:
         return Ok(());
     }
     let Some(section) = section else { return Err(AppError::Forbidden) };
-    let ok: bool = sqlx::query_scalar(
-        "WITH RECURSIVE mine AS (
+    let ok: bool = sqlx::query_scalar!(r#"WITH RECURSIVE mine AS (
              SELECT department_id AS id FROM user_departments WHERE user_id = $2
              UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
-         SELECT EXISTS (SELECT 1 FROM catalog_section_editors e WHERE e.category_id = $1 AND (e.user_id = $2 OR e.department_id IN (SELECT id FROM mine)))",
-    )
-    .bind(section)
-    .bind(auth.id)
+         SELECT EXISTS (SELECT 1 FROM catalog_section_editors e WHERE e.category_id = $1 AND (e.user_id = $2 OR e.department_id IN (SELECT id FROM mine))) AS "v!""#, section, auth.id)
     .fetch_one(&state.db)
     .await?;
     if ok { Ok(()) } else { Err(AppError::Forbidden) }
@@ -319,8 +299,7 @@ pub(super) async fn may_edit_section(state: &AppState, auth: &AuthUser, section:
 
 /// The section a product (or a variant, through its product) belongs to.
 pub(super) async fn section_of(state: &AppState, product: Uuid) -> AppResult<Option<Uuid>> {
-    let r: Option<Option<Uuid>> = sqlx::query_scalar("SELECT COALESCE(p.shop_category_id, parent.shop_category_id) FROM crm_products p LEFT JOIN crm_products parent ON parent.id = p.parent_id WHERE p.id = $1")
-        .bind(product)
+    let r: Option<Option<Uuid>> = sqlx::query_scalar!(r#"SELECT COALESCE(p.shop_category_id, parent.shop_category_id) AS "v?" FROM crm_products p LEFT JOIN crm_products parent ON parent.id = p.parent_id WHERE p.id = $1"#, product)
         .fetch_optional(&state.db)
         .await?;
     r.ok_or(AppError::NotFound("product"))
@@ -379,53 +358,30 @@ async fn save_product(state: &AppState, auth: &AuthUser, id: Option<Uuid>, b: Pr
     };
     let id = match id {
         Some(id) => {
-            sqlx::query(
-                "UPDATE crm_products SET name = $1, sku = $2, description = $3, price = $4, currency = $5, tax_rate = $6,
-                     tax_included = $7, unit = $8, is_active = $9, updated_at = now() WHERE id = $10",
-            )
-            .bind(name)
-            .bind(clean(b.sku))
-            .bind(clean(b.description))
-            .bind(price)
-            .bind(currency)
-            .bind(tax_rate)
-            .bind(b.tax_included.unwrap_or(false))
-            .bind(unit)
-            .bind(b.is_active.unwrap_or(true))
-            .bind(id)
+            sqlx::query!("UPDATE crm_products SET name = $1, sku = $2, description = $3, price = $4, currency = $5, tax_rate = $6,
+                     tax_included = $7, unit = $8, is_active = $9, updated_at = now() WHERE id = $10", name, clean(b.sku), clean(b.description), price, currency, tax_rate, b.tax_included.unwrap_or(false), unit, b.is_active.unwrap_or(true), id)
             .execute(&state.db)
             .await?;
             id
         }
-        None => sqlx::query_scalar(
-            "INSERT INTO crm_products (name, sku, description, price, currency, tax_rate, tax_included, unit, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-        )
-        .bind(name)
-        .bind(clean(b.sku))
-        .bind(clean(b.description))
-        .bind(price)
-        .bind(currency)
-        .bind(tax_rate)
-        .bind(b.tax_included.unwrap_or(false))
-        .bind(unit)
-        .bind(b.is_active.unwrap_or(true))
+        None => sqlx::query_scalar!("INSERT INTO crm_products (name, sku, description, price, currency, tax_rate, tax_included, unit, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", name, clean(b.sku), clean(b.description), price, currency, tax_rate, b.tax_included.unwrap_or(false), unit, b.is_active.unwrap_or(true))
         .fetch_one(&state.db)
         .await?,
     };
     if let Some(sv) = is_service {
         // A service holds no stock: a product still in a warehouse can't become one.
         if sv {
-            let held: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM inv_stock WHERE product_id = $1 AND quantity <> 0)").bind(id).fetch_one(&state.db).await?;
+            let held: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM inv_stock WHERE product_id = $1 AND quantity <> 0) AS "v!""#, id).fetch_one(&state.db).await?;
             if held {
                 return Err(AppError::bad("this product is in stock; write it off before making it a service"));
             }
-            sqlx::query("UPDATE crm_products SET stock = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("UPDATE crm_products SET stock = NULL WHERE id = $1", id).execute(&state.db).await?;
         }
-        sqlx::query("UPDATE crm_products SET is_service = $2 WHERE id = $1").bind(id).bind(sv).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_products SET is_service = $2 WHERE id = $1", id, sv).execute(&state.db).await?;
     }
     if let Some(c) = cost {
-        sqlx::query("UPDATE crm_products SET cost = $2 WHERE id = $1").bind(id).bind(c).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_products SET cost = $2 WHERE id = $1", id, c).execute(&state.db).await?;
     }
     save_shop_fields(state, auth, id, shop).await?;
     Ok(id)
@@ -443,7 +399,7 @@ pub(crate) async fn unit_cost(state: &AppState, product: Uuid, currency: &str) -
         let rt = rate_of(state, currency).await?;
         return Ok(rt.filter(|r| !r.is_zero()).map(|r| round4(c / r)));
     }
-    let own: Option<(Option<Decimal>, String)> = sqlx::query_as("SELECT cost, currency FROM crm_products WHERE id = $1").bind(product).fetch_optional(&state.db).await?;
+    let own: Option<(Option<Decimal>, String)> = sqlx::query!(r#"SELECT cost, currency FROM crm_products WHERE id = $1"#, product).map(|r| (r.cost, r.currency)).fetch_optional(&state.db).await?;
     let (amount, from) = match own {
         Some((Some(c), cur)) => (c, cur),
         Some((None, _)) => {
@@ -488,15 +444,15 @@ const IMAGE_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/g
 /// the employee uploaded themselves (or the one already there).
 async fn save_shop_fields(state: &AppState, auth: &AuthUser, id: Uuid, f: ShopFields) -> AppResult<()> {
     let (name, slug, image): (String, Option<String>, Option<Uuid>) =
-        sqlx::query_as("SELECT name, slug, image_file_id FROM crm_products WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT name, slug, image_file_id FROM crm_products WHERE id = $1"#, id).map(|r| (r.name, r.slug, r.image_file_id)).fetch_one(&state.db).await?;
     if let Some(Some(c)) = f.shop_category_id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shop_categories WHERE id = $1)").bind(c).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM shop_categories WHERE id = $1) AS "v!""#, c).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("that shop category does not exist"));
         }
     }
     if let Some(Some(file)) = f.image_file_id.filter(|v| *v != image) {
-        let row: Option<(Option<Uuid>, String)> = sqlx::query_as("SELECT owner_id, mime_type FROM files WHERE id = $1").bind(file).fetch_optional(&state.db).await?;
+        let row: Option<(Option<Uuid>, String)> = sqlx::query!(r#"SELECT owner_id, mime_type FROM files WHERE id = $1"#, file).map(|r| (r.owner_id, r.mime_type)).fetch_optional(&state.db).await?;
         match row {
             Some((owner, mime)) if owner == Some(auth.id) => {
                 if !IMAGE_TYPES.contains(&mime.as_str()) {
@@ -524,21 +480,12 @@ async fn save_shop_fields(state: &AppState, auth: &AuthUser, id: Uuid, f: ShopFi
         (None, Some(true)) => Some(unique_product_slug(state, &name).await?),
         (s, _) => s,
     };
-    sqlx::query(
-        "UPDATE crm_products SET
+    sqlx::query!("UPDATE crm_products SET
              in_shop = COALESCE($2, in_shop),
              shop_category_id = CASE WHEN $3 THEN $4 ELSE shop_category_id END,
              image_file_id = CASE WHEN $5 THEN $6 ELSE image_file_id END,
              slug = $7
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(f.in_shop)
-    .bind(f.shop_category_id.is_some())
-    .bind(f.shop_category_id.flatten())
-    .bind(f.image_file_id.is_some())
-    .bind(f.image_file_id.flatten())
-    .bind(slug)
+         WHERE id = $1", id, f.in_shop, f.shop_category_id.is_some(), f.shop_category_id.flatten(), f.image_file_id.is_some(), f.image_file_id.flatten(), slug)
     .execute(&state.db)
     .await?;
     // Stock lives in warehouses: the form's total changes the default warehouse.
@@ -552,7 +499,7 @@ pub(super) async fn unique_product_slug(state: &AppState, name: &str) -> AppResu
     let base = crate::routes::slugify(name, "product");
     for i in 1..1000 {
         let s = if i == 1 { base.clone() } else { format!("{base}-{i}") };
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_products WHERE slug = $1)").bind(&s).fetch_one(&state.db).await?;
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_products WHERE slug = $1) AS "v!""#, &s).fetch_one(&state.db).await?;
         if !taken {
             return Ok(s);
         }
@@ -594,19 +541,16 @@ async fn update_product(State(state): State<AppState>, auth: AuthUser, Path(id):
 async fn delete_product(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     may_edit_product(&state, &auth, id).await?;
     // The product and its variants.
-    let used: bool = sqlx::query_scalar(
-        "WITH ids AS (SELECT id FROM crm_products WHERE id = $1 OR parent_id = $1)
+    let used: bool = sqlx::query_scalar!(r#"WITH ids AS (SELECT id FROM crm_products WHERE id = $1 OR parent_id = $1)
          SELECT EXISTS (SELECT 1 FROM crm_item_products WHERE product_id IN (SELECT id FROM ids))
-             OR EXISTS (SELECT 1 FROM inv_document_lines WHERE product_id IN (SELECT id FROM ids))",
-    )
-    .bind(id)
+             OR EXISTS (SELECT 1 FROM inv_document_lines WHERE product_id IN (SELECT id FROM ids)) AS "v!""#, id)
     .fetch_one(&state.db)
     .await?;
     if used {
-        sqlx::query("UPDATE crm_products SET is_active = FALSE, updated_at = now() WHERE id = $1 OR parent_id = $1").bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_products SET is_active = FALSE, updated_at = now() WHERE id = $1 OR parent_id = $1", id).execute(&state.db).await?;
         return Ok(Json(json!({ "deactivated": true })));
     }
-    sqlx::query("DELETE FROM crm_products WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_products WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -702,11 +646,8 @@ pub fn sum(rows: &[ProductRow]) -> Totals {
 }
 
 pub(crate) async fn rows_of(state: &AppState, item: Uuid) -> AppResult<Vec<ProductRow>> {
-    Ok(sqlx::query_as(
-        "SELECT id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, cost
-         FROM crm_item_products WHERE item_id = $1 ORDER BY sort",
-    )
-    .bind(item)
+    Ok(sqlx::query_as!(ProductRow, r#"SELECT id AS "id?", product_id AS "product_id?", name, price, quantity, unit, discount_kind, discount_value, tax_rate AS "tax_rate?", tax_included, cost AS "cost?"
+         FROM crm_item_products WHERE item_id = $1 ORDER BY sort"#, item)
     .fetch_all(&state.db)
     .await?)
 }
@@ -715,12 +656,8 @@ pub(crate) async fn rows_of(state: &AppState, item: Uuid) -> AppResult<Vec<Produ
 pub async fn totals(state: &AppState, item: Uuid) -> AppResult<Totals> {
     let rows = rows_of(state, item).await?;
     let t = sum(&rows);
-    sqlx::query(
-        "UPDATE crm_items i SET opportunity = $1, opportunity_base = ROUND($1 * COALESCE(c.rate, 1), 4)
-         FROM crm_currencies c WHERE i.id = $2 AND NOT i.is_manual_amount AND c.code = i.currency",
-    )
-    .bind(t.total)
-    .bind(item)
+    sqlx::query!("UPDATE crm_items i SET opportunity = $1, opportunity_base = ROUND($1 * COALESCE(c.rate, 1), 4)
+         FROM crm_currencies c WHERE i.id = $2 AND NOT i.is_manual_amount AND c.code = i.currency", t.total, item)
     .execute(&state.db)
     .await?;
     Ok(t)
@@ -780,28 +717,14 @@ async fn put_rows(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         });
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM crm_item_products WHERE item_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM crm_item_products WHERE item_id = $1", id).execute(&mut *tx).await?;
     for (i, r) in body.rows.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-        )
-        .bind(id)
-        .bind(r.product_id)
-        .bind(r.name.trim())
-        .bind(r.price)
-        .bind(r.quantity)
-        .bind(&r.unit)
-        .bind(&r.discount_kind)
-        .bind(r.discount_value)
-        .bind(r.tax_rate)
-        .bind(r.tax_included)
-        .bind(i as i32)
-        .bind(costs[i])
+        sqlx::query!("INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", id, r.product_id, r.name.trim(), r.price, r.quantity, &r.unit, &r.discount_kind, r.discount_value, r.tax_rate, r.tax_included, i as i32, costs[i])
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query("UPDATE crm_items SET is_manual_amount = FALSE, updated_at = now() WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE crm_items SET is_manual_amount = FALSE, updated_at = now() WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     let t = totals(&state, id).await?;
     timeline(&state.db, id, "products", Some(auth.id), None, json!({ "count": body.rows.len(), "total": t.total.to_string(), "currency": row.currency })).await?;

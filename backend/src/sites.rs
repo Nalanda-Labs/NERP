@@ -198,10 +198,7 @@ pub(crate) async fn check_images(state: &AppState, auth: &AuthUser, site: Uuid, 
         return Ok(());
     }
     let used = site_files(state, site, false).await?;
-    let ok: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM files WHERE id = ANY($1) AND mime_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif') AND (owner_id = $2 OR id = ANY($3))")
-        .bind(ids)
-        .bind(auth.id)
-        .bind(&used)
+    let ok: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM files WHERE id = ANY($1) AND mime_type IN ('image/png', 'image/jpeg', 'image/webp', 'image/gif') AND (owner_id = $2 OR id = ANY($3))", ids, auth.id, &used)
         .fetch_all(&state.db)
         .await?;
     if ids.iter().any(|i| !ok.contains(i)) {
@@ -212,8 +209,8 @@ pub(crate) async fn check_images(state: &AppState, auth: &AuthUser, site: Uuid, 
 
 /// Files a site uses: in drafts and published pages, or only published (and the logo).
 pub(crate) async fn site_files(state: &AppState, site: Uuid, published_only: bool) -> AppResult<Vec<Uuid>> {
-    let rows: Vec<(Value, Option<Value>)> = sqlx::query_as("SELECT blocks, published_blocks FROM site_pages WHERE site_id = $1").bind(site).fetch_all(&state.db).await?;
-    let settings: Value = sqlx::query_scalar("SELECT settings FROM site_sites WHERE id = $1").bind(site).fetch_optional(&state.db).await?.unwrap_or(json!({}));
+    let rows: Vec<(Value, Option<Value>)> = sqlx::query!(r#"SELECT blocks, published_blocks FROM site_pages WHERE site_id = $1"#, site).map(|r| (r.blocks, r.published_blocks)).fetch_all(&state.db).await?;
+    let settings: Value = sqlx::query_scalar!("SELECT settings FROM site_sites WHERE id = $1", site).fetch_optional(&state.db).await?.unwrap_or(json!({}));
     let mut out: Vec<Uuid> = settings["logo_file_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).into_iter().collect();
     for (draft, live) in rows {
         let lists = if published_only { vec![live] } else { vec![Some(draft), live] };
@@ -347,11 +344,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Sit
     let (settings, _) = clean_settings(&b.settings.unwrap_or(json!({})))?;
     let pages = crate::site_tools::template(b.template.as_deref().unwrap_or("business"), &name)?;
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO site_sites (name, slug, settings, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(&name)
-        .bind(&slug)
-        .bind(&settings)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO site_sites (name, slug, settings, created_by) VALUES ($1, $2, $3, $4) RETURNING id", &name, &slug, &settings, auth.id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| match e {
@@ -360,7 +353,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Sit
         })?;
     // The template's pages to start from.
     for (i, (path, title, blocks)) in pages.into_iter().enumerate() {
-        sqlx::query("INSERT INTO site_pages (site_id, path, title, blocks, sort) VALUES ($1, $2, $3, $4, $5)").bind(id).bind(path).bind(title).bind(blocks).bind(i as i32 * 10).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO site_pages (site_id, path, title, blocks, sort) VALUES ($1, $2, $3, $4, $5)", id, path, title, blocks, i as i32 * 10).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     get_site(State(state), auth, Path(id)).await
@@ -369,10 +362,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Sit
 pub(crate) async fn get_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let s: SiteRow = sqlx::query_as(sqlx::AssertSqlSafe(format!("{SITE_SELECT} WHERE s.id = $1"))).bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))?;
-    let pages: Vec<(Uuid, String, String, bool, i32, Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, path, title, in_menu, sort, published_at, updated_at FROM site_pages WHERE site_id = $1 ORDER BY (path = '') DESC, sort, title",
-    )
-    .bind(id)
+    let pages: Vec<(Uuid, String, String, bool, i32, Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query!(r#"SELECT id, path, title, in_menu, sort, published_at, updated_at FROM site_pages WHERE site_id = $1 ORDER BY (path = '') DESC, sort, title"#, id).map(|r| (r.id, r.path, r.title, r.in_menu, r.sort, r.published_at, r.updated_at))
     .fetch_all(&state.db)
     .await?;
     let mut v = serde_json::to_value(&s).unwrap();
@@ -406,16 +396,8 @@ async fn update_site(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         Some(_) => Some(None),
         None => None,
     };
-    sqlx::query(
-        "UPDATE site_sites SET name = COALESCE($2, name), slug = COALESCE($3, slug), settings = COALESCE($4, settings),
-             domain = CASE WHEN $5 THEN $6 ELSE domain END, updated_at = now() WHERE id = $1",
-    )
-        .bind(id)
-        .bind(name)
-        .bind(slug)
-        .bind(settings)
-        .bind(domain.is_some())
-        .bind(domain.flatten())
+    sqlx::query!("UPDATE site_sites SET name = COALESCE($2, name), slug = COALESCE($3, slug), settings = COALESCE($4, settings),
+             domain = CASE WHEN $5 THEN $6 ELSE domain END, updated_at = now() WHERE id = $1", id, name, slug, settings, domain.is_some(), domain.flatten())
         .execute(&state.db)
         .await
         .map_err(|e| match e {
@@ -427,14 +409,13 @@ async fn update_site(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 async fn delete_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    sqlx::query("DELETE FROM site_sites WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM site_sites WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn publish_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    sqlx::query("UPDATE site_pages SET published_title = title, published_description = description, published_blocks = blocks, published_at = now() WHERE site_id = $1")
-        .bind(id)
+    sqlx::query!("UPDATE site_pages SET published_title = title, published_description = description, published_blocks = blocks, published_at = now() WHERE site_id = $1", id)
         .execute(&state.db)
         .await?;
     get_site(State(state), auth, Path(id)).await
@@ -442,11 +423,8 @@ async fn publish_site(State(state): State<AppState>, auth: AuthUser, Path(id): P
 
 async fn stats(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
-        "SELECT p.title, p.path, COALESCE(SUM(v.views) FILTER (WHERE v.day >= CURRENT_DATE - 6), 0), COALESCE(SUM(v.views) FILTER (WHERE v.day >= CURRENT_DATE - 29), 0)
-         FROM site_pages p LEFT JOIN site_views v ON v.page_id = p.id WHERE p.site_id = $1 GROUP BY p.id, p.title, p.path ORDER BY 4 DESC",
-    )
-    .bind(id)
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query!(r#"SELECT p.title AS "title!", p.path AS "path!", COALESCE(SUM(v.views) FILTER (WHERE v.day >= CURRENT_DATE - 6), 0) AS "c2!", COALESCE(SUM(v.views) FILTER (WHERE v.day >= CURRENT_DATE - 29), 0) AS "c3!"
+         FROM site_pages p LEFT JOIN site_views v ON v.page_id = p.id WHERE p.site_id = $1 GROUP BY p.id, p.title, p.path ORDER BY 4 DESC"#, id).map(|r| (r.title, r.path, r.c2, r.c3))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(t, p, w, m)| json!({ "title": t, "path": p, "week": w, "month": m })).collect::<Vec<_>>() })))
@@ -484,14 +462,8 @@ async fn create_page(State(state): State<AppState>, auth: AuthUser, Path(site): 
     let path = path_ok(b.path.as_deref().unwrap_or(&crate::routes::slugify(&title, "page")))?;
     let (blocks, images) = clean_blocks(&b.blocks.unwrap_or(json!([])))?;
     check_images(&state, &auth, site, &images).await?;
-    let sort: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) + 10 FROM site_pages WHERE site_id = $1").bind(site).fetch_one(&state.db).await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO site_pages (site_id, path, title, blocks, sort, in_menu) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id")
-        .bind(site)
-        .bind(&path)
-        .bind(&title)
-        .bind(blocks)
-        .bind(sort)
-        .bind(b.in_menu.unwrap_or(true))
+    let sort: i32 = sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) + 10 AS "v!" FROM site_pages WHERE site_id = $1"#, site).fetch_one(&state.db).await?;
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO site_pages (site_id, path, title, blocks, sort, in_menu) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", site, &path, &title, blocks, sort, b.in_menu.unwrap_or(true))
         .fetch_one(&state.db)
         .await
         .map_err(|e| match e {
@@ -518,11 +490,8 @@ struct PageRow {
 }
 
 async fn page_row(state: &AppState, id: Uuid) -> AppResult<PageRow> {
-    sqlx::query_as(
-        "SELECT p.id, p.site_id, p.path, p.title, p.description, p.blocks, p.in_menu, p.sort, p.published_at, p.updated_at, s.slug
-         FROM site_pages p JOIN site_sites s ON s.id = p.site_id WHERE p.id = $1",
-    )
-    .bind(id)
+    sqlx::query_as!(PageRow, r#"SELECT p.id, p.site_id, p.path, p.title, p.description AS "description?", p.blocks, p.in_menu, p.sort, p.published_at, p.updated_at, s.slug
+         FROM site_pages p JOIN site_sites s ON s.id = p.site_id WHERE p.id = $1"#, id)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("page"))
@@ -561,18 +530,8 @@ async fn update_page(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         None => None,
     };
     let description = b.description.map(|d| d.map(|x| x.trim().chars().take(300).collect::<String>()).filter(|x| !x.is_empty()));
-    sqlx::query(
-        "UPDATE site_pages SET title = COALESCE($2, title), path = COALESCE($3, path), description = CASE WHEN $4 THEN $5 ELSE description END,
-             blocks = COALESCE($6, blocks), in_menu = COALESCE($7, in_menu), sort = COALESCE($8, sort), updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(title)
-    .bind(path)
-    .bind(description.is_some())
-    .bind(description.flatten())
-    .bind(blocks)
-    .bind(b.in_menu)
-    .bind(b.sort)
+    sqlx::query!("UPDATE site_pages SET title = COALESCE($2, title), path = COALESCE($3, path), description = CASE WHEN $4 THEN $5 ELSE description END,
+             blocks = COALESCE($6, blocks), in_menu = COALESCE($7, in_menu), sort = COALESCE($8, sort), updated_at = now() WHERE id = $1", id, title, path, description.is_some(), description.flatten(), blocks, b.in_menu, b.sort)
     .execute(&state.db)
     .await
     .map_err(|e| match e {
@@ -588,14 +547,13 @@ async fn delete_page(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if p.path.is_empty() {
         return Err(AppError::bad("a site keeps its home page"));
     }
-    sqlx::query("DELETE FROM site_pages WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM site_pages WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn publish_page(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    sqlx::query("UPDATE site_pages SET published_title = title, published_description = description, published_blocks = blocks, published_at = now() WHERE id = $1")
-        .bind(id)
+    sqlx::query!("UPDATE site_pages SET published_title = title, published_description = description, published_blocks = blocks, published_at = now() WHERE id = $1", id)
         .execute(&state.db)
         .await?;
     get_page(State(state), auth, Path(id)).await
@@ -607,7 +565,7 @@ async fn unpublish_page(State(state): State<AppState>, auth: AuthUser, Path(id):
     if p.path.is_empty() {
         return Err(AppError::bad("take the site down by deleting it; the home page stays published"));
     }
-    sqlx::query("UPDATE site_pages SET published_title = NULL, published_description = NULL, published_blocks = NULL, published_at = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE site_pages SET published_title = NULL, published_description = NULL, published_blocks = NULL, published_at = NULL WHERE id = $1", id).execute(&state.db).await?;
     get_page(State(state), auth, Path(id)).await
 }
 
@@ -616,15 +574,12 @@ async fn unpublish_page(State(state): State<AppState>, auth: AuthUser, Path(id):
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn site_by_slug(state: &AppState, slug: &str) -> AppResult<(Uuid, String, Value)> {
-    sqlx::query_as("SELECT id, name, settings FROM site_sites WHERE slug = $1").bind(slug).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))
+    sqlx::query!(r#"SELECT id, name, settings FROM site_sites WHERE slug = $1"#, slug).map(|r| (r.id, r.name, r.settings)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("site"))
 }
 
 async fn public_site(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Json<Value>> {
     let (id, name, settings) = site_by_slug(&state, &slug).await?;
-    let menu: Vec<(String, String)> = sqlx::query_as(
-        "SELECT published_title, path FROM site_pages WHERE site_id = $1 AND published_blocks IS NOT NULL AND in_menu ORDER BY (path = '') DESC, sort, published_title",
-    )
-    .bind(id)
+    let menu: Vec<(String, String)> = sqlx::query!(r#"SELECT published_title AS "published_title!", path AS "path!" FROM site_pages WHERE site_id = $1 AND published_blocks IS NOT NULL AND in_menu ORDER BY (path = '') DESC, sort, published_title"#, id).map(|r| (r.published_title, r.path))
     .fetch_all(&state.db)
     .await?;
     if menu.is_empty() {
@@ -646,18 +601,12 @@ struct PageQuery {
 
 async fn public_page(State(state): State<AppState>, Path(slug): Path<String>, Query(q): Query<PageQuery>) -> AppResult<Json<Value>> {
     let (id, _, _) = site_by_slug(&state, &slug).await?;
-    let row: Option<(Uuid, String, Option<String>, Value)> = sqlx::query_as(
-        "SELECT id, published_title, published_description, published_blocks FROM site_pages WHERE site_id = $1 AND path = $2 AND published_blocks IS NOT NULL",
-    )
-    .bind(id)
-    .bind(q.path.trim_matches('/').to_lowercase())
+    let row: Option<(Uuid, String, Option<String>, Value)> = sqlx::query!(r#"SELECT id AS "id!", published_title AS "published_title!", published_description AS "published_description?", published_blocks AS "published_blocks!" FROM site_pages WHERE site_id = $1 AND path = $2 AND published_blocks IS NOT NULL"#, id, q.path.trim_matches('/').to_lowercase()).map(|r| (r.id, r.published_title, r.published_description, r.published_blocks))
     .fetch_optional(&state.db)
     .await?;
     let (pid, title, description, blocks) = row.ok_or(AppError::NotFound("page"))?;
     let today: NaiveDate = Utc::now().date_naive();
-    let _ = sqlx::query("INSERT INTO site_views (page_id, day, views) VALUES ($1, $2, 1) ON CONFLICT (page_id, day) DO UPDATE SET views = site_views.views + 1")
-        .bind(pid)
-        .bind(today)
+    let _ = sqlx::query!("INSERT INTO site_views (page_id, day, views) VALUES ($1, $2, 1) ON CONFLICT (page_id, day) DO UPDATE SET views = site_views.views + 1", pid, today)
         .execute(&state.db)
         .await;
     Ok(Json(json!({ "title": title, "description": description, "blocks": render_blocks(&slug, Some(pid), &blocks) })))

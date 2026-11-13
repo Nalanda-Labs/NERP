@@ -82,9 +82,7 @@ async fn everything(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 
     // The client: a company and its contacts, or a contact.
     let clients: Vec<Uuid> = if row.entity_type == COMPANY {
-        let mut v: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM crm_items WHERE company_id = $1 AND entity_type = $2 AND deleted_at IS NULL")
-            .bind(id)
-            .bind(CONTACT)
+        let mut v: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_items WHERE company_id = $1 AND entity_type = $2 AND deleted_at IS NULL", id, CONTACT)
             .fetch_all(&state.db)
             .await?;
         v.insert(0, id);
@@ -93,15 +91,12 @@ async fn everything(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         vec![id]
     };
     // Every record of theirs, kept to those the viewer may read.
-    let linked: Vec<(Uuid, i16, Option<Uuid>, String)> = sqlx::query_as(
-        "SELECT i.id, i.entity_type, i.assigned_to, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
+    let linked: Vec<(Uuid, i16, Option<Uuid>, String)> = sqlx::query!(r#"SELECT i.id, i.entity_type, i.assigned_to, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
          WHERE i.deleted_at IS NULL AND (i.id = ANY($1) OR i.company_id = ANY($1) OR i.id IN (SELECT item_id FROM crm_item_contacts WHERE contact_id = ANY($1)))
-         LIMIT 2000",
-    )
-    .bind(&clients)
+         LIMIT 2000"#, &clients).map(|r| (r.id, r.entity_type, r.assigned_to, r.code))
     .fetch_all(&state.db)
     .await?;
-    let observing: Vec<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_item_observers WHERE user_id = $1").bind(auth.id).fetch_all(&state.db).await?;
+    let observing: Vec<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_item_observers WHERE user_id = $1", auth.id).fetch_all(&state.db).await?;
     let mut vis: HashMap<i16, access::Visible> = HashMap::new();
     let mut items = vec![];
     let mut codes: HashMap<Uuid, String> = HashMap::new();
@@ -205,10 +200,7 @@ async fn everything(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     events.sort_by(|a, b| b.at.cmp(&a.at));
     let more = events.len() as i64 > limit;
     events.truncate(limit as usize);
-    let titles: HashMap<Uuid, String> = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, COALESCE(NULLIF(title, ''), NULLIF(trim(concat_ws(' ', first_name, last_name)), ''), company_name, '') FROM crm_items WHERE id = ANY($1)",
-    )
-    .bind(events.iter().filter_map(|e| e.record_id).collect::<Vec<_>>())
+    let titles: HashMap<Uuid, String> = sqlx::query!(r#"SELECT id AS "id!", COALESCE(NULLIF(title, ''), NULLIF(trim(concat_ws(' ', first_name, last_name)), ''), company_name, '') AS "c1!" FROM crm_items WHERE id = ANY($1)"#, &(events.iter().filter_map(|e| e.record_id).collect::<Vec<_>>())).map(|r| (r.id, r.c1))
     .fetch_all(&state.db)
     .await?
     .into_iter()

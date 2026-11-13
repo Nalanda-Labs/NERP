@@ -15,22 +15,14 @@ pub async fn can_edit(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResul
     if auth.is_guest() {
         return Ok(false);
     }
-    let task: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM task_files f JOIN tasks t ON t.id = f.task_id WHERE f.file_id = $1
-                         AND (t.created_by = $2 OR t.responsible_id = $2 OR EXISTS (SELECT 1 FROM task_members m WHERE m.task_id = t.id AND m.user_id = $2 AND m.role = 'assistant')))",
-    )
-    .bind(file)
-    .bind(auth.id)
+    let task: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM task_files f JOIN tasks t ON t.id = f.task_id WHERE f.file_id = $1
+                         AND (t.created_by = $2 OR t.responsible_id = $2 OR EXISTS (SELECT 1 FROM task_members m WHERE m.task_id = t.id AND m.user_id = $2 AND m.role = 'assistant'))) AS "v!""#, file, auth.id)
     .fetch_one(&state.db)
     .await?;
     if task {
         return Ok(true);
     }
-    let chat: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM im_messages m JOIN im_members mm ON mm.chat_id = m.chat_id AND mm.user_id = $2 WHERE $1 = ANY(m.file_ids) AND m.deleted_at IS NULL)",
-    )
-    .bind(file)
-    .bind(auth.id)
+    let chat: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM im_messages m JOIN im_members mm ON mm.chat_id = m.chat_id AND mm.user_id = $2 WHERE $1 = ANY(m.file_ids) AND m.deleted_at IS NULL) AS "v!""#, file, auth.id)
     .fetch_one(&state.db)
     .await?;
     if chat {
@@ -46,7 +38,7 @@ pub async fn office_file(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResu
         return Err(AppError::NotFound("file"));
     }
     let (size, version, updated, created, owner): (i64, i32, Option<DateTime<Utc>>, DateTime<Utc>, Option<Uuid>) =
-        sqlx::query_as("SELECT size_bytes, version, updated_at, created_at, owner_id FROM files WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT size_bytes, version, updated_at, created_at, owner_id FROM files WHERE id = $1"#, id).map(|r| (r.size_bytes, r.version, r.updated_at, r.created_at, r.owner_id)).fetch_one(&state.db).await?;
     Ok(OfficeFile { name: meta.original_name.clone(), file_id: id, size, version, updated_at: updated.unwrap_or(created), owner, can_edit: can_edit(state, auth, id).await? })
 }
 
@@ -55,30 +47,22 @@ pub async fn save(state: &AppState, auth: &AuthUser, id: Uuid, bytes: &[u8]) -> 
     if !can_edit(state, auth, id).await? {
         return Err(AppError::Forbidden);
     }
-    let (name, mime): (String, String) = sqlx::query_as("SELECT original_name, mime_type FROM files WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (name, mime): (String, String) = sqlx::query!(r#"SELECT original_name, mime_type FROM files WHERE id = $1"#, id).map(|r| (r.original_name, r.mime_type)).fetch_one(&state.db).await?;
     // The new content is written as a file of its own, then takes the attachment's place.
     let fresh = crate::routes::files::store_bytes(state, Some(auth.id), &name, &mime, bytes).await?;
     let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "INSERT INTO file_versions (file_id, version, storage_path, enc_key, size_bytes, sha256, saved_by)
-         SELECT id, version, storage_path, enc_key, size_bytes, sha256, $2 FROM files WHERE id = $1",
-    )
-    .bind(id)
-    .bind(auth.id)
+    sqlx::query!("INSERT INTO file_versions (file_id, version, storage_path, enc_key, size_bytes, sha256, saved_by)
+         SELECT id, version, storage_path, enc_key, size_bytes, sha256, $2 FROM files WHERE id = $1", id, auth.id)
     .execute(&mut *tx)
     .await?;
-    let row: (i32, DateTime<Utc>) = sqlx::query_as(
-        "UPDATE files f SET storage_path = n.storage_path, enc_key = n.enc_key, size_bytes = n.size_bytes, sha256 = n.sha256, version = f.version + 1, updated_at = now()
-         FROM files n WHERE f.id = $1 AND n.id = $2 RETURNING f.version, f.updated_at",
-    )
-    .bind(id)
-    .bind(fresh)
+    let row: (i32, DateTime<Utc>) = sqlx::query!(r#"UPDATE files f SET storage_path = n.storage_path, enc_key = n.enc_key, size_bytes = n.size_bytes, sha256 = n.sha256, version = f.version + 1, updated_at = now()
+         FROM files n WHERE f.id = $1 AND n.id = $2 RETURNING f.version AS "version!", f.updated_at AS "updated_at!""#, id, fresh).map(|r| (r.version, r.updated_at))
     .fetch_one(&mut *tx)
     .await?;
     // The row that carried the new content goes; its content now belongs to the attachment.
-    sqlx::query("DELETE FROM files WHERE id = $1").bind(fresh).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM files WHERE id = $1", fresh).execute(&mut *tx).await?;
     // Its preview showed the old content.
-    sqlx::query("DELETE FROM file_previews WHERE file_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM file_previews WHERE file_id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(row)
 }

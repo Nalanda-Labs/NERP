@@ -131,9 +131,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
-      - name: Build backend
+      - name: Build backend (migrate first: queries are checked against the schema)
         working-directory: backend
-        run: cargo build --locked
+        env:
+          DATABASE_URL: postgres://nerp:nerp-ci@127.0.0.1:5432/nerp
+        run: cargo run --locked --bin nerp-migrate && cargo build --locked
 
       - uses: actions/setup-node@v7
         with:
@@ -175,6 +177,13 @@ jobs:
           # mock Google CalDAV and Microsoft Graph that api60 serves on the same port
           set_env GOOGLE_CALDAV_URL http://127.0.0.1:8099/google/caldav/v2
           set_env MICROSOFT_GRAPH_URL http://127.0.0.1:8099/microsoft/graph/v1.0
+          # office editing in the browser: Collabora, started below
+          set_env COLLABORA_URL http://127.0.0.1:9980
+
+      # Collabora Online (the official collabora/code image) for the office-editing suites
+      # (api92, api125, ui67, ui95). It reaches NERP's WOPI endpoints on localhost:8080.
+      - name: Start Collabora
+        run: tests/e2e/tools/collabora-up.sh
 
       # The same start-up as local test runs (tests/e2e/tools/restart-server.sh): LDAP, TURN,
       # LiveKit, the sign-in stand-in, backups. The script logs to $NERP_E2E_OUTPUT/server.log.

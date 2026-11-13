@@ -39,7 +39,8 @@ cp .env.example .env
 #   set DATABASE_URL=postgres://nerp:devpass@127.0.0.1:5432/nerp
 #   set JWT_SECRET to 32+ random characters:  openssl rand -base64 48
 #   set COOKIE_SECURE=false (plain http://localhost)
-cargo run                       # http://127.0.0.1:8080 — creates the tables on first start
+cargo run --bin nerp-migrate    # creates the database and its tables (needed before compiling)
+cargo run --bin nerp            # http://127.0.0.1:8080
 
 # The web app, in another terminal
 cd frontend
@@ -166,8 +167,10 @@ cd /opt/nerp
 # Rust for the nerp user (into /opt/nerp/.cargo)
 sudo -u nerp bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
 sudo -u nerp bash -c 'cd frontend && npm ci && npm run build'                     # -> frontend/build
-sudo -u nerp bash -lc 'cd backend && ~/.cargo/bin/cargo build --release'          # -> backend/target/release/nerp
 ```
+
+The server is built in step 4, once its settings name the database: NERP's SQL is checked
+against the database schema when it is compiled.
 
 ### 4. Settings
 
@@ -211,6 +214,14 @@ and `MAIL_ALLOW_PRIVATE` off unless webhooks or mailboxes must reach your intern
 
 **Save a copy of `backend/.env` in the company's password manager now** (see
 [BACKUP.md](BACKUP.md)). Without its `FILE_ENCRYPTION_KEY` no backup of the files can be read.
+
+Then build the server. `nerp-migrate` creates the tables first, because every query in NERP is
+checked against the database schema at compile time (it reads `DATABASE_URL` from `.env`):
+
+```sh
+sudo -u nerp bash -lc 'cd backend && ~/.cargo/bin/cargo run --release --bin nerp-migrate'
+sudo -u nerp bash -lc 'cd backend && ~/.cargo/bin/cargo build --release'          # -> backend/target/release/nerp
+```
 
 ### 5. Run it as a service
 
@@ -319,6 +330,7 @@ cd /opt/nerp
 sudo systemctl start nerp-backup.service          # a fresh backup first
 sudo -u nerp git pull
 sudo -u nerp bash -c 'cd frontend && npm ci && npm run build'
+sudo -u nerp bash -lc 'cd backend && ~/.cargo/bin/cargo run --release --bin nerp-migrate'   # new tables before compiling
 sudo -u nerp bash -lc 'cd backend && ~/.cargo/bin/cargo build --release'
 sudo systemctl restart nerp
 ```

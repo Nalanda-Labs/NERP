@@ -50,8 +50,8 @@ pub fn router() -> Router<AppState> {
 
 async fn section_editors(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     can_manage_products(&auth)?;
-    let users: Vec<(Uuid, String)> = sqlx::query_as("SELECT u.id, trim(u.first_name || ' ' || u.last_name) FROM catalog_section_editors e JOIN users u ON u.id = e.user_id WHERE e.category_id = $1 ORDER BY 2").bind(id).fetch_all(&state.db).await?;
-    let deps: Vec<(Uuid, String)> = sqlx::query_as("SELECT d.id, d.name FROM catalog_section_editors e JOIN departments d ON d.id = e.department_id WHERE e.category_id = $1 ORDER BY 2").bind(id).fetch_all(&state.db).await?;
+    let users: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!" FROM catalog_section_editors e JOIN users u ON u.id = e.user_id WHERE e.category_id = $1 ORDER BY 2"#, id).map(|r| (r.id, r.c1)).fetch_all(&state.db).await?;
+    let deps: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT d.id, d.name FROM catalog_section_editors e JOIN departments d ON d.id = e.department_id WHERE e.category_id = $1 ORDER BY 2"#, id).map(|r| (r.id, r.name)).fetch_all(&state.db).await?;
     Ok(Json(json!({
         "users": users.into_iter().map(|(i, n)| json!({ "id": i, "name": n })).collect::<Vec<_>>(),
         "departments": deps.into_iter().map(|(i, n)| json!({ "id": i, "name": n })).collect::<Vec<_>>(),
@@ -68,22 +68,22 @@ struct Editors {
 
 async fn set_section_editors(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<Editors>) -> AppResult<Json<Value>> {
     can_manage_products(&auth)?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shop_categories WHERE id = $1)").bind(id).fetch_one(&state.db).await?;
+    let exists: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM shop_categories WHERE id = $1) AS "v!""#, id).fetch_one(&state.db).await?;
     if !exists {
         return Err(AppError::NotFound("section"));
     }
-    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest").bind(&b.users).fetch_one(&state.db).await?;
-    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(&b.departments).fetch_one(&state.db).await?;
+    let u: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest"#, &b.users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM departments WHERE id = ANY($1)"#, &b.departments).fetch_one(&state.db).await?;
     if u as usize != b.users.len() || d as usize != b.departments.len() || b.users.len() + b.departments.len() > 200 {
         return Err(AppError::bad("choose active employees and existing departments"));
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM catalog_section_editors WHERE category_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM catalog_section_editors WHERE category_id = $1", id).execute(&mut *tx).await?;
     for x in &b.users {
-        sqlx::query("INSERT INTO catalog_section_editors (category_id, user_id) VALUES ($1, $2)").bind(id).bind(x).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO catalog_section_editors (category_id, user_id) VALUES ($1, $2)", id, x).execute(&mut *tx).await?;
     }
     for x in &b.departments {
-        sqlx::query("INSERT INTO catalog_section_editors (category_id, department_id) VALUES ($1, $2)").bind(id).bind(x).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO catalog_section_editors (category_id, department_id) VALUES ($1, $2)", id, x).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     section_editors(State(state), auth, Path(id)).await
@@ -94,13 +94,10 @@ async fn my_sections(State(state): State<AppState>, auth: AuthUser) -> AppResult
     if can_manage_products(&auth).is_ok() {
         return Ok(Json(json!({ "all": true, "sections": [] })));
     }
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "WITH RECURSIVE mine AS (
+    let ids: Vec<Uuid> = sqlx::query_scalar!("WITH RECURSIVE mine AS (
              SELECT department_id AS id FROM user_departments WHERE user_id = $1
              UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
-         SELECT DISTINCT category_id FROM catalog_section_editors WHERE user_id = $1 OR department_id IN (SELECT id FROM mine)",
-    )
-    .bind(auth.id)
+         SELECT DISTINCT category_id FROM catalog_section_editors WHERE user_id = $1 OR department_id IN (SELECT id FROM mine)", auth.id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "all": false, "sections": ids })))
@@ -122,7 +119,7 @@ pub struct Prop {
 }
 
 pub async fn props(state: &AppState) -> AppResult<Vec<Prop>> {
-    Ok(sqlx::query_as("SELECT id, name, kind, options, is_variant, in_shop, sort FROM crm_product_props ORDER BY sort, name").fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(Prop, "SELECT id, name, kind, options, is_variant, in_shop, sort FROM crm_product_props ORDER BY sort, name").fetch_all(&state.db).await?)
 }
 
 async fn list_props(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
@@ -171,14 +168,8 @@ async fn create_prop(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
     if is_variant && kind != "list" {
         return Err(AppError::bad("only a list of values can make variants"));
     }
-    let sort: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) + 10 FROM crm_product_props").fetch_one(&state.db).await?;
-    sqlx::query("INSERT INTO crm_product_props (name, kind, options, is_variant, in_shop, sort) VALUES ($1, $2, $3, $4, $5, $6)")
-        .bind(name)
-        .bind(&kind)
-        .bind(if kind == "list" { options } else { vec![] })
-        .bind(is_variant)
-        .bind(b.in_shop.unwrap_or(true))
-        .bind(sort)
+    let sort: i32 = sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) + 10 AS "v!" FROM crm_product_props"#).fetch_one(&state.db).await?;
+    sqlx::query!("INSERT INTO crm_product_props (name, kind, options, is_variant, in_shop, sort) VALUES ($1, $2, $3, $4, $5, $6)", name, &kind, &(if kind == "list" { options } else { vec![] }), is_variant, b.in_shop.unwrap_or(true), sort)
         .execute(&state.db)
         .await?;
     list_props(State(state), auth).await
@@ -188,8 +179,7 @@ async fn create_prop(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
 /// stay on products that have them until edited.
 async fn update_prop(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PropInput>) -> AppResult<Json<Value>> {
     can_manage_products(&auth)?;
-    let (kind, is_variant): (String, bool) = sqlx::query_as("SELECT kind, is_variant FROM crm_product_props WHERE id = $1")
-        .bind(id)
+    let (kind, is_variant): (String, bool) = sqlx::query!(r#"SELECT kind, is_variant FROM crm_product_props WHERE id = $1"#, id).map(|r| (r.kind, r.is_variant))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("property"))?;
@@ -197,7 +187,7 @@ async fn update_prop(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         return Err(AppError::bad("a property's kind cannot change; make a new one"));
     }
     if b.is_variant.is_some_and(|v| v != is_variant) {
-        let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_products WHERE parent_id IS NOT NULL AND props ? $1)").bind(id.to_string()).fetch_one(&state.db).await?;
+        let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_products WHERE parent_id IS NOT NULL AND props ? $1) AS "v!""#, id.to_string()).fetch_one(&state.db).await?;
         if used {
             return Err(AppError::bad("variants already use this property"));
         }
@@ -210,14 +200,7 @@ async fn update_prop(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if kind == "list" && options.as_ref().is_some_and(|o| o.is_empty()) {
         return Err(AppError::bad("a list needs at least one value"));
     }
-    sqlx::query(
-        "UPDATE crm_product_props SET name = COALESCE($2, name), options = COALESCE($3, options), is_variant = COALESCE($4, is_variant), in_shop = COALESCE($5, in_shop) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(options)
-    .bind(b.is_variant)
-    .bind(b.in_shop)
+    sqlx::query!("UPDATE crm_product_props SET name = COALESCE($2, name), options = COALESCE($3, options), is_variant = COALESCE($4, is_variant), in_shop = COALESCE($5, in_shop) WHERE id = $1", id, name, options.as_deref(), b.is_variant, b.in_shop)
     .execute(&state.db)
     .await?;
     list_props(State(state), auth).await
@@ -225,13 +208,13 @@ async fn update_prop(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 async fn delete_prop(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     can_manage_products(&auth)?;
-    let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_products WHERE parent_id IS NOT NULL AND props ? $1)").bind(id.to_string()).fetch_one(&state.db).await?;
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_products WHERE parent_id IS NOT NULL AND props ? $1) AS "v!""#, id.to_string()).fetch_one(&state.db).await?;
     if used {
         return Err(AppError::bad("variants use this property; delete them first"));
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE crm_products SET props = props - $1 WHERE props ? $1").bind(id.to_string()).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM crm_product_props WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE crm_products SET props = props - $1 WHERE props ? $1", id.to_string()).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM crm_product_props WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     list_props(State(state), auth).await
 }
@@ -281,7 +264,7 @@ async fn put_props(State(state): State<AppState>, auth: AuthUser, Path(id): Path
     super::money::may_edit_product(&state, &auth, id).await?;
     let defs = props(&state).await?;
     let clean = clean_props(&defs, &b.props, false)?;
-    let current: Value = sqlx::query_scalar("SELECT props FROM crm_products WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("product"))?;
+    let current: Value = sqlx::query_scalar!("SELECT props FROM crm_products WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("product"))?;
     let mut merged = Map::new();
     // Keep variant values; replace the rest.
     for (k, v) in current.as_object().cloned().unwrap_or_default() {
@@ -290,7 +273,7 @@ async fn put_props(State(state): State<AppState>, auth: AuthUser, Path(id): Path
         }
     }
     merged.extend(clean);
-    sqlx::query("UPDATE crm_products SET props = $2, updated_at = now() WHERE id = $1").bind(id).bind(Value::Object(merged)).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_products SET props = $2, updated_at = now() WHERE id = $1", id, Value::Object(merged)).execute(&state.db).await?;
     details(State(state), auth, Path(id)).await
 }
 
@@ -306,7 +289,7 @@ struct PriceType {
 }
 
 async fn price_types(state: &AppState) -> AppResult<Vec<PriceType>> {
-    Ok(sqlx::query_as("SELECT id, name, sort FROM crm_price_types ORDER BY sort, name").fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(PriceType, "SELECT id, name, sort FROM crm_price_types ORDER BY sort, name").fetch_all(&state.db).await?)
 }
 
 async fn list_price_types(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
@@ -321,22 +304,22 @@ struct NameInput {
 async fn create_price_type(State(state): State<AppState>, auth: AuthUser, Json(b): Json<NameInput>) -> AppResult<Json<Value>> {
     can_manage_products(&auth)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 100)?;
-    let sort: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) + 10 FROM crm_price_types").fetch_one(&state.db).await?;
-    sqlx::query("INSERT INTO crm_price_types (name, sort) VALUES ($1, $2)").bind(name).bind(sort).execute(&state.db).await?;
+    let sort: i32 = sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) + 10 AS "v!" FROM crm_price_types"#).fetch_one(&state.db).await?;
+    sqlx::query!("INSERT INTO crm_price_types (name, sort) VALUES ($1, $2)", name, sort).execute(&state.db).await?;
     list_price_types(State(state), auth).await
 }
 
 async fn update_price_type(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<NameInput>) -> AppResult<Json<Value>> {
     can_manage_products(&auth)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 100)?;
-    sqlx::query("UPDATE crm_price_types SET name = $2 WHERE id = $1").bind(id).bind(name).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_price_types SET name = $2 WHERE id = $1", id, name).execute(&state.db).await?;
     list_price_types(State(state), auth).await
 }
 
 /// Its prices go with it; product rows already on deals keep their prices.
 async fn delete_price_type(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     can_manage_products(&auth)?;
-    sqlx::query("DELETE FROM crm_price_types WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_price_types WHERE id = $1", id).execute(&state.db).await?;
     list_price_types(State(state), auth).await
 }
 
@@ -348,7 +331,7 @@ struct PricesBody {
 
 async fn put_prices(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PricesBody>) -> AppResult<Json<Value>> {
     super::money::may_edit_product(&state, &auth, id).await?;
-    let types: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM crm_price_types").fetch_all(&state.db).await?;
+    let types: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_price_types").fetch_all(&state.db).await?;
     let mut tx = state.db.begin().await?;
     for (t, p) in b.prices {
         if !types.contains(&t) {
@@ -356,20 +339,15 @@ async fn put_prices(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         }
         match p.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
             None => {
-                sqlx::query("DELETE FROM crm_product_prices WHERE product_id = $1 AND price_type_id = $2").bind(id).bind(t).execute(&mut *tx).await?;
+                sqlx::query!("DELETE FROM crm_product_prices WHERE product_id = $1 AND price_type_id = $2", id, t).execute(&mut *tx).await?;
             }
             Some(v) => {
                 let d = Decimal::from_str(&v).map_err(|_| AppError::bad("prices must be numbers"))?;
                 if d.is_sign_negative() {
                     return Err(AppError::bad("prices cannot be negative"));
                 }
-                sqlx::query(
-                    "INSERT INTO crm_product_prices (product_id, price_type_id, price) VALUES ($1, $2, $3)
-                     ON CONFLICT (product_id, price_type_id) DO UPDATE SET price = $3",
-                )
-                .bind(id)
-                .bind(t)
-                .bind(d)
+                sqlx::query!("INSERT INTO crm_product_prices (product_id, price_type_id, price) VALUES ($1, $2, $3)
+                     ON CONFLICT (product_id, price_type_id) DO UPDATE SET price = $3", id, t, d)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -388,12 +366,8 @@ struct PricesFor {
 /// Prices of products in one price type (base prices where a product has none in it), for
 /// filling product rows.
 async fn prices_for(State(state): State<AppState>, _auth: AuthUser, Json(b): Json<PricesFor>) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, Decimal)> = sqlx::query_as(
-        "SELECT p.id, COALESCE((SELECT x.price FROM crm_product_prices x WHERE x.product_id = p.id AND x.price_type_id = $2), p.price)
-         FROM crm_products p WHERE p.id = ANY($1)",
-    )
-    .bind(&b.product_ids)
-    .bind(b.price_type_id)
+    let rows: Vec<(Uuid, Decimal)> = sqlx::query!(r#"SELECT p.id AS "id!", COALESCE((SELECT x.price FROM crm_product_prices x WHERE x.product_id = p.id AND x.price_type_id = $2), p.price) AS "c1!"
+         FROM crm_products p WHERE p.id = ANY($1)"#, &b.product_ids, b.price_type_id).map(|r| (r.id, r.c1))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "prices": rows.into_iter().map(|(id, p)| (id.to_string(), json!(p))).collect::<Map<String, Value>>() })))
@@ -416,20 +390,16 @@ struct VariantRow {
 }
 
 async fn details(State(state): State<AppState>, _auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let (product_props, parent): (Value, Option<Uuid>) = sqlx::query_as("SELECT props, parent_id FROM crm_products WHERE id = $1")
-        .bind(id)
+    let (product_props, parent): (Value, Option<Uuid>) = sqlx::query!(r#"SELECT props, parent_id FROM crm_products WHERE id = $1"#, id).map(|r| (r.props, r.parent_id))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("product"))?;
-    let prices: Vec<(Uuid, Decimal)> = sqlx::query_as("SELECT price_type_id, price FROM crm_product_prices WHERE product_id = $1").bind(id).fetch_all(&state.db).await?;
-    let variants: Vec<VariantRow> = sqlx::query_as(
-        "SELECT id, name, sku, price, currency, stock, is_active, props FROM crm_products WHERE parent_id = $1 ORDER BY name",
-    )
-    .bind(id)
+    let prices: Vec<(Uuid, Decimal)> = sqlx::query!(r#"SELECT price_type_id, price FROM crm_product_prices WHERE product_id = $1"#, id).map(|r| (r.price_type_id, r.price)).fetch_all(&state.db).await?;
+    let variants: Vec<VariantRow> = sqlx::query_as!(VariantRow, r#"SELECT id, name, sku AS "sku?", price, currency, stock AS "stock?", is_active, props FROM crm_products WHERE parent_id = $1 ORDER BY name"#, id)
     .fetch_all(&state.db)
     .await?;
     let parent_name: Option<String> = match parent {
-        Some(p) => sqlx::query_scalar("SELECT name FROM crm_products WHERE id = $1").bind(p).fetch_optional(&state.db).await?,
+        Some(p) => sqlx::query_scalar!("SELECT name FROM crm_products WHERE id = $1", p).fetch_optional(&state.db).await?,
         None => None,
     };
     Ok(Json(json!({
@@ -471,10 +441,7 @@ struct Parent {
 /// Makes a variant for every combination of the chosen values that doesn't exist yet.
 async fn make_variants(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<MakeVariants>) -> AppResult<Json<Value>> {
     super::money::may_edit_product(&state, &auth, id).await?;
-    let p: Parent = sqlx::query_as(
-        "SELECT name, description, price, currency, tax_rate, tax_included, unit, in_shop, shop_category_id, parent_id, props FROM crm_products WHERE id = $1",
-    )
-    .bind(id)
+    let p: Parent = sqlx::query_as!(Parent, r#"SELECT name, description AS "description?", price, currency, tax_rate AS "tax_rate?", tax_included, unit, in_shop, shop_category_id AS "shop_category_id?", parent_id AS "parent_id?", props FROM crm_products WHERE id = $1"#, id)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("product"))?;
@@ -508,7 +475,7 @@ async fn make_variants(State(state): State<AppState>, auth: AuthUser, Path(id): 
     if combos.len() > 200 {
         return Err(AppError::bad(format!("that makes {} variants; at most 200 at once", combos.len())));
     }
-    let existing: Vec<Value> = sqlx::query_scalar("SELECT props FROM crm_products WHERE parent_id = $1").bind(id).fetch_all(&state.db).await?;
+    let existing: Vec<Value> = sqlx::query_scalar!("SELECT props FROM crm_products WHERE parent_id = $1", id).fetch_all(&state.db).await?;
     let own = p.props.as_object().cloned().unwrap_or_default();
     let mut made = 0;
     for combo in combos {
@@ -524,22 +491,8 @@ async fn make_variants(State(state): State<AppState>, auth: AuthUser, Path(id): 
             values.insert(d.id.to_string(), json!(v));
         }
         let slug = if p.in_shop { Some(unique_product_slug(&state, &name).await?) } else { None };
-        sqlx::query(
-            "INSERT INTO crm_products (name, description, price, currency, tax_rate, tax_included, unit, in_shop, shop_category_id, parent_id, props, slug)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-        )
-        .bind(&name)
-        .bind(&p.description)
-        .bind(p.price)
-        .bind(&p.currency)
-        .bind(p.tax_rate)
-        .bind(p.tax_included)
-        .bind(&p.unit)
-        .bind(p.in_shop)
-        .bind(p.shop_category_id)
-        .bind(id)
-        .bind(Value::Object(values))
-        .bind(slug)
+        sqlx::query!("INSERT INTO crm_products (name, description, price, currency, tax_rate, tax_included, unit, in_shop, shop_category_id, parent_id, props, slug)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", &name, p.description.as_deref(), p.price, &p.currency, p.tax_rate, p.tax_included, &p.unit, p.in_shop, p.shop_category_id, id, Value::Object(values), slug)
         .execute(&state.db)
         .await?;
         made += 1;

@@ -75,13 +75,10 @@ async fn chart(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Ch
     if q.to < q.from || (q.to - q.from).num_days() > 400 {
         return Err(AppError::bad("show at most 400 days"));
     }
-    let people: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        "WITH RECURSIVE depts AS (SELECT id FROM departments WHERE id = $1 UNION SELECT d.id FROM departments d JOIN depts x ON d.parent_id = x.id)
-         SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id FROM users u
+    let people: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query!(r#"WITH RECURSIVE depts AS (SELECT id FROM departments WHERE id = $1 UNION SELECT d.id FROM departments d JOIN depts x ON d.parent_id = x.id)
+         SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.avatar_file_id AS "avatar_file_id?" FROM users u
          WHERE u.is_active AND ($1::uuid IS NULL OR u.id IN (SELECT user_id FROM user_departments WHERE department_id IN (SELECT id FROM depts)))
-         ORDER BY u.first_name, u.last_name LIMIT 1000",
-    )
-    .bind(q.department)
+         ORDER BY u.first_name, u.last_name LIMIT 1000"#, q.department).map(|r| (r.id, r.c1, r.avatar_file_id))
     .fetch_all(&state.db)
     .await?;
     let ids: Vec<Uuid> = people.iter().map(|p| p.0).collect();
@@ -147,15 +144,10 @@ async fn pending(State(state): State<AppState>, auth: AuthUser) -> AppResult<Jso
 /// A year's vacation: allowance, used (approved), requested (pending), left.
 pub(crate) async fn balance_of(state: &AppState, user: Uuid, year: i32) -> AppResult<Value> {
     let s = settings(state).await?;
-    let own: Option<Decimal> = sqlx::query_scalar("SELECT days FROM hr_allowances WHERE user_id = $1 AND year = $2").bind(user).bind(year).fetch_optional(&state.db).await?;
+    let own: Option<Decimal> = sqlx::query_scalar!("SELECT days FROM hr_allowances WHERE user_id = $1 AND year = $2", user, year).fetch_optional(&state.db).await?;
     let allowance = own.unwrap_or(s.annual_vacation_days);
     let (first, last) = (NaiveDate::from_ymd_opt(year, 1, 1).unwrap(), NaiveDate::from_ymd_opt(year, 12, 31).unwrap());
-    let rows: Vec<(NaiveDate, NaiveDate, String)> = sqlx::query_as(
-        "SELECT starts_on, ends_on, status FROM hr_absences WHERE user_id = $1 AND kind = 'vacation' AND status IN ('approved', 'pending') AND starts_on <= $3 AND ends_on >= $2",
-    )
-    .bind(user)
-    .bind(first)
-    .bind(last)
+    let rows: Vec<(NaiveDate, NaiveDate, String)> = sqlx::query!(r#"SELECT starts_on, ends_on, status FROM hr_absences WHERE user_id = $1 AND kind = 'vacation' AND status IN ('approved', 'pending') AND starts_on <= $3 AND ends_on >= $2"#, user, first, last).map(|r| (r.starts_on, r.ends_on, r.status))
     .fetch_all(&state.db)
     .await?;
     let hol = holidays(state, first, last).await?;
@@ -203,10 +195,7 @@ async fn request(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Re
     if b.starts_on.year() != b.ends_on.year() && b.kind == "vacation" {
         return Err(AppError::bad("split a vacation at the turn of the year (each year has its own allowance)"));
     }
-    let overlap: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM hr_absences WHERE user_id = $1 AND status IN ('approved', 'pending') AND starts_on <= $3 AND ends_on >= $2)")
-        .bind(auth.id)
-        .bind(b.starts_on)
-        .bind(b.ends_on)
+    let overlap: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM hr_absences WHERE user_id = $1 AND status IN ('approved', 'pending') AND starts_on <= $3 AND ends_on >= $2) AS "v!""#, auth.id, b.starts_on, b.ends_on)
         .fetch_one(&state.db)
         .await?;
     if overlap {
@@ -225,15 +214,10 @@ async fn request(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Re
         }
     }
     let note = b.note.map(|n| n.trim().chars().take(1000).collect::<String>()).filter(|n| !n.is_empty());
-    let id: Uuid = sqlx::query_scalar("INSERT INTO hr_absences (user_id, kind, starts_on, ends_on, note) VALUES ($1, $2, $3, $4, $5) RETURNING id")
-        .bind(auth.id)
-        .bind(&b.kind)
-        .bind(b.starts_on)
-        .bind(b.ends_on)
-        .bind(&note)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO hr_absences (user_id, kind, starts_on, ends_on, note) VALUES ($1, $2, $3, $4, $5) RETURNING id", auth.id, &b.kind, b.starts_on, b.ends_on, note.as_deref())
         .fetch_one(&state.db)
         .await?;
-    let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let me: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     notify(&state, &approvers(&state, auth.id).await?, NewNotification {
         kind: "hr.absence.request",
         title: format!("{me} asks for {}: {} – {} ({days} working day{})", label(&b.kind).to_lowercase(), b.starts_on.format("%-d %b"), b.ends_on.format("%-d %b %Y"), if days == 1 { "" } else { "s" }),
@@ -255,8 +239,7 @@ struct DecideBody {
 }
 
 async fn decide(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<DecideBody>) -> AppResult<Json<Value>> {
-    let (user, status, kind, s, e): (Uuid, String, String, NaiveDate, NaiveDate) = sqlx::query_as("SELECT user_id, status, kind, starts_on, ends_on FROM hr_absences WHERE id = $1")
-        .bind(id)
+    let (user, status, kind, s, e): (Uuid, String, String, NaiveDate, NaiveDate) = sqlx::query!(r#"SELECT user_id, status, kind, starts_on, ends_on FROM hr_absences WHERE id = $1"#, id).map(|r| (r.user_id, r.status, r.kind, r.starts_on, r.ends_on))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("request"))?;
@@ -268,14 +251,10 @@ async fn decide(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     }
     let note = b.note.map(|n| n.trim().chars().take(1000).collect::<String>()).filter(|n| !n.is_empty());
     let new = if b.approve { "approved" } else { "rejected" };
-    sqlx::query("UPDATE hr_absences SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4 WHERE id = $1 AND status = 'pending'")
-        .bind(id)
-        .bind(new)
-        .bind(auth.id)
-        .bind(&note)
+    sqlx::query!("UPDATE hr_absences SET status = $2, decided_by = $3, decided_at = now(), decision_note = $4 WHERE id = $1 AND status = 'pending'", id, new, auth.id, note.as_deref())
         .execute(&state.db)
         .await?;
-    let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let me: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     notify(&state, &[user], NewNotification {
         kind: "hr.absence.decided",
         title: format!("{me} {new} your {} {} – {}", label(&kind).to_lowercase(), s.format("%-d %b"), e.format("%-d %b")),
@@ -290,8 +269,7 @@ async fn decide(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 /// The person withdraws a request, or cancels approved time off that hasn't started;
 /// managers can cancel any.
 async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let (user, status, starts): (Uuid, String, NaiveDate) = sqlx::query_as("SELECT user_id, status, starts_on FROM hr_absences WHERE id = $1")
-        .bind(id)
+    let (user, status, starts): (Uuid, String, NaiveDate) = sqlx::query!(r#"SELECT user_id, status, starts_on FROM hr_absences WHERE id = $1"#, id).map(|r| (r.user_id, r.status, r.starts_on))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("request"))?;
@@ -306,9 +284,9 @@ async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         "approved" => return Err(AppError::bad("time off that has started can only be cancelled by your manager")),
         _ => return Err(AppError::bad("this request is already closed")),
     }
-    sqlx::query("UPDATE hr_absences SET status = 'cancelled' WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE hr_absences SET status = 'cancelled' WHERE id = $1", id).execute(&state.db).await?;
     if status == "approved" && !manager {
-        let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+        let me: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
         notify(&state, &approvers(&state, user).await?, NewNotification { kind: "hr.absence.cancelled", title: format!("{me} cancelled approved time off from {}", starts.format("%-d %b")), body: None, link: Some("/hr/absences".into()), actor: Some(auth.id) }).await;
     }
     mine(State(state), auth).await

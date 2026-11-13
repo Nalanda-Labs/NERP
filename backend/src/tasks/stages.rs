@@ -48,30 +48,22 @@ pub struct Stage {
 }
 
 pub async fn load_stages(state: &AppState, project: Uuid) -> AppResult<Vec<Stage>> {
-    Ok(sqlx::query_as("SELECT id, name, color, sort, status FROM project_stages WHERE project_id = $1 ORDER BY sort, created_at")
-        .bind(project)
+    Ok(sqlx::query_as!(Stage, r#"SELECT id, name, color, sort, status AS "status?" FROM project_stages WHERE project_id = $1 ORDER BY sort, created_at"#, project)
         .fetch_all(&state.db)
         .await?)
 }
 
 /// The column a task in `project` with `status` belongs in by default.
 pub async fn default_stage<'e, E: sqlx::PgExecutor<'e>>(executor: E, project: Uuid, status: &str) -> sqlx::Result<Option<Uuid>> {
-    sqlx::query_scalar(
-        "SELECT id FROM project_stages WHERE project_id = $1
-         ORDER BY (status IS NOT DISTINCT FROM $2) DESC, (status IS NULL) DESC, sort LIMIT 1",
-    )
-    .bind(project)
-    .bind(status)
+    sqlx::query_scalar!("SELECT id FROM project_stages WHERE project_id = $1
+         ORDER BY (status IS NOT DISTINCT FROM $2) DESC, (status IS NULL) DESC, sort LIMIT 1", project, status)
     .fetch_optional(executor)
     .await
 }
 
 /// Keeps a task's column in step after its status changed. Returns the column it moved to.
 pub async fn sync_after_status(state: &AppState, task: Uuid, new_status: &str) -> AppResult<Option<Uuid>> {
-    let row: Option<(Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query_as(
-        "SELECT t.project_id, t.stage_id, s.status FROM tasks t LEFT JOIN project_stages s ON s.id = t.stage_id WHERE t.id = $1",
-    )
-    .bind(task)
+    let row: Option<(Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query!(r#"SELECT t.project_id, t.stage_id, s.status FROM tasks t LEFT JOIN project_stages s ON s.id = t.stage_id WHERE t.id = $1"#, task).map(|r| (r.project_id, r.stage_id, r.status))
     .fetch_optional(&state.db)
     .await?;
     let Some((Some(project), stage, linked)) = row else { return Ok(None) };
@@ -82,15 +74,11 @@ pub async fn sync_after_status(state: &AppState, task: Uuid, new_status: &str) -
     if stage.is_some() && linked.is_none() && (new_status == "new" || new_status == "in_progress") {
         return Ok(None);
     }
-    let target: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM project_stages WHERE project_id = $1 AND status = $2 ORDER BY sort LIMIT 1",
-    )
-    .bind(project)
-    .bind(new_status)
+    let target: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM project_stages WHERE project_id = $1 AND status = $2 ORDER BY sort LIMIT 1", project, new_status)
     .fetch_optional(&state.db)
     .await?;
     if let Some(target) = target.filter(|t| Some(*t) != stage) {
-        sqlx::query("UPDATE tasks SET stage_id = $1 WHERE id = $2").bind(target).bind(task).execute(&state.db).await?;
+        sqlx::query!("UPDATE tasks SET stage_id = $1 WHERE id = $2", target, task).execute(&state.db).await?;
         return Ok(Some(target));
     }
     Ok(None)
@@ -139,12 +127,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         },
         None => stages.last().map(|s| s.sort + 1.0).unwrap_or(1.0),
     };
-    sqlx::query("INSERT INTO project_stages (project_id, name, color, sort, status) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id)
-        .bind(name)
-        .bind(body.color.unwrap_or_else(|| "slate".into()))
-        .bind(sort)
-        .bind(body.status)
+    sqlx::query!("INSERT INTO project_stages (project_id, name, color, sort, status) VALUES ($1, $2, $3, $4, $5)", id, name, body.color.unwrap_or_else(|| "slate".into()), sort, body.status)
         .execute(&state.db)
         .await?;
     broadcast_board(&state, id).await;
@@ -168,25 +151,23 @@ async fn update(
 ) -> AppResult<Json<Vec<Stage>>> {
     require_manage(&state, &auth, id).await?;
     validate(body.color.as_deref(), body.status.as_ref().and_then(|s| s.as_deref()))?;
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM project_stages WHERE id = $1 AND project_id = $2)")
-        .bind(stage)
-        .bind(id)
+    let exists: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM project_stages WHERE id = $1 AND project_id = $2) AS "v!""#, stage, id)
         .fetch_one(&state.db)
         .await?;
     if !exists {
         return Err(AppError::NotFound("column"));
     }
     if let Some(n) = &body.name {
-        sqlx::query("UPDATE project_stages SET name = $1 WHERE id = $2").bind(required("column name", n, 60)?).bind(stage).execute(&state.db).await?;
+        sqlx::query!("UPDATE project_stages SET name = $1 WHERE id = $2", required("column name", n, 60)?, stage).execute(&state.db).await?;
     }
     if let Some(c) = &body.color {
-        sqlx::query("UPDATE project_stages SET color = $1 WHERE id = $2").bind(c).bind(stage).execute(&state.db).await?;
+        sqlx::query!("UPDATE project_stages SET color = $1 WHERE id = $2", c, stage).execute(&state.db).await?;
     }
     if let Some(s) = &body.status {
-        sqlx::query("UPDATE project_stages SET status = $1 WHERE id = $2").bind(s).bind(stage).execute(&state.db).await?;
+        sqlx::query!("UPDATE project_stages SET status = $1 WHERE id = $2", s.as_deref(), stage).execute(&state.db).await?;
     }
     if let Some(s) = body.sort {
-        sqlx::query("UPDATE project_stages SET sort = $1 WHERE id = $2").bind(s).bind(stage).execute(&state.db).await?;
+        sqlx::query!("UPDATE project_stages SET sort = $1 WHERE id = $2", s, stage).execute(&state.db).await?;
     }
     broadcast_board(&state, id).await;
     Ok(Json(load_stages(&state, id).await?))
@@ -218,8 +199,8 @@ async fn remove(
         .filter(|m| remaining.iter().any(|s| s.id == *m))
         .unwrap_or(remaining[0].id);
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE tasks SET stage_id = $1 WHERE stage_id = $2").bind(target).bind(stage).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM project_stages WHERE id = $1").bind(stage).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE tasks SET stage_id = $1 WHERE stage_id = $2", target, stage).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM project_stages WHERE id = $1", stage).execute(&mut *tx).await?;
     tx.commit().await?;
     broadcast_board(&state, id).await;
     Ok(Json(load_stages(&state, id).await?))
@@ -227,8 +208,7 @@ async fn remove(
 
 /// Column changes affect everyone looking at the board.
 async fn broadcast_board(state: &AppState, project: Uuid) {
-    let members: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM project_members WHERE project_id = $1")
-        .bind(project)
+    let members: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM project_members WHERE project_id = $1", project)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -257,9 +237,7 @@ async fn move_to_stage(
         return Err(AppError::bad("only project tasks have board columns"));
     };
     let stage: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT name, status FROM project_stages WHERE id = $1 AND project_id = $2")
-            .bind(body.stage_id)
-            .bind(project)
+        sqlx::query!(r#"SELECT name, status FROM project_stages WHERE id = $1 AND project_id = $2"#, body.stage_id, project).map(|r| (r.name, r.status))
             .fetch_optional(&state.db)
             .await?;
     let Some((stage_name, linked)) = stage else {
@@ -270,7 +248,7 @@ async fn move_to_stage(
         let db = state.db.clone();
         async move {
             match n {
-                Some(n) => sqlx::query_scalar::<_, f64>("SELECT position FROM tasks WHERE id = $1").bind(n).fetch_optional(&db).await,
+                Some(n) => sqlx::query_scalar!("SELECT position FROM tasks WHERE id = $1", n).fetch_optional(&db).await,
                 None => Ok(None),
             }
         }
@@ -282,11 +260,8 @@ async fn move_to_stage(
         (None, None) => 0.0,
     };
 
-    let previous: Option<Uuid> = sqlx::query_scalar("SELECT stage_id FROM tasks WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    sqlx::query("UPDATE tasks SET stage_id = $1, position = $2, updated_at = now(), last_activity_at = now() WHERE id = $3")
-        .bind(body.stage_id)
-        .bind(position)
-        .bind(id)
+    let previous: Option<Uuid> = sqlx::query_scalar!(r#"SELECT stage_id AS "stage_id?" FROM tasks WHERE id = $1"#, id).fetch_one(&state.db).await?;
+    sqlx::query!("UPDATE tasks SET stage_id = $1, position = $2, updated_at = now(), last_activity_at = now() WHERE id = $3", body.stage_id, position, id)
         .execute(&state.db)
         .await?;
     if previous != Some(body.stage_id) {

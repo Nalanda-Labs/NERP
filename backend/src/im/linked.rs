@@ -15,8 +15,7 @@ use crate::{
 
 /// A workgroup's chat follows the group: its name and members change with the group's.
 pub(super) async fn workgroup_guard(state: &AppState, chat: Uuid) -> AppResult<()> {
-    let linked: bool = sqlx::query_scalar("SELECT project_id IS NOT NULL OR task_id IS NOT NULL OR event_id IS NOT NULL OR board_id IS NOT NULL OR crm_item_id IS NOT NULL FROM im_chats WHERE id = $1")
-        .bind(chat)
+    let linked: bool = sqlx::query_scalar!(r#"SELECT project_id IS NOT NULL OR task_id IS NOT NULL OR event_id IS NOT NULL OR board_id IS NOT NULL OR crm_item_id IS NOT NULL AS "v!" FROM im_chats WHERE id = $1"#, chat)
         .fetch_one(&state.db)
         .await?;
     if linked {
@@ -177,7 +176,7 @@ pub async fn sync_linked_chat(state: &AppState, link: Link) -> AppResult<()> {
     let before = members(state, id).await?;
     let name: String = sqlx::query_scalar(sqlx::AssertSqlSafe(link.title().to_string())).bind(link.id()).fetch_one(&state.db).await?;
     if title.as_deref() != Some(name.as_str()) {
-        sqlx::query("UPDATE im_chats SET title = $2 WHERE id = $1").bind(id).bind(&name).execute(&state.db).await?;
+        sqlx::query!("UPDATE im_chats SET title = $2 WHERE id = $1", id, &name).execute(&state.db).await?;
     }
     let added: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "INSERT INTO im_members (chat_id, user_id) SELECT $1, p.user_id FROM ({}) p JOIN users u ON u.id = p.user_id

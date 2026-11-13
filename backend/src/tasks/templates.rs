@@ -87,8 +87,7 @@ fn rule(v: &Option<Value>) -> Option<Recurrence> {
 
 async fn finish(state: &AppState, mut t: Template) -> AppResult<Template> {
     t.schedule = rule(&t.recurrence).map(|r| r.describe());
-    t.task_count = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE template_id = $1")
-        .bind(t.id)
+    t.task_count = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM tasks WHERE template_id = $1"#, t.id)
         .fetch_one(&state.db)
         .await?;
     Ok(t)
@@ -223,59 +222,25 @@ async fn save(state: &AppState, auth: &AuthUser, id: Option<Uuid>, input: Templa
     let shared = input.shared.unwrap_or(false);
     let id = match id {
         Some(id) => {
-            sqlx::query(
-                "UPDATE task_templates SET title = $1, description = $2, responsible_id = $3, assistant_ids = $4, watcher_ids = $5,
+            sqlx::query!("UPDATE task_templates SET title = $1, description = $2, responsible_id = $3, assistant_ids = $4, watcher_ids = $5,
                      priority = $6, project_id = $7, requires_review = $8, time_estimate_secs = $9, checklist = $10,
                      deadline_offset_secs = $11, recurrence = $12, next_run_at = $13, is_active = $14, updated_at = now()
-                 WHERE id = $15",
-            )
-            .bind(&title)
-            .bind(clean(input.description))
-            .bind(input.responsible_id)
-            .bind(input.assistant_ids.unwrap_or_default())
-            .bind(input.watcher_ids.unwrap_or_default())
-            .bind(input.priority.unwrap_or_else(|| "normal".into()))
-            .bind(input.project_id)
-            .bind(input.requires_review.unwrap_or(false))
-            .bind(input.time_estimate_secs)
-            .bind(&checklist)
-            .bind(input.deadline_offset_secs)
-            .bind(recurrence)
-            .bind(next_run)
-            .bind(is_active)
-            .bind(id)
+                 WHERE id = $15", &title, clean(input.description), input.responsible_id, &input.assistant_ids.unwrap_or_default(), &input.watcher_ids.unwrap_or_default(), input.priority.unwrap_or_else(|| "normal".into()), input.project_id, input.requires_review.unwrap_or(false), input.time_estimate_secs, &checklist, input.deadline_offset_secs, recurrence, next_run, is_active, id)
             .execute(&state.db)
             .await?;
-            sqlx::query("UPDATE task_templates SET subtasks = $2, shared = $3 WHERE id = $1").bind(id).bind(json!(subtasks)).bind(shared).execute(&state.db).await?;
+            sqlx::query!("UPDATE task_templates SET subtasks = $2, shared = $3 WHERE id = $1", id, json!(subtasks), shared).execute(&state.db).await?;
             id
         }
         None => {
-            sqlx::query_scalar(
-                "INSERT INTO task_templates (title, description, responsible_id, assistant_ids, watcher_ids, priority, project_id,
+            sqlx::query_scalar!("INSERT INTO task_templates (title, description, responsible_id, assistant_ids, watcher_ids, priority, project_id,
                      requires_review, time_estimate_secs, checklist, deadline_offset_secs, recurrence, next_run_at, is_active, created_by)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id",
-            )
-            .bind(&title)
-            .bind(clean(input.description))
-            .bind(input.responsible_id)
-            .bind(input.assistant_ids.unwrap_or_default())
-            .bind(input.watcher_ids.unwrap_or_default())
-            .bind(input.priority.unwrap_or_else(|| "normal".into()))
-            .bind(input.project_id)
-            .bind(input.requires_review.unwrap_or(false))
-            .bind(input.time_estimate_secs)
-            .bind(&checklist)
-            .bind(input.deadline_offset_secs)
-            .bind(recurrence)
-            .bind(next_run)
-            .bind(is_active)
-            .bind(auth.id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id", &title, clean(input.description), input.responsible_id, &input.assistant_ids.unwrap_or_default(), &input.watcher_ids.unwrap_or_default(), input.priority.unwrap_or_else(|| "normal".into()), input.project_id, input.requires_review.unwrap_or(false), input.time_estimate_secs, &checklist, input.deadline_offset_secs, recurrence, next_run, is_active, auth.id)
             .fetch_one(&state.db)
             .await?
         }
     };
     if has_extras(&subtasks, shared) {
-        sqlx::query("UPDATE task_templates SET subtasks = $2, shared = $3 WHERE id = $1").bind(id).bind(json!(subtasks)).bind(shared).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_templates SET subtasks = $2, shared = $3 WHERE id = $1", id, json!(subtasks), shared).execute(&state.db).await?;
     }
     Ok(id)
 }
@@ -294,7 +259,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     load_own(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM task_templates WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_templates WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -409,15 +374,9 @@ pub async fn run_due(state: &AppState) -> Result<()> {
         let finished = next.is_none() || r.max_runs.is_some_and(|m| runs >= m);
 
         // Claim this run: only the worker whose UPDATE matches the old next_run_at proceeds.
-        let claimed = sqlx::query(
-            "UPDATE task_templates SET next_run_at = $1, last_run_at = now(), run_count = run_count + 1,
+        let claimed = sqlx::query!("UPDATE task_templates SET next_run_at = $1, last_run_at = now(), run_count = run_count + 1,
                  is_active = $2, updated_at = now()
-             WHERE id = $3 AND next_run_at = $4",
-        )
-        .bind(if finished { None } else { next })
-        .bind(!finished)
-        .bind(t.id)
-        .bind(scheduled)
+             WHERE id = $3 AND next_run_at = $4", if finished { None } else { next }, !finished, t.id, scheduled)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -426,7 +385,7 @@ pub async fn run_due(state: &AppState) -> Result<()> {
         }
 
         let Some(owner) = acting_as(state, t.created_by).await? else {
-            sqlx::query("UPDATE task_templates SET is_active = FALSE WHERE id = $1").bind(t.id).execute(&state.db).await?;
+            sqlx::query!("UPDATE task_templates SET is_active = FALSE WHERE id = $1", t.id).execute(&state.db).await?;
             tracing::warn!(template = %t.id, "recurring template paused: owner is deactivated");
             continue;
         };

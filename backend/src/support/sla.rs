@@ -99,8 +99,7 @@ pub struct Agreement {
 
 pub async fn load(state: &AppState, id: Uuid) -> AppResult<Option<Agreement>> {
     let row: Option<(i32, i32, Value, bool)> =
-        sqlx::query_as("SELECT response_minutes, notice_minutes, hours, skip_holidays FROM support_slas WHERE id = $1")
-            .bind(id)
+        sqlx::query!(r#"SELECT response_minutes, notice_minutes, hours, skip_holidays FROM support_slas WHERE id = $1"#, id).map(|r| (r.response_minutes, r.notice_minutes, r.hours, r.skip_holidays))
             .fetch_optional(&state.db)
             .await?;
     Ok(row.map(|(response_minutes, notice_minutes, hours, skip_holidays)| Agreement {
@@ -114,23 +113,18 @@ pub async fn load(state: &AppState, id: Uuid) -> AppResult<Option<Agreement>> {
 /// The agreement a ticket falls under: the matching one with the highest priority, else
 /// the default.
 pub async fn choose(state: &AppState, category: Option<Uuid>, criticality: Option<Uuid>, staff: bool) -> AppResult<Option<Uuid>> {
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM support_slas
+    Ok(sqlx::query_scalar!("SELECT id FROM support_slas
          WHERE is_default
             OR ((cardinality(category_ids) = 0 OR $1 = ANY(category_ids))
                 AND (cardinality(criticality_ids) = 0 OR $2 = ANY(criticality_ids))
                 AND (requesters = 'any' OR requesters = CASE WHEN $3 THEN 'staff' ELSE 'external' END))
-         ORDER BY is_default ASC, priority DESC, created_at ASC LIMIT 1",
-    )
-    .bind(category)
-    .bind(criticality)
-    .bind(staff)
+         ORDER BY is_default ASC, priority DESC, created_at ASC LIMIT 1", category, criticality, staff)
     .fetch_optional(&state.db)
     .await?)
 }
 
 pub async fn timezone(state: &AppState) -> AppResult<Tz> {
-    let tz: String = sqlx::query_scalar("SELECT timezone FROM support_settings WHERE id").fetch_one(&state.db).await?;
+    let tz: String = sqlx::query_scalar!("SELECT timezone FROM support_settings WHERE id").fetch_one(&state.db).await?;
     Ok(tz.parse().unwrap_or(chrono_tz::UTC))
 }
 
@@ -144,8 +138,7 @@ pub async fn due(state: &AppState, sla: Option<Uuid>, since: DateTime<Utc>) -> A
     };
     let tz = timezone(state).await?;
     let holidays: HashSet<NaiveDate> = if a.skip_holidays {
-        sqlx::query_scalar::<_, NaiveDate>("SELECT day FROM hr_holidays WHERE day >= $1")
-            .bind(since.date_naive() - Duration::days(1))
+        sqlx::query_scalar!("SELECT day FROM hr_holidays WHERE day >= $1", since.date_naive() - Duration::days(1))
             .fetch_all(&state.db)
             .await?
             .into_iter()
@@ -165,11 +158,9 @@ pub async fn due(state: &AppState, sla: Option<Uuid>, since: DateTime<Utc>) -> A
 /// Every minute: warnings before deadlines, overdue tickets, and closing tickets that have
 /// waited too long for the customer.
 pub async fn run_job(state: &AppState) -> Result<()> {
-    let warn: Vec<(Uuid, i64, String, Option<Uuid>, Option<Uuid>, DateTime<Utc>)> = sqlx::query_as(
-        "UPDATE support_tickets t SET notice_sent = TRUE FROM support_tickets x LEFT JOIN support_slas s ON s.id = x.sla_id
+    let warn: Vec<(Uuid, i64, String, Option<Uuid>, Option<Uuid>, DateTime<Utc>)> = sqlx::query!(r#"UPDATE support_tickets t SET notice_sent = TRUE FROM support_tickets x LEFT JOIN support_slas s ON s.id = x.sla_id
          WHERE x.id = t.id AND t.closed_at IS NULL AND NOT t.notice_sent AND NOT t.is_overdue AND t.notice_at <= now() AND t.deadline_at IS NOT NULL
-         RETURNING t.id, t.number, t.title, t.responsible_id, s.responsible_id, t.deadline_at",
-    )
+         RETURNING t.id AS "id!", t.number AS "number!", t.title AS "title!", t.responsible_id AS "responsible_id?", s.responsible_id AS "c4?", t.deadline_at AS "deadline_at!""#).map(|r| (r.id, r.number, r.title, r.responsible_id, r.c4, r.deadline_at))
     .fetch_all(&state.db)
     .await?;
     for (id, number, title, responsible, sla_responsible, deadline) in warn {
@@ -184,12 +175,10 @@ pub async fn run_job(state: &AppState) -> Result<()> {
         .await;
     }
 
-    let overdue: Vec<(Uuid, i64, String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "UPDATE support_tickets t SET is_overdue = TRUE, overdue_count = t.overdue_count + 1, notice_sent = TRUE
+    let overdue: Vec<(Uuid, i64, String, Option<Uuid>, Option<Uuid>)> = sqlx::query!(r#"UPDATE support_tickets t SET is_overdue = TRUE, overdue_count = t.overdue_count + 1, notice_sent = TRUE
          FROM support_tickets x LEFT JOIN support_slas s ON s.id = x.sla_id
          WHERE x.id = t.id AND t.closed_at IS NULL AND NOT t.is_overdue AND t.deadline_at <= now()
-         RETURNING t.id, t.number, t.title, t.responsible_id, s.responsible_id",
-    )
+         RETURNING t.id, t.number, t.title, t.responsible_id, s.responsible_id AS "c4""#).map(|r| (r.id, r.number, r.title, r.responsible_id, r.c4))
     .fetch_all(&state.db)
     .await?;
     for (id, number, title, responsible, sla_responsible) in overdue {
@@ -207,14 +196,11 @@ pub async fn run_job(state: &AppState) -> Result<()> {
         .await;
     }
 
-    let days: i32 = sqlx::query_scalar("SELECT auto_close_days FROM support_settings WHERE id").fetch_one(&state.db).await?;
+    let days: i32 = sqlx::query_scalar!("SELECT auto_close_days FROM support_settings WHERE id").fetch_one(&state.db).await?;
     if days > 0 {
-        let stale: Vec<Uuid> = sqlx::query_scalar(
-            "UPDATE support_tickets SET closed_at = now(), auto_closed = TRUE, deadline_at = NULL, notice_at = NULL, updated_at = now()
+        let stale: Vec<Uuid> = sqlx::query_scalar!("UPDATE support_tickets SET closed_at = now(), auto_closed = TRUE, deadline_at = NULL, notice_at = NULL, updated_at = now()
              WHERE closed_at IS NULL AND NOT on_hold AND waiting_for = 'customer' AND last_message_at < now() - make_interval(days => $1)
-             RETURNING id",
-        )
-        .bind(days)
+             RETURNING id", days)
         .fetch_all(&state.db)
         .await?;
         for id in stale {

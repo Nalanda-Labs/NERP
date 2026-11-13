@@ -99,8 +99,7 @@ fn setup_key(user: Uuid) -> String {
 
 async fn two_factor_status(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     let enabled_at: Option<DateTime<Utc>> =
-        sqlx::query_scalar("SELECT totp_enabled_at FROM users WHERE id = $1 AND totp_secret IS NOT NULL")
-            .bind(auth.id)
+        sqlx::query_scalar!("SELECT totp_enabled_at FROM users WHERE id = $1 AND totp_secret IS NOT NULL", auth.id)
             .fetch_optional(&state.db)
             .await?
             .flatten();
@@ -131,8 +130,7 @@ async fn two_factor_setup(
     Json(body): Json<PasswordConfirm>,
 ) -> AppResult<Json<Value>> {
     require_password(&state, auth.id, body.password).await?;
-    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-        .bind(auth.id)
+    let email: String = sqlx::query_scalar!("SELECT email FROM users WHERE id = $1", auth.id)
         .fetch_one(&state.db)
         .await?;
     let secret = two_factor::new_secret();
@@ -162,9 +160,7 @@ async fn two_factor_enable(
     if !two_factor::verify_code(&state, auth.id, &secret, &body.code).await? {
         return Err(AppError::bad("that code is not valid; check the time on your phone and try again"));
     }
-    sqlx::query("UPDATE users SET totp_secret = $1, totp_enabled_at = now(), updated_at = now() WHERE id = $2")
-        .bind(&secret)
-        .bind(auth.id)
+    sqlx::query!("UPDATE users SET totp_secret = $1, totp_enabled_at = now(), updated_at = now() WHERE id = $2", &secret, auth.id)
         .execute(&state.db)
         .await?;
     let codes = two_factor::regenerate_recovery_codes(&state.db, auth.id).await?;
@@ -190,12 +186,10 @@ async fn two_factor_disable(
 }
 
 pub async fn disable_two_factor(state: &AppState, user: Uuid) -> AppResult<()> {
-    sqlx::query("UPDATE users SET totp_secret = NULL, totp_enabled_at = NULL, updated_at = now() WHERE id = $1")
-        .bind(user)
+    sqlx::query!("UPDATE users SET totp_secret = NULL, totp_enabled_at = NULL, updated_at = now() WHERE id = $1", user)
         .execute(&state.db)
         .await?;
-    sqlx::query("DELETE FROM user_recovery_codes WHERE user_id = $1")
-        .bind(user)
+    sqlx::query!("DELETE FROM user_recovery_codes WHERE user_id = $1", user)
         .execute(&state.db)
         .await?;
     invalidate_authz(state, &[user]).await
@@ -208,8 +202,7 @@ async fn regenerate_codes(
     Json(body): Json<PasswordConfirm>,
 ) -> AppResult<Json<Value>> {
     require_password(&state, auth.id, body.password).await?;
-    let enabled: bool = sqlx::query_scalar("SELECT totp_secret IS NOT NULL FROM users WHERE id = $1")
-        .bind(auth.id)
+    let enabled: bool = sqlx::query_scalar!(r#"SELECT totp_secret IS NOT NULL AS "v!" FROM users WHERE id = $1"#, auth.id)
         .fetch_one(&state.db)
         .await?;
     if !enabled {

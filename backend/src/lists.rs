@@ -48,21 +48,16 @@ fn rank(l: &str) -> usize {
 
 /// The user's level on a list.
 pub(crate) async fn level(state: &AppState, auth: &AuthUser, list: Uuid) -> AppResult<&'static str> {
-    let (to_all, created_by): (bool, Option<Uuid>) = sqlx::query_as("SELECT to_all, created_by FROM lists WHERE id = $1")
-        .bind(list)
+    let (to_all, created_by): (bool, Option<Uuid>) = sqlx::query!(r#"SELECT to_all, created_by FROM lists WHERE id = $1"#, list).map(|r| (r.to_all, r.created_by))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("list"))?;
     if auth.can(perm::LISTS) || created_by == Some(auth.id) {
         return Ok("manage");
     }
-    let rows: Vec<String> = sqlx::query_scalar(
-        "WITH RECURSIVE mine AS (SELECT department_id AS id FROM user_departments WHERE user_id = $2
+    let rows: Vec<String> = sqlx::query_scalar!("WITH RECURSIVE mine AS (SELECT department_id AS id FROM user_departments WHERE user_id = $2
                                  UNION SELECT d.parent_id FROM departments d JOIN mine m ON d.id = m.id WHERE d.parent_id IS NOT NULL)
-         SELECT level FROM list_access WHERE list_id = $1 AND (user_id = $2 OR department_id IN (SELECT id FROM mine))",
-    )
-    .bind(list)
-    .bind(auth.id)
+         SELECT level FROM list_access WHERE list_id = $1 AND (user_id = $2 OR department_id IN (SELECT id FROM mine))", list, auth.id)
     .fetch_all(&state.db)
     .await?;
     let mut best = if to_all { "add" } else { "none" };
@@ -87,10 +82,7 @@ pub(crate) async fn need(state: &AppState, auth: &AuthUser, list: Uuid, want: &s
 
 /// Files in list items are readable by whoever can read the list.
 pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
-    let lists: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT i.list_id FROM list_items i, LATERAL jsonb_each(i.\"values\") v WHERE v.value = to_jsonb($1::text) LIMIT 20",
-    )
-    .bind(file.to_string())
+    let lists: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT i.list_id FROM list_items i, LATERAL jsonb_each(i.\"values\") v WHERE v.value = to_jsonb($1::text) LIMIT 20", file.to_string())
     .fetch_all(&state.db)
     .await?;
     for l in lists {
@@ -116,7 +108,7 @@ struct ListRow {
 }
 
 async fn list_lists(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let rows: Vec<ListRow> = sqlx::query_as("SELECT l.id, l.name, l.description, l.to_all, (SELECT COUNT(*) FROM list_items i WHERE i.list_id = l.id) AS items, l.created_at FROM lists l ORDER BY l.name")
+    let rows: Vec<ListRow> = sqlx::query_as!(ListRow, r#"SELECT l.id AS "id!", l.name AS "name!", l.description AS "description?", l.to_all AS "to_all!", (SELECT COUNT(*) FROM list_items i WHERE i.list_id = l.id) AS "items!", l.created_at AS "created_at!" FROM lists l ORDER BY l.name"#)
         .fetch_all(&state.db)
         .await?;
     let mut out = Vec::new();
@@ -146,7 +138,7 @@ pub(crate) struct Field {
 }
 
 pub(crate) async fn fields(state: &AppState, list: Uuid) -> AppResult<Vec<Field>> {
-    Ok(sqlx::query_as("SELECT id, code, label, kind, options, required FROM list_fields WHERE list_id = $1 ORDER BY sort, label").bind(list).fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(Field, r#"SELECT id AS "id?", code, label, kind, options, required FROM list_fields WHERE list_id = $1 ORDER BY sort, label"#, list).fetch_all(&state.db).await?)
 }
 
 #[derive(Deserialize, Default)]
@@ -178,13 +170,13 @@ struct ListInput {
 }
 
 async fn set_access(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, list: Uuid, a: &Access) -> AppResult<()> {
-    sqlx::query("DELETE FROM list_access WHERE list_id = $1").bind(list).execute(&mut **tx).await?;
+    sqlx::query!("DELETE FROM list_access WHERE list_id = $1", list).execute(&mut **tx).await?;
     for (level, w) in [("read", &a.read), ("add", &a.add), ("manage", &a.manage)] {
         for u in &w.users {
-            sqlx::query("INSERT INTO list_access (list_id, user_id, level) VALUES ($1, $2, $3)").bind(list).bind(u).bind(level).execute(&mut **tx).await?;
+            sqlx::query!("INSERT INTO list_access (list_id, user_id, level) VALUES ($1, $2, $3)", list, u, level).execute(&mut **tx).await?;
         }
         for d in &w.departments {
-            sqlx::query("INSERT INTO list_access (list_id, department_id, level) VALUES ($1, $2, $3)").bind(list).bind(d).bind(level).execute(&mut **tx).await?;
+            sqlx::query!("INSERT INTO list_access (list_id, department_id, level) VALUES ($1, $2, $3)", list, d, level).execute(&mut **tx).await?;
         }
     }
     Ok(())
@@ -222,24 +214,11 @@ pub(crate) async fn save_fields(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, 
         codes.push(code.clone());
         let id: Uuid = match f.id {
             // The kind of an existing field stays (its values were checked against it).
-            Some(id) => sqlx::query_scalar("UPDATE list_fields SET label = $3, options = $4, required = $5, sort = $6 WHERE id = $1 AND list_id = $2 RETURNING id")
-                .bind(id)
-                .bind(list)
-                .bind(&label)
-                .bind(&options)
-                .bind(f.required)
-                .bind(i as i32 * 10)
+            Some(id) => sqlx::query_scalar!("UPDATE list_fields SET label = $3, options = $4, required = $5, sort = $6 WHERE id = $1 AND list_id = $2 RETURNING id", id, list, &label, &options, f.required, i as i32 * 10)
                 .fetch_optional(&mut **tx)
                 .await?
                 .ok_or(AppError::NotFound("field"))?,
-            None => sqlx::query_scalar("INSERT INTO list_fields (list_id, code, label, kind, options, required, sort) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id")
-                .bind(list)
-                .bind(&code)
-                .bind(&label)
-                .bind(&f.kind)
-                .bind(&options)
-                .bind(f.required)
-                .bind(i as i32 * 10)
+            None => sqlx::query_scalar!("INSERT INTO list_fields (list_id, code, label, kind, options, required, sort) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id", list, &code, &label, &f.kind, &options, f.required, i as i32 * 10)
                 .fetch_one(&mut **tx)
                 .await
                 .map_err(|e| match e {
@@ -249,7 +228,7 @@ pub(crate) async fn save_fields(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, 
         };
         keep.push(id);
     }
-    sqlx::query("DELETE FROM list_fields WHERE list_id = $1 AND NOT id = ANY($2)").bind(list).bind(&keep).execute(&mut **tx).await?;
+    sqlx::query!("DELETE FROM list_fields WHERE list_id = $1 AND NOT id = ANY($2)", list, &keep).execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -257,11 +236,7 @@ async fn create_list(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
     auth.require(perm::LISTS)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 120)?;
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO lists (name, description, to_all, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(&name)
-        .bind(clean(b.description.flatten()))
-        .bind(b.to_all.unwrap_or(true))
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO lists (name, description, to_all, created_by) VALUES ($1, $2, $3, $4) RETURNING id", &name, clean(b.description.flatten()), b.to_all.unwrap_or(true), auth.id)
         .fetch_one(&mut *tx)
         .await?;
     if let Some(a) = &b.access {
@@ -274,16 +249,13 @@ async fn create_list(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
 
 async fn get_list(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let l = need(&state, &auth, id, "read").await?;
-    let (name, description, to_all): (String, Option<String>, bool) = sqlx::query_as("SELECT name, description, to_all FROM lists WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (name, description, to_all): (String, Option<String>, bool) = sqlx::query!(r#"SELECT name, description, to_all FROM lists WHERE id = $1"#, id).map(|r| (r.name, r.description, r.to_all)).fetch_one(&state.db).await?;
     let mut v = json!({ "id": id, "name": name, "description": description, "to_all": to_all, "level": l, "fields": fields(&state, id).await? });
-    let wfs: Vec<(Uuid, String, String, bool)> = sqlx::query_as("SELECT id, name, trigger, is_active FROM wf_templates WHERE list_id = $1 ORDER BY name").bind(id).fetch_all(&state.db).await?;
+    let wfs: Vec<(Uuid, String, String, bool)> = sqlx::query!(r#"SELECT id, name, trigger, is_active FROM wf_templates WHERE list_id = $1 ORDER BY name"#, id).map(|r| (r.id, r.name, r.trigger, r.is_active)).fetch_all(&state.db).await?;
     v["workflows"] = json!(wfs.into_iter().map(|(id, n, t, a)| json!({ "id": id, "name": n, "trigger": t, "is_active": a })).collect::<Vec<_>>());
     if l == "manage" {
-        let rows: Vec<(String, Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query_as(
-            "SELECT a.level, a.user_id, a.department_id, COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) FROM list_access a
-             LEFT JOIN users u ON u.id = a.user_id LEFT JOIN departments d ON d.id = a.department_id WHERE a.list_id = $1",
-        )
-        .bind(id)
+        let rows: Vec<(String, Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query!(r#"SELECT a.level, a.user_id, a.department_id, COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) AS "c3" FROM list_access a
+             LEFT JOIN users u ON u.id = a.user_id LEFT JOIN departments d ON d.id = a.department_id WHERE a.list_id = $1"#, id).map(|r| (r.level, r.user_id, r.department_id, r.c3))
         .fetch_all(&state.db)
         .await?;
         let pick = |level: &str| json!({
@@ -299,12 +271,7 @@ async fn update_list(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     need(&state, &auth, id, "manage").await?;
     let name = b.name.as_deref().map(|n| required("name", n, 120)).transpose()?;
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE lists SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END, to_all = COALESCE($5, to_all) WHERE id = $1")
-        .bind(id)
-        .bind(name)
-        .bind(b.description.is_some())
-        .bind(clean(b.description.flatten()))
-        .bind(b.to_all)
+    sqlx::query!("UPDATE lists SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END, to_all = COALESCE($5, to_all) WHERE id = $1", id, name, b.description.is_some(), clean(b.description.flatten()), b.to_all)
         .execute(&mut *tx)
         .await?;
     if let Some(a) = &b.access {
@@ -327,7 +294,7 @@ async fn put_fields(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 
 async fn delete_list(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need(&state, &auth, id, "manage").await?;
-    sqlx::query("DELETE FROM lists WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM lists WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -378,7 +345,7 @@ async fn clean_values(state: &AppState, auth: &AuthUser, fs: &[Field], input: &M
             "checkbox" => json!(v.as_bool().ok_or_else(bad)?),
             "user" => {
                 let id = s.and_then(|x| Uuid::parse_str(x).ok()).ok_or_else(bad)?;
-                let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active)").bind(id).fetch_one(&state.db).await?;
+                let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active) AS "v!""#, id).fetch_one(&state.db).await?;
                 if !ok {
                     return Err(bad());
                 }
@@ -387,7 +354,7 @@ async fn clean_values(state: &AppState, auth: &AuthUser, fs: &[Field], input: &M
             "file" => {
                 let id = s.and_then(|x| Uuid::parse_str(x).ok()).ok_or_else(bad)?;
                 let already = current.and_then(|c| c.get(&f.code)).and_then(Value::as_str) == Some(&id.to_string());
-                let own: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM files WHERE id = $1 AND owner_id = $2)").bind(id).bind(auth.id).fetch_one(&state.db).await?;
+                let own: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM files WHERE id = $1 AND owner_id = $2) AS "v!""#, id, auth.id).fetch_one(&state.db).await?;
                 if !already && !own {
                     return Err(AppError::bad(format!("“{}”: attach a file you uploaded", f.label)));
                 }
@@ -460,7 +427,7 @@ async fn items(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 }
 
 pub(crate) async fn item_row(state: &AppState, id: Uuid) -> AppResult<(Uuid, Option<Uuid>)> {
-    sqlx::query_as("SELECT list_id, created_by FROM list_items WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("item"))
+    sqlx::query!(r#"SELECT list_id, created_by FROM list_items WHERE id = $1"#, id).map(|r| (r.list_id, r.created_by)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("item"))
 }
 
 async fn item_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Value> {
@@ -476,9 +443,9 @@ async fn item_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Val
         let Some(val) = row.values.get(&f.code).and_then(Value::as_str) else { continue };
         let Ok(uid) = Uuid::parse_str(val) else { continue };
         let label: Option<String> = match f.kind.as_str() {
-            "user" => sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(uid).fetch_optional(&state.db).await?,
-            "file" => sqlx::query_scalar("SELECT original_name FROM files WHERE id = $1").bind(uid).fetch_optional(&state.db).await?,
-            "crm" => sqlx::query_scalar("SELECT t.code || ':' || i.title FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1").bind(uid).fetch_optional(&state.db).await?,
+            "user" => sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, uid).fetch_optional(&state.db).await?,
+            "file" => sqlx::query_scalar!("SELECT original_name FROM files WHERE id = $1", uid).fetch_optional(&state.db).await?,
+            "crm" => sqlx::query_scalar!(r#"SELECT t.code || ':' || i.title AS "v!" FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1"#, uid).fetch_optional(&state.db).await?,
             _ => None,
         };
         if let Some(lb) = label {
@@ -524,13 +491,8 @@ async fn create_item(State(state): State<AppState>, auth: AuthUser, Path(list): 
     let fs = fields(&state, list).await?;
     let values = clean_values(&state, &auth, &fs, &b.values, None, true).await?;
     let mut tx = state.db.begin().await?;
-    let n: i64 = sqlx::query_scalar("UPDATE lists SET last_number = last_number + 1 WHERE id = $1 RETURNING last_number").bind(list).fetch_one(&mut *tx).await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO list_items (list_id, number, title, \"values\", created_by, updated_by) VALUES ($1, $2, $3, $4, $5, $5) RETURNING id")
-        .bind(list)
-        .bind(n)
-        .bind(&title)
-        .bind(Value::Object(values))
-        .bind(auth.id)
+    let n: i64 = sqlx::query_scalar!("UPDATE lists SET last_number = last_number + 1 WHERE id = $1 RETURNING last_number", list).fetch_one(&mut *tx).await?;
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO list_items (list_id, number, title, \"values\", created_by, updated_by) VALUES ($1, $2, $3, $4, $5, $5) RETURNING id", list, n, &title, Value::Object(values), auth.id)
         .fetch_one(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -545,14 +507,10 @@ async fn update_item(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         return Err(AppError::Forbidden);
     }
     let title = b.title.as_deref().map(|t| required("title", t, 300)).transpose()?;
-    let current: Value = sqlx::query_scalar("SELECT \"values\" FROM list_items WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let current: Value = sqlx::query_scalar!("SELECT \"values\" FROM list_items WHERE id = $1", id).fetch_one(&state.db).await?;
     let fs = fields(&state, list).await?;
     let values = clean_values(&state, &auth, &fs, &b.values, Some(&current), false).await?;
-    sqlx::query("UPDATE list_items SET title = COALESCE($2, title), \"values\" = $3, updated_by = $4, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(title)
-        .bind(Value::Object(values))
-        .bind(auth.id)
+    sqlx::query!("UPDATE list_items SET title = COALESCE($2, title), \"values\" = $3, updated_by = $4, updated_at = now() WHERE id = $1", id, title, Value::Object(values), auth.id)
         .execute(&state.db)
         .await?;
     crate::workflows::on_item(&state, &auth, list, id, "update").await;
@@ -565,7 +523,7 @@ async fn delete_item(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if l != "manage" && author != Some(auth.id) {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("DELETE FROM list_items WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM list_items WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

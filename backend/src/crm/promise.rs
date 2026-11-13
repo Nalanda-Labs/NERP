@@ -56,7 +56,7 @@ const DAY_UNITS: &[&str] = &["d", "day", "days", "person-day", "man-day"];
 const HORIZON_DAYS: i64 = 365;
 
 async fn company_tz(state: &AppState) -> chrono_tz::Tz {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'default_timezone'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'default_timezone'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(chrono_tz::UTC)
 }
 
@@ -89,20 +89,15 @@ struct Person {
 }
 
 async fn person(state: &AppState, tz: chrono_tz::Tz, id: Uuid, from: NaiveDate, to: NaiveDate, due: NaiveDate) -> AppResult<Option<Person>> {
-    let name: Option<String> = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1 AND is_active").bind(id).fetch_optional(&state.db).await?;
+    let name: Option<String> = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1 AND is_active"#, id).fetch_optional(&state.db).await?;
     let Some(name) = name else { return Ok(None) };
-    let (weekdays, workday): (Vec<i32>, Decimal) = sqlx::query_as("SELECT work_weekdays, workday_hours FROM hr_settings LIMIT 1")
+    let (weekdays, workday): (Vec<i32>, Decimal) = sqlx::query!(r#"SELECT work_weekdays, workday_hours FROM hr_settings LIMIT 1"#).map(|r| (r.work_weekdays, r.workday_hours))
         .fetch_optional(&state.db)
         .await?
         .unwrap_or((vec![1, 2, 3, 4, 5], Decimal::from(8)));
     let workday = num(workday);
-    let holidays: Vec<NaiveDate> = sqlx::query_scalar("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $2").bind(from).bind(to).fetch_all(&state.db).await?;
-    let rota: HashMap<NaiveDate, f64> = sqlx::query_as::<_, (NaiveDate, i32, i32, i32)>(
-        "SELECT r.day, s.start_min, s.end_min, s.break_minutes FROM hr_rota r JOIN hr_shifts s ON s.id = r.shift_id WHERE r.user_id = $1 AND r.day BETWEEN $2 AND $3",
-    )
-    .bind(id)
-    .bind(from)
-    .bind(to)
+    let holidays: Vec<NaiveDate> = sqlx::query_scalar!("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $2", from, to).fetch_all(&state.db).await?;
+    let rota: HashMap<NaiveDate, f64> = sqlx::query!(r#"SELECT r.day, s.start_min, s.end_min, s.break_minutes FROM hr_rota r JOIN hr_shifts s ON s.id = r.shift_id WHERE r.user_id = $1 AND r.day BETWEEN $2 AND $3"#, id, from, to).map(|r| (r.day, r.start_min, r.end_min, r.break_minutes))
     .fetch_all(&state.db)
     .await?
     .into_iter()
@@ -111,12 +106,7 @@ async fn person(state: &AppState, tz: chrono_tz::Tz, id: Uuid, from: NaiveDate, 
         (d, ((len - b).max(0)) as f64 / 60.0)
     })
     .collect();
-    let absences: Vec<(String, NaiveDate, NaiveDate, String)> = sqlx::query_as(
-        "SELECT kind, starts_on, ends_on, status FROM hr_absences WHERE user_id = $1 AND status IN ('approved', 'pending') AND starts_on <= $3 AND ends_on >= $2 ORDER BY starts_on",
-    )
-    .bind(id)
-    .bind(from)
-    .bind(to)
+    let absences: Vec<(String, NaiveDate, NaiveDate, String)> = sqlx::query!(r#"SELECT kind, starts_on, ends_on, status FROM hr_absences WHERE user_id = $1 AND status IN ('approved', 'pending') AND starts_on <= $3 AND ends_on >= $2 ORDER BY starts_on"#, id, from, to).map(|r| (r.kind, r.starts_on, r.ends_on, r.status))
     .fetch_all(&state.db)
     .await?;
     let off = |d: NaiveDate| absences.iter().any(|(_, s, e, st)| st == "approved" && *s <= d && d <= *e);
@@ -125,15 +115,10 @@ async fn person(state: &AppState, tz: chrono_tz::Tz, id: Uuid, from: NaiveDate, 
     let end = tz.from_local_datetime(&(to + Duration::days(1)).and_hms_opt(0, 0, 0).expect("midnight")).earliest().map(|t| t.with_timezone(&Utc)).unwrap_or_else(Utc::now);
     // Their meetings: events they own or were invited to (and didn't decline), each
     // occurrence of repeating ones, overlaps counted once.
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id AND a.user_id = $1
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id AND a.user_id = $1
          WHERE (e.owner_id = $1 OR (a.user_id IS NOT NULL AND a.status <> 'declined')) AND NOT e.all_day
            AND e.starts_at < $3 AND (e.recurrence IS NOT NULL OR e.ends_at > $2)
-         LIMIT 5000",
-    )
-    .bind(id)
-    .bind(start)
-    .bind(end)
+         LIMIT 5000", id, start, end)
     .fetch_all(&state.db)
     .await?;
     let events = crate::calendar::load_events(state, &ids).await?;
@@ -185,13 +170,9 @@ async fn person(state: &AppState, tz: chrono_tz::Tz, id: Uuid, from: NaiveDate, 
     }
     // Open tasks due by the date: what is left of their estimate.
     let due_end = tz.from_local_datetime(&(due + Duration::days(1)).and_hms_opt(0, 0, 0).expect("midnight")).earliest().map(|t| t.with_timezone(&Utc)).unwrap_or_else(Utc::now);
-    let (task_secs, no_estimate): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(GREATEST(t.time_estimate_secs - COALESCE((SELECT SUM(e.seconds) FROM task_time_entries e WHERE e.task_id = t.id), 0), 0)) FILTER (WHERE t.time_estimate_secs > 0), 0)::bigint,
-                COUNT(*) FILTER (WHERE COALESCE(t.time_estimate_secs, 0) = 0)
-         FROM tasks t WHERE t.responsible_id = $1 AND t.status NOT IN ('done', 'deferred') AND t.deadline IS NOT NULL AND t.deadline < $2",
-    )
-    .bind(id)
-    .bind(due_end)
+    let (task_secs, no_estimate): (i64, i64) = sqlx::query!(r#"SELECT COALESCE(SUM(GREATEST(t.time_estimate_secs - COALESCE((SELECT SUM(e.seconds) FROM task_time_entries e WHERE e.task_id = t.id), 0), 0)) FILTER (WHERE t.time_estimate_secs > 0), 0)::bigint AS "c0!",
+                COUNT(*) FILTER (WHERE COALESCE(t.time_estimate_secs, 0) = 0) AS "c1!"
+         FROM tasks t WHERE t.responsible_id = $1 AND t.status NOT IN ('done', 'deferred') AND t.deadline IS NOT NULL AND t.deadline < $2"#, id, due_end).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
     Ok(Some(Person {
@@ -210,7 +191,7 @@ async fn check(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     if row.entity_type != DEAL {
         return Err(AppError::bad("the promise checker is for deals"));
     }
-    let close: Option<NaiveDate> = sqlx::query_scalar("SELECT close_date FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let close: Option<NaiveDate> = sqlx::query_scalar!(r#"SELECT close_date AS "close_date?" FROM crm_items WHERE id = $1"#, id).fetch_one(&state.db).await?;
     let tz = company_tz(&state).await;
     let today = Utc::now().with_timezone(&tz).date_naive();
     let Some(date) = q.date.or(close) else { return Err(AppError::bad("choose a date to check (the deal has no close date)")) };
@@ -226,16 +207,13 @@ async fn check(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
         return Err(AppError::bad("at most 20 people"));
     }
 
-    let lines: Vec<Line> = sqlx::query_as(
-        "SELECT r.product_id, COALESCE(p.name, r.name) AS name, r.quantity, COALESCE(NULLIF(r.unit, ''), p.unit) AS unit, p.is_service
-         FROM crm_item_products r LEFT JOIN crm_products p ON p.id = r.product_id WHERE r.item_id = $1 ORDER BY r.sort",
-    )
-    .bind(id)
+    let lines: Vec<Line> = sqlx::query_as!(Line, r#"SELECT r.product_id AS "product_id?", COALESCE(p.name, r.name) AS "name!", r.quantity AS "quantity!", COALESCE(NULLIF(r.unit, ''), p.unit) AS "unit?", p.is_service AS "is_service?"
+         FROM crm_item_products r LEFT JOIN crm_products p ON p.id = r.product_id WHERE r.item_id = $1 ORDER BY r.sort"#, id)
     .fetch_all(&state.db)
     .await?;
 
     // A day of work is the company's working day.
-    let workday: f64 = sqlx::query_scalar::<_, Decimal>("SELECT workday_hours FROM hr_settings LIMIT 1").fetch_optional(&state.db).await?.map(num).unwrap_or(8.0);
+    let workday: f64 = sqlx::query_scalar!("SELECT workday_hours FROM hr_settings LIMIT 1").fetch_optional(&state.db).await?.map(num).unwrap_or(8.0);
     let mut reasons: Vec<String> = vec![];
     let mut verdict = Verdict::Ok;
     let mut earliest: Option<NaiveDate> = Some(date);
@@ -274,11 +252,8 @@ async fn check(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     }
     let mut goods = vec![];
     for (pid, name, qty) in &need {
-        let (tracked, on_hand): (bool, Option<Decimal>) = sqlx::query_as(
-            "SELECT EXISTS (SELECT 1 FROM inv_stock WHERE product_id = $1),
-                    COALESCE((SELECT SUM(quantity) FROM inv_stock WHERE product_id = $1), (SELECT stock FROM crm_products WHERE id = $1))",
-        )
-        .bind(pid)
+        let (tracked, on_hand): (bool, Option<Decimal>) = sqlx::query!(r#"SELECT EXISTS (SELECT 1 FROM inv_stock WHERE product_id = $1) AS "c0!",
+                    COALESCE((SELECT SUM(quantity) FROM inv_stock WHERE product_id = $1), (SELECT stock FROM crm_products WHERE id = $1)) AS "c1?""#, pid).map(|r| (r.c0, r.c1))
         .fetch_one(&state.db)
         .await?;
         let Some(on_hand) = on_hand else {
@@ -286,24 +261,14 @@ async fn check(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
             continue;
         };
         // Other open deals due by then that need it.
-        let committed: Decimal = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(r.quantity), 0) FROM crm_item_products r JOIN crm_items i ON i.id = r.item_id JOIN crm_stages s ON s.id = i.stage_id
-             WHERE r.product_id = $1 AND i.id <> $2 AND i.entity_type = 2 AND i.deleted_at IS NULL AND s.semantics = 'process' AND i.close_date IS NOT NULL AND i.close_date <= $3",
-        )
-        .bind(pid)
-        .bind(id)
-        .bind(date)
+        let committed: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(r.quantity), 0) AS "v!" FROM crm_item_products r JOIN crm_items i ON i.id = r.item_id JOIN crm_stages s ON s.id = i.stage_id
+             WHERE r.product_id = $1 AND i.id <> $2 AND i.entity_type = 2 AND i.deleted_at IS NULL AND s.semantics = 'process' AND i.close_date IS NOT NULL AND i.close_date <= $3"#, pid, id, date)
         .fetch_one(&state.db)
         .await?;
         // Receipts drafted with a date; those up to a year ahead count for the earliest date.
-        let incoming: Vec<(NaiveDate, Decimal, String)> = sqlx::query_as(
-            "SELECT GREATEST(d.doc_date, $2), SUM(l.quantity), d.number FROM inv_document_lines l JOIN inv_documents d ON d.id = l.document_id
+        let incoming: Vec<(NaiveDate, Decimal, String)> = sqlx::query!(r#"SELECT GREATEST(d.doc_date, $2) AS "c0!", SUM(l.quantity) AS "c1!", d.number AS "number!" FROM inv_document_lines l JOIN inv_documents d ON d.id = l.document_id
              WHERE l.product_id = $1 AND d.kind = 'receipt' AND d.status = 'draft' AND d.doc_date IS NOT NULL AND d.doc_date <= $3
-             GROUP BY 1, 3 ORDER BY 1",
-        )
-        .bind(pid)
-        .bind(today)
-        .bind(date + Duration::days(HORIZON_DAYS))
+             GROUP BY 1, 3 ORDER BY 1"#, pid, today, date + Duration::days(HORIZON_DAYS)).map(|r| (r.c0, r.c1, r.number))
         .fetch_all(&state.db)
         .await?;
         let free = on_hand - committed;

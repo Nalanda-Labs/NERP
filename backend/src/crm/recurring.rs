@@ -48,15 +48,13 @@ pub fn router() -> Router<AppState> {
 async fn run_now(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let row = load_row(&state, id, false).await?;
     require(&state, &auth, row.entity_type, "add", None).await?;
-    let (rule, due_days): (Value, Option<i32>) = sqlx::query_as("SELECT rule, due_days FROM crm_recurring WHERE item_id = $1")
-        .bind(id)
+    let (rule, due_days): (Value, Option<i32>) = sqlx::query!(r#"SELECT rule, due_days FROM crm_recurring WHERE item_id = $1"#, id).map(|r| (r.rule, r.due_days))
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| AppError::bad("this record does not repeat"))?;
     let rule: Recurrence = serde_json::from_value(rule).map_err(|_| AppError::bad("the schedule is damaged; set it again"))?;
     let new = copy(&state, id, due_days, &rule, Some(auth.id)).await?;
-    let (number, code): (i64, String) = sqlx::query_as("SELECT i.number, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1")
-        .bind(new)
+    let (number, code): (i64, String) = sqlx::query!(r#"SELECT i.number, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1"#, new).map(|r| (r.number, r.code))
         .fetch_one(&state.db)
         .await?;
     Ok(Json(json!({ "id": new, "number": number, "code": code })))
@@ -78,8 +76,7 @@ struct RuleRow {
 }
 
 async fn view(state: &AppState, item: Uuid) -> AppResult<Value> {
-    let r: Option<RuleRow> = sqlx::query_as("SELECT rule, due_days, next_run_at, last_run_at, run_count, is_active FROM crm_recurring WHERE item_id = $1")
-        .bind(item)
+    let r: Option<RuleRow> = sqlx::query_as!(RuleRow, r#"SELECT rule, due_days AS "due_days?", next_run_at AS "next_run_at?", last_run_at AS "last_run_at?", run_count, is_active FROM crm_recurring WHERE item_id = $1"#, item)
         .fetch_optional(&state.db)
         .await?;
     Ok(match r {
@@ -126,16 +123,9 @@ async fn put_rule(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
     }
     let next = b.rule.next_after(Utc::now()).ok_or_else(|| AppError::bad("this schedule never comes round again"))?;
     // A changed schedule starts counting again.
-    sqlx::query(
-        "INSERT INTO crm_recurring (item_id, rule, due_days, next_run_at, is_active, created_by)
+    sqlx::query!("INSERT INTO crm_recurring (item_id, rule, due_days, next_run_at, is_active, created_by)
          VALUES ($1, $2, $3, $4, TRUE, $5)
-         ON CONFLICT (item_id) DO UPDATE SET rule = $2, due_days = $3, next_run_at = $4, is_active = TRUE, run_count = 0, updated_at = now()",
-    )
-    .bind(id)
-    .bind(serde_json::to_value(&b.rule).unwrap())
-    .bind(b.due_days)
-    .bind(next)
-    .bind(auth.id)
+         ON CONFLICT (item_id) DO UPDATE SET rule = $2, due_days = $3, next_run_at = $4, is_active = TRUE, run_count = 0, updated_at = now()", id, serde_json::to_value(&b.rule).unwrap(), b.due_days, next, auth.id)
     .execute(&state.db)
     .await?;
     timeline(&state.db, id, "recurring", Some(auth.id), None, json!({ "event": "set", "summary": b.rule.describe() })).await?;
@@ -146,7 +136,7 @@ async fn put_rule(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 async fn delete_rule(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let row = load_row(&state, id, false).await?;
     require(&state, &auth, row.entity_type, "write", row.assigned_to).await?;
-    let n = sqlx::query("DELETE FROM crm_recurring WHERE item_id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM crm_recurring WHERE item_id = $1", id).execute(&state.db).await?.rows_affected();
     if n > 0 {
         timeline(&state.db, id, "recurring", Some(auth.id), None, json!({ "event": "stopped" })).await?;
         broadcast(&state, row.entity_type, id, false).await;
@@ -170,11 +160,9 @@ struct Due {
 
 /// Every minute: makes the copies that are due.
 pub async fn run_due(state: &AppState) -> Result<()> {
-    let due: Vec<Due> = sqlx::query_as(
-        "SELECT r.item_id, r.rule, r.due_days, r.next_run_at, r.run_count, r.created_by
+    let due: Vec<Due> = sqlx::query_as!(Due, r#"SELECT r.item_id, r.rule, r.due_days AS "due_days?", r.next_run_at AS "next_run_at?", r.run_count, r.created_by AS "created_by?"
          FROM crm_recurring r JOIN crm_items i ON i.id = r.item_id
-         WHERE r.is_active AND r.next_run_at <= now() AND i.deleted_at IS NULL ORDER BY r.next_run_at LIMIT 100",
-    )
+         WHERE r.is_active AND r.next_run_at <= now() AND i.deleted_at IS NULL ORDER BY r.next_run_at LIMIT 100"#)
     .fetch_all(&state.db)
     .await?;
     for d in due {
@@ -184,14 +172,8 @@ pub async fn run_due(state: &AppState) -> Result<()> {
         let next = rule.next_after(Utc::now().max(scheduled));
         let runs = d.run_count + 1;
         let finished = next.is_none() || rule.max_runs.is_some_and(|m| runs >= m);
-        let claimed = sqlx::query(
-            "UPDATE crm_recurring SET next_run_at = $1, last_run_at = now(), run_count = run_count + 1, is_active = $2, updated_at = now()
-             WHERE item_id = $3 AND next_run_at = $4",
-        )
-        .bind(if finished { None } else { next })
-        .bind(!finished)
-        .bind(d.item_id)
-        .bind(scheduled)
+        let claimed = sqlx::query!("UPDATE crm_recurring SET next_run_at = $1, last_run_at = now(), run_count = run_count + 1, is_active = $2, updated_at = now()
+             WHERE item_id = $3 AND next_run_at = $4", if finished { None } else { next }, !finished, d.item_id, scheduled)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -215,8 +197,7 @@ pub async fn run_due(state: &AppState) -> Result<()> {
 }
 
 async fn link(state: &AppState, item: Uuid) -> String {
-    let code: Option<String> = sqlx::query_scalar("SELECT t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1")
-        .bind(item)
+    let code: Option<String> = sqlx::query_scalar!("SELECT t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1", item)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -241,17 +222,13 @@ struct Pattern {
 
 /// Makes one copy of the pattern record. Returns the new record.
 pub async fn copy(state: &AppState, source: Uuid, due_days: Option<i32>, rule: &Recurrence, actor: Option<Uuid>) -> AppResult<Uuid> {
-    let p: Pattern = sqlx::query_as(
-        "SELECT i.entity_type, i.title, i.assigned_to, u.is_active AS assignee_active, i.company_id, i.currency, i.opportunity,
-                i.is_manual_amount, i.category_id, i.uf, i.comments
-         FROM crm_items i LEFT JOIN users u ON u.id = i.assigned_to WHERE i.id = $1",
-    )
-    .bind(source)
+    let p: Pattern = sqlx::query_as!(Pattern, r#"SELECT i.entity_type, i.title, i.assigned_to AS "assigned_to?", u.is_active AS "assignee_active?", i.company_id AS "company_id?", i.currency AS "currency?", i.opportunity,
+                i.is_manual_amount, i.category_id AS "category_id?", i.uf, i.comments AS "comments?"
+         FROM crm_items i LEFT JOIN users u ON u.id = i.assigned_to WHERE i.id = $1"#, source)
     .fetch_one(&state.db)
     .await?;
     let t = entity_type_by_id(state, p.entity_type).await?;
-    let contacts: Vec<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort")
-        .bind(source)
+    let contacts: Vec<Uuid> = sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort", source)
         .fetch_all(&state.db)
         .await?;
     let mut m = Map::new();
@@ -281,17 +258,13 @@ pub async fn copy(state: &AppState, source: Uuid, due_days: Option<i32>, rule: &
         m.insert("comments".into(), json!(c));
     }
     let id = create_item(state, &system_auth(), &t, m, Some(source)).await?;
-    sqlx::query(
-        "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+    sqlx::query!("INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
          SELECT $1, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost
-         FROM crm_item_products WHERE item_id = $2",
-    )
-    .bind(id)
-    .bind(source)
+         FROM crm_item_products WHERE item_id = $2", id, source)
     .execute(&state.db)
     .await?;
     totals(state, id).await?;
-    let number: i64 = sqlx::query_scalar("SELECT number FROM crm_items WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let number: i64 = sqlx::query_scalar!("SELECT number FROM crm_items WHERE id = $1", id).fetch_one(&state.db).await?;
     timeline(&state.db, id, "recurring", actor, None, json!({ "event": "copy", "from": source })).await?;
     timeline(&state.db, source, "recurring", actor, None, json!({ "event": "made", "item_id": id, "number": number, "code": t.code, "manual": actor.is_some() })).await?;
     broadcast(state, t.id, id, false).await;

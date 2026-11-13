@@ -293,7 +293,7 @@ async fn next_steps(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         }
     }
     // What this deal did in its current stage so far.
-    let since: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT MAX(entered_at) FROM crm_stage_history WHERE item_id = $1 AND stage_id = $2").bind(id).bind(stage).fetch_one(&state.db).await?;
+    let since: Option<DateTime<Utc>> = sqlx::query_scalar!(r#"SELECT MAX(entered_at) AS "v?" FROM crm_stage_history WHERE item_id = $1 AND stage_id = $2"#, id, stage).fetch_one(&state.db).await?;
     let done: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT DISTINCT x.step FROM ({STEPS}) x WHERE x.item_id = $1 AND x.at >= $2")))
         .bind(id)
         .bind(since.unwrap_or_else(|| Utc::now() - Duration::days(3650)))
@@ -368,14 +368,12 @@ async fn silent_list(State(state): State<AppState>, auth: AuthUser) -> AppResult
     }
     let mut rows = silent(&state).await?;
     rows.sort_by_key(|r| std::cmp::Reverse(r.7));
-    let names: HashMap<Uuid, String> = sqlx::query_as::<_, (Uuid, String)>("SELECT id, trim(first_name || ' ' || last_name) FROM users WHERE id = ANY($1)")
-        .bind(rows.iter().filter_map(|r| r.3).collect::<Vec<_>>())
+    let names: HashMap<Uuid, String> = sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!" FROM users WHERE id = ANY($1)"#, &(rows.iter().filter_map(|r| r.3).collect::<Vec<_>>())).map(|r| (r.id, r.c1))
         .fetch_all(&state.db)
         .await?
         .into_iter()
         .collect();
-    let tasks: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Option<Uuid>)>("SELECT client_id, task_id FROM crm_silent_alerts WHERE client_id = ANY($1)")
-        .bind(rows.iter().map(|r| r.0).collect::<Vec<_>>())
+    let tasks: HashMap<Uuid, Uuid> = sqlx::query!(r#"SELECT client_id, task_id FROM crm_silent_alerts WHERE client_id = ANY($1)"#, &(rows.iter().map(|r| r.0).collect::<Vec<_>>())).map(|r| (r.client_id, r.task_id))
         .fetch_all(&state.db)
         .await?
         .into_iter()
@@ -392,14 +390,12 @@ async fn silent_list(State(state): State<AppState>, auth: AuthUser) -> AppResult
 
 /// Daily: a task to check in with each newly silent client (when the setting is on).
 pub async fn run_silent(state: &AppState) -> anyhow::Result<()> {
-    let on: bool = sqlx::query_scalar("SELECT silent_tasks FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
+    let on: bool = sqlx::query_scalar!("SELECT silent_tasks FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
     if !on {
         return Ok(());
     }
     for (id, name, _code, owner, n, median, last, since) in silent(state).await.map_err(|e| anyhow::anyhow!(e.to_string()))? {
-        let fresh = sqlx::query("INSERT INTO crm_silent_alerts (client_id, last_order_at) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(id)
-            .bind(last)
+        let fresh = sqlx::query!("INSERT INTO crm_silent_alerts (client_id, last_order_at) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, last)
             .execute(&state.db)
             .await?
             .rows_affected();
@@ -408,7 +404,7 @@ pub async fn run_silent(state: &AppState) -> anyhow::Result<()> {
         }
         let who = match owner {
             Some(o) => Some(o),
-            None => sqlx::query_scalar("SELECT u.id FROM users u JOIN user_roles ur ON ur.user_id = u.id JOIN role_permissions rp ON rp.role_id = ur.role_id WHERE u.is_active AND rp.permission IN ('*', 'crm.admin') ORDER BY u.created_at LIMIT 1")
+            None => sqlx::query_scalar!("SELECT u.id FROM users u JOIN user_roles ur ON ur.user_id = u.id JOIN role_permissions rp ON rp.role_id = ur.role_id WHERE u.is_active AND rp.permission IN ('*', 'crm.admin') ORDER BY u.created_at LIMIT 1")
                 .fetch_optional(&state.db)
                 .await?,
         };
@@ -426,7 +422,7 @@ pub async fn run_silent(state: &AppState) -> anyhow::Result<()> {
         };
         match crate::tasks::items::create_task(state, &super::automation::system_auth(), body).await {
             Ok(task) => {
-                sqlx::query("UPDATE crm_silent_alerts SET task_id = $3 WHERE client_id = $1 AND last_order_at = $2").bind(id).bind(last).bind(task).execute(&state.db).await?;
+                sqlx::query!("UPDATE crm_silent_alerts SET task_id = $3 WHERE client_id = $1 AND last_order_at = $2", id, last, task).execute(&state.db).await?;
             }
             Err(e) => tracing::warn!(client = %id, error = ?e, "could not make the check-in task"),
         }
@@ -436,7 +432,7 @@ pub async fn run_silent(state: &AppState) -> anyhow::Result<()> {
 
 async fn get_settings(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
     let (on, digest, email, hours): (bool, bool, bool, i32) =
-        sqlx::query_as("SELECT silent_tasks, attention_digest, attention_email, reply_hours FROM crm_insight_settings WHERE id = 1").fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT silent_tasks, attention_digest, attention_email, reply_hours FROM crm_insight_settings WHERE id = 1"#).map(|r| (r.silent_tasks, r.attention_digest, r.attention_email, r.reply_hours)).fetch_one(&state.db).await?;
     Ok(Json(json!({ "silent_tasks": on, "attention_digest": digest, "attention_email": email, "reply_hours": hours })))
 }
 
@@ -455,14 +451,8 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     if b.reply_hours.is_some_and(|h| !(1..=720).contains(&h)) {
         return Err(AppError::bad("an answer is due within 1 to 720 hours"));
     }
-    sqlx::query(
-        "UPDATE crm_insight_settings SET silent_tasks = COALESCE($1, silent_tasks), attention_digest = COALESCE($2, attention_digest),
-                attention_email = COALESCE($3, attention_email), reply_hours = COALESCE($4, reply_hours) WHERE id = 1",
-    )
-    .bind(b.silent_tasks)
-    .bind(b.attention_digest)
-    .bind(b.attention_email)
-    .bind(b.reply_hours)
+    sqlx::query!("UPDATE crm_insight_settings SET silent_tasks = COALESCE($1, silent_tasks), attention_digest = COALESCE($2, attention_digest),
+                attention_email = COALESCE($3, attention_email), reply_hours = COALESCE($4, reply_hours) WHERE id = 1", b.silent_tasks, b.attention_digest, b.attention_email, b.reply_hours)
     .execute(&state.db)
     .await?;
     if b.silent_tasks == Some(true) {

@@ -249,11 +249,11 @@ fn not_after(der: &[u8]) -> Option<DateTime<Utc>> {
 }
 
 async fn jobs(state: &AppState) -> Vec<Check> {
-    let failed: Vec<(String, i64)> = sqlx::query_as("SELECT kind, COUNT(*) FROM jobs WHERE status = 'failed' AND updated_at > now() - interval '24 hours' GROUP BY kind ORDER BY 2 DESC")
+    let failed: Vec<(String, i64)> = sqlx::query!(r#"SELECT kind AS "kind!", COUNT(*) AS "c1!" FROM jobs WHERE status = 'failed' AND updated_at > now() - interval '24 hours' GROUP BY kind ORDER BY 2 DESC"#).map(|r| (r.kind, r.c1))
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
-    let late: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'pending' AND run_at < now() - interval '10 minutes'").fetch_one(&state.db).await.unwrap_or(0);
+    let late: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM jobs WHERE status = 'pending' AND run_at < now() - interval '10 minutes'"#).fetch_one(&state.db).await.unwrap_or(0);
     let mut out = vec![];
     let other: Vec<&(String, i64)> = failed.iter().filter(|(k, _)| k != crate::jobs::EMAIL_SEND).collect();
     out.push(if other.is_empty() {
@@ -262,10 +262,7 @@ async fn jobs(state: &AppState) -> Vec<Check> {
         let n: i64 = other.iter().map(|x| x.1).sum();
         check("jobs", "Background jobs", Level::Warn, format!("{n} failed in the last 24 hours ({}){}", other.iter().take(4).map(|(k, c)| format!("{k} ×{c}")).collect::<Vec<_>>().join(", "), if late > 0 { format!("; {late} waiting over 10 minutes") } else { String::new() }), Some("/system"))
     });
-    let (sent, failed_mail): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE status = 'done'), COUNT(*) FILTER (WHERE status = 'failed') FROM jobs WHERE kind = $1 AND updated_at > now() - interval '24 hours'",
-    )
-    .bind(crate::jobs::EMAIL_SEND)
+    let (sent, failed_mail): (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) FILTER (WHERE status = 'done') AS "c0!", COUNT(*) FILTER (WHERE status = 'failed') AS "c1!" FROM jobs WHERE kind = $1 AND updated_at > now() - interval '24 hours'"#, crate::jobs::EMAIL_SEND).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await
     .unwrap_or((0, 0));
@@ -278,7 +275,7 @@ async fn jobs(state: &AppState) -> Vec<Check> {
 }
 
 async fn audit_chain(state: &AppState) -> Check {
-    let last: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'audit_verify_last'").fetch_optional(&state.db).await.ok().flatten();
+    let last: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'audit_verify_last'").fetch_optional(&state.db).await.ok().flatten();
     match last {
         None => check("audit", "Audit trail", Level::Warn, "Not verified yet", Some("/audit")),
         Some(v) if v["ok"] != json!(true) => check("audit", "Audit trail", Level::Fail, format!("Doesn't verify: {}", v["problems"][0]["text"].as_str().unwrap_or("records were changed")), Some("/audit")),
@@ -324,9 +321,9 @@ async fn self_test(state: &AppState) -> Vec<Check> {
     // Database: write, read back, remove.
     let probe = Uuid::new_v4().to_string();
     let db = async {
-        sqlx::query("INSERT INTO settings (key, value) VALUES ('health_probe', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value").bind(&probe).execute(&state.db).await?;
-        let back: Value = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'health_probe'").fetch_one(&state.db).await?;
-        sqlx::query("DELETE FROM settings WHERE key = 'health_probe'").execute(&state.db).await?;
+        sqlx::query!("INSERT INTO settings (key, value) VALUES ('health_probe', to_jsonb($1::text)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", &probe).execute(&state.db).await?;
+        let back: Value = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'health_probe'").fetch_one(&state.db).await?;
+        sqlx::query!("DELETE FROM settings WHERE key = 'health_probe'").execute(&state.db).await?;
         anyhow::ensure!(back == json!(probe), "read back something else");
         anyhow::Ok(())
     };
@@ -392,7 +389,7 @@ fn yes() -> bool {
 }
 
 async fn settings(state: &AppState) -> Settings {
-    sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = 'health_settings'")
+    sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'health_settings'")
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -402,9 +399,7 @@ async fn settings(state: &AppState) -> Settings {
 }
 
 async fn store(state: &AppState, key: &str, v: &Value) {
-    let _ = sqlx::query("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()")
-        .bind(key)
-        .bind(v)
+    let _ = sqlx::query!("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key, v)
         .execute(&state.db)
         .await;
 }
@@ -412,7 +407,7 @@ async fn store(state: &AppState, key: &str, v: &Value) {
 /// Runs the checks, keeps the result and alerts on changes.
 pub async fn run(state: &AppState) -> anyhow::Result<Value> {
     let cs = checks(state).await;
-    let prev: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'health_last'").fetch_optional(&state.db).await?;
+    let prev: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'health_last'").fetch_optional(&state.db).await?;
     let result = json!({ "checked_at": Utc::now(), "overall": overall(&cs), "checks": cs });
     store(state, "health_last", &result).await;
     alert(state, prev.as_ref(), &cs).await;
@@ -490,12 +485,12 @@ async fn alert(state: &AppState, prev: Option<&Value>, cs: &[Check]) {
 
 async fn show(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::SYSTEM_MANAGE)?;
-    let last: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'health_last'").fetch_optional(&state.db).await?;
+    let last: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'health_last'").fetch_optional(&state.db).await?;
     let last = match last {
         Some(v) => v,
         None => run(&state).await.map_err(AppError::Internal)?,
     };
-    let test: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'health_test_last'").fetch_optional(&state.db).await?;
+    let test: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'health_test_last'").fetch_optional(&state.db).await?;
     Ok(Json(json!({ "last": last, "self_test": test, "settings": settings(&state).await, "every_minutes": 15 })))
 }
 

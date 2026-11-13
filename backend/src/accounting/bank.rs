@@ -37,7 +37,7 @@ pub fn router() -> Router<AppState> {
 
 /// The bank or cash account and its currency.
 async fn bank_account(state: &AppState, id: Uuid) -> AppResult<(String, String)> {
-    let row: Option<(String, String, Option<String>)> = sqlx::query_as("SELECT name, subtype, currency FROM acc_accounts WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let row: Option<(String, String, Option<String>)> = sqlx::query!(r#"SELECT name, subtype, currency FROM acc_accounts WHERE id = $1"#, id).map(|r| (r.name, r.subtype, r.currency)).fetch_optional(&state.db).await?;
     match row {
         Some((name, s, c)) if s == "bank" || s == "cash" => Ok((name, c.unwrap_or(super::base_currency(state).await?))),
         Some(_) => Err(AppError::bad("statements are imported into bank or cash accounts")),
@@ -266,17 +266,8 @@ async fn import(State(state): State<AppState>, auth: AuthUser, Path(account): Pa
         let n = seen.entry(key.clone()).or_default();
         *n += 1;
         let fp = hex::encode(Sha256::digest(format!("{key}|{n}").as_bytes()));
-        let r = sqlx::query(
-            "INSERT INTO acc_bank_lines (account_id, date, description, reference, amount, fingerprint, imported_by) VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (account_id, fingerprint) DO NOTHING",
-        )
-        .bind(account)
-        .bind(l.date)
-        .bind(l.description.chars().take(1000).collect::<String>())
-        .bind(&l.reference)
-        .bind(l.amount)
-        .bind(fp)
-        .bind(auth.id)
+        let r = sqlx::query!("INSERT INTO acc_bank_lines (account_id, date, description, reference, amount, fingerprint, imported_by) VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (account_id, fingerprint) DO NOTHING", account, l.date, l.description.chars().take(1000).collect::<String>(), l.reference.as_deref(), l.amount, fp, auth.id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -307,14 +298,9 @@ async fn lines(State(state): State<AppState>, auth: AuthUser, Path(account): Pat
     need(&auth, Level::View)?;
     bank_account(&state, account).await?;
     let status = q.status.unwrap_or_else(|| "unmatched".into());
-    let rows: Vec<(Uuid, NaiveDate, String, Option<String>, Decimal, String, Option<Uuid>, Option<i64>)> = sqlx::query_as(
-        "SELECT b.id, b.date, b.description, b.reference, b.amount, b.status, b.line_id, e.number
+    let rows: Vec<(Uuid, NaiveDate, String, Option<String>, Decimal, String, Option<Uuid>, Option<i64>)> = sqlx::query!(r#"SELECT b.id, b.date, b.description, b.reference, b.amount, b.status, b.line_id, e.number
          FROM acc_bank_lines b LEFT JOIN acc_lines l ON l.id = b.line_id LEFT JOIN acc_entries e ON e.id = l.entry_id
-         WHERE b.account_id = $1 AND ($2 = 'all' OR b.status = $2) ORDER BY b.date, b.amount LIMIT $3",
-    )
-    .bind(account)
-    .bind(&status)
-    .bind(q.limit.unwrap_or(500).clamp(1, 2000))
+         WHERE b.account_id = $1 AND ($2 = 'all' OR b.status = $2) ORDER BY b.date, b.amount LIMIT $3"#, account, &status, q.limit.unwrap_or(500).clamp(1, 2000)).map(|r| (r.id, r.date, r.description, r.reference, r.amount, r.status, r.line_id, r.number))
     .fetch_all(&state.db)
     .await?;
     // Suggestions for unmatched lines: same amount, within 15 days.
@@ -337,18 +323,12 @@ async fn summary(State(state): State<AppState>, auth: AuthUser, Path(account): P
     let (name, currency) = bank_account(&state, account).await?;
     let base = super::base_currency(&state).await?;
     // In the account's own currency for foreign-currency accounts.
-    let book: Decimal = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(CASE WHEN l.currency IS NOT NULL THEN l.amount_currency ELSE l.debit - l.credit END), 0)
-         FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = $1 AND e.status <> 'draft'",
-    )
-    .bind(account)
+    let book: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(CASE WHEN l.currency IS NOT NULL THEN l.amount_currency ELSE l.debit - l.credit END), 0) AS "v!"
+         FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = $1 AND e.status <> 'draft'"#, account)
     .fetch_one(&state.db)
     .await?;
-    let (count, unmatched, unmatched_sum, last): (i64, i64, Decimal, Option<NaiveDate>) = sqlx::query_as(
-        "SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'unmatched'), COALESCE(SUM(amount) FILTER (WHERE status = 'unmatched'), 0), MAX(date)
-         FROM acc_bank_lines WHERE account_id = $1",
-    )
-    .bind(account)
+    let (count, unmatched, unmatched_sum, last): (i64, i64, Decimal, Option<NaiveDate>) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", COUNT(*) FILTER (WHERE status = 'unmatched') AS "c1!", COALESCE(SUM(amount) FILTER (WHERE status = 'unmatched'), 0) AS "c2!", MAX(date) AS "c3?"
+         FROM acc_bank_lines WHERE account_id = $1"#, account).map(|r| (r.c0, r.c1, r.c2, r.c3))
     .fetch_one(&state.db)
     .await?;
     let open: Vec<(Uuid, NaiveDate, Decimal, Option<i64>, Option<String>, Option<String>, Uuid)> =
@@ -363,7 +343,7 @@ async fn summary(State(state): State<AppState>, auth: AuthUser, Path(account): P
 /// A statement line, locked, that is still to be matched: (account, date, amount, description).
 async fn open_line(tx: &mut ledger::Tx<'_>, id: Uuid) -> AppResult<(Uuid, NaiveDate, Decimal, String, Option<String>)> {
     let row: Option<(Uuid, NaiveDate, Decimal, String, Option<String>, String)> =
-        sqlx::query_as("SELECT account_id, date, amount, description, reference, status FROM acc_bank_lines WHERE id = $1 FOR UPDATE").bind(id).fetch_optional(&mut **tx).await?;
+        sqlx::query!(r#"SELECT account_id, date, amount, description, reference, status FROM acc_bank_lines WHERE id = $1 FOR UPDATE"#, id).map(|r| (r.account_id, r.date, r.amount, r.description, r.reference, r.status)).fetch_optional(&mut **tx).await?;
     let (a, d, amt, desc, r, st) = row.ok_or(AppError::NotFound("statement line"))?;
     if st != "unmatched" {
         return Err(AppError::bad(format!("this statement line is already {st}")));
@@ -380,11 +360,8 @@ async fn match_line(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     need(&auth, Level::Post)?;
     let mut tx = state.db.begin().await?;
     let (account, _, amount, _, _) = open_line(&mut tx, id).await?;
-    let gl: Option<(Uuid, Decimal, Option<Decimal>, String, Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT l.account_id, l.debit - l.credit, l.amount_currency, e.status, e.reverses, EXISTS (SELECT 1 FROM acc_bank_lines b WHERE b.line_id = l.id)
-         FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.id = $1",
-    )
-    .bind(b.line_id)
+    let gl: Option<(Uuid, Decimal, Option<Decimal>, String, Option<Uuid>, bool)> = sqlx::query!(r#"SELECT l.account_id AS "account_id!", l.debit - l.credit AS "c1!", l.amount_currency AS "amount_currency?", e.status AS "status!", e.reverses AS "reverses?", EXISTS (SELECT 1 FROM acc_bank_lines b WHERE b.line_id = l.id) AS "c5!"
+         FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.id = $1"#, b.line_id).map(|r| (r.account_id, r.c1, r.amount_currency, r.status, r.reverses, r.c5))
     .fetch_optional(&mut *tx)
     .await?;
     let (gl_account, gl_amount, gl_foreign, status, reverses, taken) = gl.ok_or(AppError::NotFound("journal line"))?;
@@ -400,7 +377,7 @@ async fn match_line(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     if gl_foreign.unwrap_or(gl_amount) != amount {
         return Err(AppError::bad(format!("the amounts differ ({} in the books, {amount} on the statement)", gl_foreign.unwrap_or(gl_amount))));
     }
-    sqlx::query("UPDATE acc_bank_lines SET status = 'matched', line_id = $2 WHERE id = $1").bind(id).bind(b.line_id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_bank_lines SET status = 'matched', line_id = $2 WHERE id = $1", id, b.line_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -425,7 +402,7 @@ async fn record_line(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if b.account_id == bank {
         return Err(AppError::bad("choose the other side of the transaction, not the bank account itself"));
     }
-    let sub: Option<String> = sqlx::query_scalar("SELECT subtype FROM acc_accounts WHERE id = $1 AND is_active").bind(b.account_id).fetch_optional(&mut *tx).await?;
+    let sub: Option<String> = sqlx::query_scalar!("SELECT subtype FROM acc_accounts WHERE id = $1 AND is_active", b.account_id).fetch_optional(&mut *tx).await?;
     match sub.as_deref() {
         None => return Err(AppError::bad("that account doesn't exist or is inactive")),
         Some("receivable") | Some("payable") => return Err(AppError::bad("for customers' and suppliers' money, record it as a payment")),
@@ -463,8 +440,8 @@ async fn record_line(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         lines.push(ledger::signed(super::default_account(s.rounding_account, "rounding")?, -diff).text("Rounding"));
     }
     let entry = ledger::post(&mut tx, date, Some(&text), "bank", Some(id), &lines, Some(auth.id)).await?;
-    let bank_line: Uuid = sqlx::query_scalar("SELECT id FROM acc_lines WHERE entry_id = $1 AND account_id = $2 ORDER BY sort LIMIT 1").bind(entry).bind(bank).fetch_one(&mut *tx).await?;
-    sqlx::query("UPDATE acc_bank_lines SET status = 'matched', line_id = $2 WHERE id = $1").bind(id).bind(bank_line).execute(&mut *tx).await?;
+    let bank_line: Uuid = sqlx::query_scalar!("SELECT id FROM acc_lines WHERE entry_id = $1 AND account_id = $2 ORDER BY sort LIMIT 1", entry, bank).fetch_one(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_bank_lines SET status = 'matched', line_id = $2 WHERE id = $1", id, bank_line).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(super::entry_json(&state, entry).await?))
 }
@@ -498,11 +475,10 @@ async fn payment_line(State(state): State<AppState>, auth: AuthUser, Path(id): P
         allocations: b.allocations,
     };
     let (payment, _) = super::payments::record(&state, &auth, p).await?;
-    let line: Uuid = sqlx::query_scalar("SELECT l.id FROM acc_payments p JOIN acc_lines l ON l.entry_id = p.entry_id AND l.account_id = p.account_id WHERE p.id = $1 LIMIT 1")
-        .bind(payment)
+    let line: Uuid = sqlx::query_scalar!("SELECT l.id FROM acc_payments p JOIN acc_lines l ON l.entry_id = p.entry_id AND l.account_id = p.account_id WHERE p.id = $1 LIMIT 1", payment)
         .fetch_one(&state.db)
         .await?;
-    let n = sqlx::query("UPDATE acc_bank_lines SET status = 'matched', line_id = $2 WHERE id = $1 AND status = 'unmatched'").bind(id).bind(line).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("UPDATE acc_bank_lines SET status = 'matched', line_id = $2 WHERE id = $1 AND status = 'unmatched'", id, line).execute(&state.db).await?.rows_affected();
     if n == 0 {
         tracing::warn!(line = %id, "a statement line was matched by someone else while its payment was recorded");
     }
@@ -511,7 +487,7 @@ async fn payment_line(State(state): State<AppState>, auth: AuthUser, Path(id): P
 
 async fn ignore_line(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
-    let n = sqlx::query("UPDATE acc_bank_lines SET status = 'ignored' WHERE id = $1 AND status = 'unmatched'").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("UPDATE acc_bank_lines SET status = 'ignored' WHERE id = $1 AND status = 'unmatched'", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::bad("only unmatched statement lines can be ignored"));
     }
@@ -521,7 +497,7 @@ async fn ignore_line(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 /// Undoes a match (or an ignore); an entry recorded from the line stays (reverse it if wrong).
 async fn unmatch_line(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need(&auth, Level::Post)?;
-    sqlx::query("UPDATE acc_bank_lines SET status = 'unmatched', line_id = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE acc_bank_lines SET status = 'unmatched', line_id = NULL WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

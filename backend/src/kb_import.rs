@@ -431,16 +431,11 @@ async fn import(State(state): State<AppState>, auth: AuthUser, Path(space): Path
     // Make the pages (so links between them can point to their ids), then fill in bodies.
     let mut ids: HashMap<String, Uuid> = HashMap::new();
     let mut tx = state.db.begin().await?;
-    let mut sort: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) FROM kb_pages WHERE space_id = $1 AND parent_id IS NOT DISTINCT FROM $2").bind(space).bind(b.parent_id).fetch_one(&mut *tx).await?;
+    let mut sort: i32 = sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) AS "v!" FROM kb_pages WHERE space_id = $1 AND parent_id IS NOT DISTINCT FROM $2"#, space, b.parent_id).fetch_one(&mut *tx).await?;
     for d in &list {
         sort += 10;
         let parent = d.parent.as_ref().and_then(|p| ids.get(p).copied()).or(b.parent_id);
-        let id: Uuid = sqlx::query_scalar("INSERT INTO kb_pages (space_id, parent_id, title, body, sort, created_by, updated_by) VALUES ($1, $2, $3, '', $4, $5, $5) RETURNING id")
-            .bind(space)
-            .bind(parent)
-            .bind(&d.title)
-            .bind(sort)
-            .bind(auth.id)
+        let id: Uuid = sqlx::query_scalar!("INSERT INTO kb_pages (space_id, parent_id, title, body, sort, created_by, updated_by) VALUES ($1, $2, $3, '', $4, $5, $5) RETURNING id", space, parent, &d.title, sort, auth.id)
             .fetch_one(&mut *tx)
             .await?;
         ids.insert(d.path.clone(), id);
@@ -471,15 +466,15 @@ async fn import(State(state): State<AppState>, auth: AuthUser, Path(space): Path
                         f
                     }
                 };
-                sqlx::query("INSERT INTO kb_files (page_id, file_id, added_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING").bind(id).bind(fid).bind(auth.id).execute(&state.db).await?;
+                sqlx::query!("INSERT INTO kb_files (page_id, file_id, added_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", id, fid, auth.id).execute(&state.db).await?;
                 body.replace_range(s..e, &format!("/api/files/{fid}/content"));
             }
         }
         if body.len() > MAX_PAGE {
             body.truncate(body.char_indices().take_while(|(i, _)| *i < MAX_PAGE).last().map(|(i, _)| i).unwrap_or(0));
         }
-        sqlx::query("UPDATE kb_pages SET body = $2 WHERE id = $1").bind(id).bind(&body).execute(&state.db).await?;
-        sqlx::query("INSERT INTO kb_versions (page_id, version, title, body, saved_by) VALUES ($1, 1, $2, $3, $4) ON CONFLICT DO NOTHING").bind(id).bind(&d.title).bind(&body).bind(auth.id).execute(&state.db).await?;
+        sqlx::query!("UPDATE kb_pages SET body = $2 WHERE id = $1", id, &body).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO kb_versions (page_id, version, title, body, saved_by) VALUES ($1, 1, $2, $3, $4) ON CONFLICT DO NOTHING", id, &d.title, &body, auth.id).execute(&state.db).await?;
         out.push(json!({ "id": id, "title": d.title, "parent_id": d.parent.as_ref().and_then(|p| ids.get(p)).copied().or(b.parent_id) }));
     }
     Ok(Json(json!({ "pages": out, "images": images })))

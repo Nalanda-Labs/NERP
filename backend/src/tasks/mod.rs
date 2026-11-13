@@ -42,12 +42,9 @@ pub fn router() -> Router<AppState> {
 
 /// Creator, responsible person, assistants and watchers.
 pub async fn participants(state: &AppState, task: Uuid) -> Vec<Uuid> {
-    sqlx::query_scalar(
-        "SELECT created_by FROM tasks WHERE id = $1
+    sqlx::query_scalar!(r#"SELECT created_by AS "created_by!" FROM tasks WHERE id = $1
          UNION SELECT responsible_id FROM tasks WHERE id = $1
-         UNION SELECT user_id FROM task_members WHERE task_id = $1",
-    )
-    .bind(task)
+         UNION SELECT user_id FROM task_members WHERE task_id = $1"#, task)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default()
@@ -64,8 +61,7 @@ pub async fn broadcast_changed(state: &AppState, task: Uuid, project: Option<Uui
     }
     let mut users = participants(state, task).await;
     if let Some(p) = project {
-        let members: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM project_members WHERE project_id = $1")
-            .bind(p)
+        let members: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM project_members WHERE project_id = $1", p)
             .fetch_all(&state.db)
             .await
             .unwrap_or_default();
@@ -91,20 +87,14 @@ pub async fn record_history<'e, E: sqlx::PgExecutor<'e>>(
     old: Option<String>,
     new: Option<String>,
 ) -> sqlx::Result<()> {
-    sqlx::query("INSERT INTO task_history (task_id, actor_id, field, old_value, new_value) VALUES ($1, $2, $3, $4, $5)")
-        .bind(task)
-        .bind(actor)
-        .bind(field)
-        .bind(old)
-        .bind(new)
+    sqlx::query!("INSERT INTO task_history (task_id, actor_id, field, old_value, new_value) VALUES ($1, $2, $3, $4, $5)", task, actor, field, old, new)
         .execute(executor)
         .await?;
     Ok(())
 }
 
 pub async fn user_name(state: &AppState, user: Uuid) -> String {
-    sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1")
-        .bind(user)
+    sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, user)
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -124,8 +114,7 @@ pub async fn notify_task(state: &AppState, users: &[Uuid], kind: &'static str, t
 
 /// Bumps the activity timestamp used for "recently active" sorting.
 pub async fn touch(state: &AppState, task: Uuid) {
-    let _ = sqlx::query("UPDATE tasks SET last_activity_at = now() WHERE id = $1")
-        .bind(task)
+    let _ = sqlx::query!("UPDATE tasks SET last_activity_at = now() WHERE id = $1", task)
         .execute(&state.db)
         .await;
 }

@@ -50,18 +50,15 @@ pub struct Role {
 }
 
 async fn load_roles(state: &AppState, only: Option<Uuid>) -> AppResult<Vec<Role>> {
-    let rows: Vec<RoleRow> = sqlx::query_as(
-        "SELECT r.id, r.code, r.name, r.description, r.is_system,
+    let rows: Vec<RoleRow> = sqlx::query_as!(RoleRow, r#"SELECT r.id AS "id!", r.code AS "code!", r.name AS "name!", r.description AS "description?", r.is_system AS "is_system!",
                 (SELECT COUNT(*) FROM user_roles ur JOIN users u ON u.id = ur.user_id
-                  WHERE ur.role_id = r.id AND u.is_active) AS user_count
+                  WHERE ur.role_id = r.id AND u.is_active) AS "user_count!"
          FROM roles r WHERE ($1::uuid IS NULL OR r.id = $1)
-         ORDER BY r.is_system DESC, r.name",
-    )
-    .bind(only)
+         ORDER BY r.is_system DESC, r.name"#, only)
     .fetch_all(&state.db)
     .await?;
     let perms: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT role_id, permission FROM role_permissions ORDER BY permission")
+        sqlx::query!(r#"SELECT role_id, permission FROM role_permissions ORDER BY permission"#).map(|r| (r.role_id, r.permission))
             .fetch_all(&state.db)
             .await?;
     let mut by_role: HashMap<Uuid, Vec<String>> = HashMap::new();
@@ -138,12 +135,7 @@ async fn create(
     let perms = validate_permissions(&body.permissions)?;
 
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO roles (code, name, description) VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(&code)
-    .bind(&name)
-    .bind(clean(body.description))
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO roles (code, name, description) VALUES ($1, $2, $3) RETURNING id", &code, &name, clean(body.description))
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -153,9 +145,7 @@ async fn create(
             e.into()
         }
     })?;
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) SELECT $1, UNNEST($2::text[])")
-        .bind(id)
-        .bind(&perms)
+    sqlx::query!("INSERT INTO role_permissions (role_id, permission) SELECT $1, UNNEST($2::text[])", id, &perms)
         .execute(&mut *tx)
         .await?;
     audit::record(&mut *tx, Some(auth.id), "role.create", "role", Some(id.to_string()), json!({ "code": code, "permissions": perms }), ip.as_deref()).await;
@@ -186,25 +176,19 @@ async fn update(
 
     let mut tx = state.db.begin().await?;
     if let Some(n) = &body.name {
-        sqlx::query("UPDATE roles SET name = $1, updated_at = now() WHERE id = $2")
-            .bind(required("name", n, 100)?)
-            .bind(id)
+        sqlx::query!("UPDATE roles SET name = $1, updated_at = now() WHERE id = $2", required("name", n, 100)?, id)
             .execute(&mut *tx)
             .await?;
     }
     if let Some(d) = body.description {
-        sqlx::query("UPDATE roles SET description = $1, updated_at = now() WHERE id = $2")
-            .bind(clean(d))
-            .bind(id)
+        sqlx::query!("UPDATE roles SET description = $1, updated_at = now() WHERE id = $2", clean(d), id)
             .execute(&mut *tx)
             .await?;
     }
     if let Some(p) = &body.permissions {
         let perms = validate_permissions(p)?;
-        sqlx::query("DELETE FROM role_permissions WHERE role_id = $1").bind(id).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO role_permissions (role_id, permission) SELECT $1, UNNEST($2::text[])")
-            .bind(id)
-            .bind(&perms)
+        sqlx::query!("DELETE FROM role_permissions WHERE role_id = $1", id).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO role_permissions (role_id, permission) SELECT $1, UNNEST($2::text[])", id, &perms)
             .execute(&mut *tx)
             .await?;
         audit::record(&mut *tx, Some(auth.id), "role.permissions", "role", Some(id.to_string()), json!({ "before": role.permissions, "after": perms }), ip.as_deref()).await;
@@ -218,8 +202,7 @@ async fn update(
 }
 
 async fn invalidate_role_members(state: &AppState, role_id: Uuid) -> AppResult<()> {
-    let members: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM user_roles WHERE role_id = $1")
-        .bind(role_id)
+    let members: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM user_roles WHERE role_id = $1", role_id)
         .fetch_all(&state.db)
         .await?;
     invalidate_authz(state, &members).await
@@ -236,11 +219,10 @@ async fn remove(
     if role.is_system {
         return Err(AppError::bad("built-in roles cannot be deleted"));
     }
-    let members: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM user_roles WHERE role_id = $1")
-        .bind(id)
+    let members: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM user_roles WHERE role_id = $1", id)
         .fetch_all(&state.db)
         .await?;
-    sqlx::query("DELETE FROM roles WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM roles WHERE id = $1", id).execute(&state.db).await?;
     invalidate_authz(&state, &members).await?;
     audit::record(&state.db, Some(auth.id), "role.delete", "role", Some(id.to_string()), json!({ "code": role.code }), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))

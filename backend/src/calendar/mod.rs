@@ -134,7 +134,7 @@ pub(crate) fn occurrences(e: &Event, exceptions: &[DateTime<Utc>], from: DateTim
 }
 
 pub(crate) async fn exceptions(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Uuid, DateTime<Utc>)>> {
-    Ok(sqlx::query_as("SELECT event_id, occurrence_start FROM cal_exceptions WHERE event_id = ANY($1)").bind(ids).fetch_all(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT event_id, occurrence_start FROM cal_exceptions WHERE event_id = ANY($1)"#, ids).map(|r| (r.event_id, r.occurrence_start)).fetch_all(&state.db).await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -210,23 +210,17 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
     users.retain(|u| !closed.contains(u));
     // Events of these people (owned or invited to), or on the group's calendar, that may
     // overlap the range.
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id
          WHERE (CASE WHEN $4::uuid IS NULL THEN e.owner_id = ANY($1) OR a.user_id = ANY($1) ELSE e.project_id = $4 END)
            AND e.starts_at < $3 AND (e.recurrence IS NOT NULL OR e.ends_at >= $2)
-         LIMIT 2000",
-    )
-    .bind(&users)
-    .bind(q.from)
-    .bind(q.to)
-    .bind(group)
+         LIMIT 2000", &users, q.from, q.to, group)
     .fetch_all(&state.db)
     .await?;
     let events = load_events(&state, &ids).await?;
     let ids: Vec<Uuid> = events.iter().map(|(e, _)| e.id).collect();
     let ex = exceptions(&state, &ids).await?;
     let rooms = room_names(&state, events.iter().filter_map(|(e, _)| e.room_id).collect()).await?;
-    let answers: Vec<(Uuid, Uuid, String)> = sqlx::query_as("SELECT event_id, user_id, status FROM cal_attendees WHERE event_id = ANY($1)").bind(&ids).fetch_all(&state.db).await?;
+    let answers: Vec<(Uuid, Uuid, String)> = sqlx::query!(r#"SELECT event_id, user_id, status FROM cal_attendees WHERE event_id = ANY($1)"#, &ids).map(|r| (r.event_id, r.user_id, r.status)).fetch_all(&state.db).await?;
     let mut out: Vec<Entry> = Vec::new();
     for (e, guests) in &events {
         let mine = e.owner_id == auth.id || guests.contains(&auth.id);
@@ -264,12 +258,7 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
         }
     }
     if q.extras.as_deref() == Some("true") && group.is_none() {
-        let tasks: Vec<(Uuid, i64, String, DateTime<Utc>)> = sqlx::query_as(
-            "SELECT id, number, title, deadline FROM tasks WHERE responsible_id = $1 AND status NOT IN ('done', 'deferred') AND deadline >= $2 AND deadline < $3",
-        )
-        .bind(auth.id)
-        .bind(q.from)
-        .bind(q.to)
+        let tasks: Vec<(Uuid, i64, String, DateTime<Utc>)> = sqlx::query!(r#"SELECT id AS "id!", number AS "number!", title AS "title!", deadline AS "deadline!" FROM tasks WHERE responsible_id = $1 AND status NOT IN ('done', 'deferred') AND deadline >= $2 AND deadline < $3"#, auth.id, q.from, q.to).map(|r| (r.id, r.number, r.title, r.deadline))
         .fetch_all(&state.db)
         .await?;
         for (id, number, title, at) in tasks {
@@ -278,15 +267,10 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
                 location: None, color: None, busy: false, owner_id: None, my_status: None, link: Some(format!("/tasks/{id}")),
             });
         }
-        let acts: Vec<(Uuid, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Uuid, String)> = sqlx::query_as(
-            "SELECT a.id, a.kind, a.subject, COALESCE(a.starts_at, a.deadline), a.ends_at, a.item_id, t.code
+        let acts: Vec<(Uuid, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Uuid, String)> = sqlx::query!(r#"SELECT a.id AS "id!", a.kind AS "kind!", a.subject AS "subject!", COALESCE(a.starts_at, a.deadline) AS "c3!", a.ends_at AS "ends_at?", a.item_id AS "item_id!", t.code AS "code!"
              FROM crm_activities a JOIN crm_items i ON i.id = a.item_id JOIN crm_entity_types t ON t.id = i.entity_type
              WHERE a.responsible_id = $1 AND NOT a.is_completed AND a.kind IN ('call', 'meeting') AND a.cal_event_id IS NULL
-               AND COALESCE(a.starts_at, a.deadline) >= $2 AND COALESCE(a.starts_at, a.deadline) < $3 AND i.deleted_at IS NULL",
-        )
-        .bind(auth.id)
-        .bind(q.from)
-        .bind(q.to)
+               AND COALESCE(a.starts_at, a.deadline) >= $2 AND COALESCE(a.starts_at, a.deadline) < $3 AND i.deleted_at IS NULL"#, auth.id, q.from, q.to).map(|r| (r.id, r.kind, r.subject, r.c3, r.ends_at, r.item_id, r.code))
         .fetch_all(&state.db)
         .await?;
         for (id, kind, subject, start, end, item, code) in acts {
@@ -299,15 +283,10 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
     }
     // Bookings with the people shown (those who are a booking resource).
     if group.is_none() {
-        let bookings: Vec<(Uuid, i64, String, Option<String>, DateTime<Utc>, DateTime<Utc>, Uuid)> = sqlx::query_as(
-            "SELECT b.id, b.number, b.client_name, s.name, b.starts_at, b.ends_at, r.user_id FROM bookings b
+        let bookings: Vec<(Uuid, i64, String, Option<String>, DateTime<Utc>, DateTime<Utc>, Uuid)> = sqlx::query!(r#"SELECT b.id AS "id!", b.number AS "number!", b.client_name AS "client_name!", s.name AS "name?", b.starts_at AS "starts_at!", b.ends_at AS "ends_at!", r.user_id AS "user_id!" FROM bookings b
              JOIN booking_resources_used u ON u.booking_id = b.id JOIN booking_resources r ON r.id = u.resource_id
              LEFT JOIN booking_services s ON s.id = b.service_id
-             WHERE r.user_id = ANY($1) AND b.status IN ('booked', 'confirmed', 'came') AND b.starts_at < $3 AND b.ends_at > $2",
-        )
-        .bind(&users)
-        .bind(q.from)
-        .bind(q.to)
+             WHERE r.user_id = ANY($1) AND b.status IN ('booked', 'confirmed', 'came') AND b.starts_at < $3 AND b.ends_at > $2"#, &users, q.from, q.to).map(|r| (r.id, r.number, r.client_name, r.name, r.starts_at, r.ends_at, r.user_id))
         .fetch_all(&state.db)
         .await?;
         for (id, number, client, service, start, end, user) in bookings {
@@ -319,8 +298,7 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
         }
     }
     out.sort_by_key(|e| (e.start, e.title.clone()));
-    let people: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as("SELECT id, trim(first_name || ' ' || last_name), avatar_file_id FROM users WHERE id = ANY($1)")
-        .bind(&users)
+    let people: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!", avatar_file_id AS "avatar_file_id?" FROM users WHERE id = ANY($1)"#, &users).map(|r| (r.id, r.c1, r.avatar_file_id))
         .fetch_all(&state.db)
         .await?;
     Ok(Json(json!({
@@ -332,7 +310,7 @@ async fn view(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Vie
 
 /// Names of meeting rooms.
 async fn room_names(state: &AppState, ids: Vec<Uuid>) -> AppResult<std::collections::HashMap<Uuid, String>> {
-    let rows: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, name FROM booking_resources WHERE id = ANY($1)").bind(&ids).fetch_all(&state.db).await?;
+    let rows: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id, name FROM booking_resources WHERE id = ANY($1)"#, &ids).map(|r| (r.id, r.name)).fetch_all(&state.db).await?;
     Ok(rows.into_iter().collect())
 }
 
@@ -356,7 +334,7 @@ pub(crate) async fn load_events(state: &AppState, ids: &[Uuid]) -> AppResult<Vec
         .bind(ids)
         .fetch_all(&state.db)
         .await?;
-    let guests: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT event_id, user_id FROM cal_attendees WHERE event_id = ANY($1)").bind(ids).fetch_all(&state.db).await?;
+    let guests: Vec<(Uuid, Uuid)> = sqlx::query!(r#"SELECT event_id, user_id FROM cal_attendees WHERE event_id = ANY($1)"#, ids).map(|r| (r.event_id, r.user_id)).fetch_all(&state.db).await?;
     Ok(events
         .into_iter()
         .map(|e| {
@@ -385,12 +363,8 @@ async fn event_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Va
             return Err(AppError::NotFound("event"));
         }
     }
-    let people: Vec<(Uuid, String, Option<Uuid>, Option<String>)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id, a.status FROM users u
-         LEFT JOIN cal_attendees a ON a.user_id = u.id AND a.event_id = $1 WHERE u.id = $2 OR a.event_id = $1 ORDER BY (u.id = $2) DESC, u.first_name",
-    )
-    .bind(id)
-    .bind(e.owner_id)
+    let people: Vec<(Uuid, String, Option<Uuid>, Option<String>)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.avatar_file_id AS "avatar_file_id?", a.status AS "status?" FROM users u
+         LEFT JOIN cal_attendees a ON a.user_id = u.id AND a.event_id = $1 WHERE u.id = $2 OR a.event_id = $1 ORDER BY (u.id = $2) DESC, u.first_name"#, id, e.owner_id).map(|r| (r.id, r.c1, r.avatar_file_id, r.status))
     .fetch_all(&state.db)
     .await?;
     let item: Option<(String, String)> = match e.item_id {
@@ -398,7 +372,7 @@ async fn event_view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Va
         None => None,
     };
     let project: Option<Value> = match e.project_id {
-        Some(g) => sqlx::query_scalar::<_, String>("SELECT name FROM projects WHERE id = $1").bind(g).fetch_optional(&state.db).await?.map(|n| json!({ "id": g, "name": n })),
+        Some(g) => sqlx::query_scalar!("SELECT name FROM projects WHERE id = $1", g).fetch_optional(&state.db).await?.map(|n| json!({ "id": g, "name": n })),
         None => None,
     };
     let rule = e.rule();
@@ -535,7 +509,7 @@ async fn check_guests(state: &AppState, ids: &[Uuid]) -> AppResult<()> {
     if ids.len() > 100 {
         return Err(AppError::bad("at most 100 guests"));
     }
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(ids).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, ids).fetch_one(&state.db).await?;
     if n as usize != ids.len() {
         return Err(AppError::bad("guests must be active employees"));
     }
@@ -634,33 +608,15 @@ async fn create_locked(state: AppState, auth: AuthUser, b: EventInput) -> AppRes
         check_room(&state, r, &draft, &[]).await?;
     }
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO cal_events (owner_id, title, description, location, starts_at, ends_at, all_day, timezone, recurrence, color, item_id, remind_minutes, is_private, project_id, created_by, room_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id",
-    )
-    .bind(owner)
-    .bind(&title)
-    .bind(clean(b.description.flatten()))
-    .bind(clean(b.location.flatten()))
-    .bind(t.starts_at)
-    .bind(t.ends_at)
-    .bind(all_day)
-    .bind(&tz)
-    .bind(rule)
-    .bind(color(b.color.flatten())?)
-    .bind(item)
-    .bind(reminder(b.remind_minutes.flatten())?)
-    .bind(b.is_private.unwrap_or(false))
-    .bind(b.project_id)
-    .bind(auth.id)
-    .bind(room)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO cal_events (owner_id, title, description, location, starts_at, ends_at, all_day, timezone, recurrence, color, item_id, remind_minutes, is_private, project_id, created_by, room_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id", owner, &title, clean(b.description.flatten()), clean(b.location.flatten()), t.starts_at, t.ends_at, all_day, &tz, rule, color(b.color.flatten())?, item, reminder(b.remind_minutes.flatten())?, b.is_private.unwrap_or(false), b.project_id, auth.id, room)
     .fetch_one(&mut *tx)
     .await?;
     for g in &guests {
-        sqlx::query("INSERT INTO cal_attendees (event_id, user_id) VALUES ($1, $2)").bind(id).bind(g).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO cal_attendees (event_id, user_id) VALUES ($1, $2)", id, g).execute(&mut *tx).await?;
     }
     for g in &email_guests {
-        sqlx::query("INSERT INTO cal_email_guests (event_id, email, name) VALUES ($1, $2, $3)").bind(id).bind(&g.email).bind(&g.name).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO cal_email_guests (event_id, email, name) VALUES ($1, $2, $3)", id, &g.email, g.name.as_deref()).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     let (e, _) = load_events(&state, &[id]).await?.remove(0);
@@ -679,7 +635,7 @@ pub(crate) async fn invite(state: &AppState, actor: Uuid, e: &Event, who: &[Uuid
     if who.is_empty() {
         return;
     }
-    let me: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(actor).fetch_one(&state.db).await.unwrap_or_default();
+    let me: String = sqlx::query_scalar!("SELECT first_name FROM users WHERE id = $1", actor).fetch_one(&state.db).await.unwrap_or_default();
     notify(state, who, NewNotification {
         kind: "calendar.invite",
         title: format!("{me} {verb} “{}” on {}", e.title, when(e, e.starts_at)),
@@ -707,7 +663,7 @@ async fn owned(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(Event,
 }
 
 async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<EventInput>) -> AppResult<Json<Value>> {
-    let current: Option<Uuid> = sqlx::query_scalar("SELECT room_id FROM cal_events WHERE id = $1").bind(id).fetch_optional(&state.db).await?.flatten();
+    let current: Option<Uuid> = sqlx::query_scalar!("SELECT room_id FROM cal_events WHERE id = $1", id).fetch_optional(&state.db).await?.flatten();
     let rooms: Vec<Uuid> = b.room_id.flatten().into_iter().chain(current).collect();
     let st = state.clone();
     crate::booking::with_resource_locks(&state, &rooms, || update_locked(st, auth, id, b)).await
@@ -756,35 +712,13 @@ async fn update_locked(state: AppState, auth: AuthUser, id: Uuid, b: EventInput)
     let email_guests = b.email_guests.map(invites::clean_guests).transpose()?;
     let old_email = invites::guests_of(&state, id).await?;
     let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "UPDATE cal_events SET title = COALESCE($2, title),
+    sqlx::query!("UPDATE cal_events SET title = COALESCE($2, title),
              description = CASE WHEN $3 THEN $4 ELSE description END, location = CASE WHEN $5 THEN $6 ELSE location END,
              starts_at = $7, ends_at = $8, all_day = $9, timezone = $10, recurrence = $11,
              color = CASE WHEN $12 THEN $13 ELSE color END, item_id = CASE WHEN $14 THEN $15 ELSE item_id END,
              remind_minutes = CASE WHEN $16 THEN $17 ELSE remind_minutes END, is_private = COALESCE($18, is_private),
              room_id = $19, sequence = sequence + CASE WHEN $20 THEN 1 ELSE 0 END, updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(title)
-    .bind(b.description.is_some())
-    .bind(clean(b.description.flatten()))
-    .bind(b.location.is_some())
-    .bind(clean(b.location.flatten()))
-    .bind(t.starts_at)
-    .bind(t.ends_at)
-    .bind(all_day)
-    .bind(&tz)
-    .bind(rule)
-    .bind(b.color.is_some())
-    .bind(color(b.color.flatten())?)
-    .bind(b.item_id.is_some())
-    .bind(b.item_id.flatten())
-    .bind(b.remind_minutes.is_some())
-    .bind(reminder(b.remind_minutes.flatten())?)
-    .bind(b.is_private)
-    .bind(room)
-    .bind(changed)
+         WHERE id = $1", id, title, b.description.is_some(), clean(b.description.flatten()), b.location.is_some(), clean(b.location.flatten()), t.starts_at, t.ends_at, all_day, &tz, rule, b.color.is_some(), color(b.color.flatten())?, b.item_id.is_some(), b.item_id.flatten(), b.remind_minutes.is_some(), reminder(b.remind_minutes.flatten())?, b.is_private, room, changed)
     .execute(&mut *tx)
     .await?;
     // Guests by email: the removed ones are told it's cancelled (after the save), new ones invited.
@@ -796,10 +730,10 @@ async fn update_locked(state: AppState, auth: AuthUser, id: Uuid, b: EventInput)
             }
         }
         let gone: Vec<Uuid> = email_removed.iter().map(|g| g.id).collect();
-        sqlx::query("DELETE FROM cal_email_guests WHERE id = ANY($1)").bind(&gone).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM cal_email_guests WHERE id = ANY($1)", &gone).execute(&mut *tx).await?;
         for g in list {
             if !old_email.iter().any(|x| x.email == g.email) {
-                sqlx::query("INSERT INTO cal_email_guests (event_id, email, name) VALUES ($1, $2, $3)").bind(id).bind(&g.email).bind(&g.name).execute(&mut *tx).await?;
+                sqlx::query!("INSERT INTO cal_email_guests (event_id, email, name) VALUES ($1, $2, $3)", id, &g.email, g.name.as_deref()).execute(&mut *tx).await?;
             }
         }
     }
@@ -809,19 +743,19 @@ async fn update_locked(state: AppState, auth: AuthUser, id: Uuid, b: EventInput)
         guests.sort();
         guests.dedup();
         check_guests(&state, &guests).await?;
-        sqlx::query("DELETE FROM cal_attendees WHERE event_id = $1 AND NOT user_id = ANY($2)").bind(id).bind(&guests).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM cal_attendees WHERE event_id = $1 AND NOT user_id = ANY($2)", id, &guests).execute(&mut *tx).await?;
         for g in &guests {
             if !old_guests.contains(g) {
-                sqlx::query("INSERT INTO cal_attendees (event_id, user_id) VALUES ($1, $2)").bind(id).bind(g).execute(&mut *tx).await?;
+                sqlx::query!("INSERT INTO cal_attendees (event_id, user_id) VALUES ($1, $2)", id, g).execute(&mut *tx).await?;
                 added.push(*g);
             }
         }
     }
     // A new time asks everyone again.
     if moved {
-        sqlx::query("UPDATE cal_attendees SET status = 'pending' WHERE event_id = $1").bind(id).execute(&mut *tx).await?;
-        sqlx::query("UPDATE cal_email_guests SET status = 'pending', answered_at = NULL WHERE event_id = $1").bind(id).execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM cal_reminders_sent WHERE event_id = $1").bind(id).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE cal_attendees SET status = 'pending' WHERE event_id = $1", id).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE cal_email_guests SET status = 'pending', answered_at = NULL WHERE event_id = $1", id).execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM cal_reminders_sent WHERE event_id = $1", id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     crate::im::sync_linked_chat(&state, crate::im::Link::Event(id)).await?;
@@ -868,11 +802,11 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         guests.push(e.owner_id);
     }
     let email = invites::guests_of(&state, id).await?;
-    let me: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let me: String = sqlx::query_scalar!("SELECT first_name FROM users WHERE id = $1", auth.id).fetch_one(&state.db).await?;
     match q.occurrence.filter(|_| e.recurrence.is_some()) {
         Some(occ) => {
-            sqlx::query("INSERT INTO cal_exceptions (event_id, occurrence_start) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(occ).execute(&state.db).await?;
-            sqlx::query("UPDATE cal_events SET sequence = sequence + 1, updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("INSERT INTO cal_exceptions (event_id, occurrence_start) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, occ).execute(&state.db).await?;
+            sqlx::query!("UPDATE cal_events SET sequence = sequence + 1, updated_at = now() WHERE id = $1", id).execute(&state.db).await?;
             let e2 = load_events(&state, &[id]).await?.remove(0).0;
             invites::send(&state, &e2, &email, invites::Change::OccurrenceCancelled(occ)).await;
             notify(&state, &guests, NewNotification { kind: "calendar.cancelled", title: format!("{me} cancelled “{}” on {}", e.title, when(&e, occ)), body: None, link: Some("/calendar".into()), actor: Some(auth.id) }).await;
@@ -880,7 +814,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         None => {
             let chat = crate::im::linked_chat_people(&state, crate::im::Link::Event(id)).await?;
             invites::send(&state, &Event { sequence: e.sequence + 1, ..e.clone() }, &email, invites::Change::Cancelled).await;
-            sqlx::query("DELETE FROM cal_events WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("DELETE FROM cal_events WHERE id = $1", id).execute(&state.db).await?;
             crate::im::linked_chat_gone(&state, chat).await;
             notify(&state, &guests, NewNotification { kind: "calendar.cancelled", title: format!("{me} cancelled “{}”", e.title), body: None, link: Some("/calendar".into()), actor: Some(auth.id) }).await;
         }
@@ -903,16 +837,16 @@ pub(crate) async fn answer(state: &AppState, user: Uuid, id: Uuid, status: &str)
     if !["accepted", "declined", "tentative"].contains(&status) {
         return Err(AppError::bad("answer accepted, declined or tentative"));
     }
-    let old: Option<String> = sqlx::query_scalar("SELECT status FROM cal_attendees WHERE event_id = $1 AND user_id = $2").bind(id).bind(user).fetch_optional(&state.db).await?;
+    let old: Option<String> = sqlx::query_scalar!("SELECT status FROM cal_attendees WHERE event_id = $1 AND user_id = $2", id, user).fetch_optional(&state.db).await?;
     let Some(old) = old else {
         return Err(AppError::NotFound("invitation"));
     };
     if old == status {
         return Ok(());
     }
-    sqlx::query("UPDATE cal_attendees SET status = $3 WHERE event_id = $1 AND user_id = $2").bind(id).bind(user).bind(status).execute(&state.db).await?;
+    sqlx::query!("UPDATE cal_attendees SET status = $3 WHERE event_id = $1 AND user_id = $2", id, user, status).execute(&state.db).await?;
     let (e, _) = load_events(state, &[id]).await?.remove(0);
-    let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await?;
+    let me: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, user).fetch_one(&state.db).await?;
     let verb = match status { "accepted" => "accepted", "declined" => "declined", _ => "might come to" };
     notify(state, &[e.owner_id], NewNotification { kind: "calendar.answer", title: format!("{me} {verb} “{}”", e.title), body: None, link: Some(format!("/calendar?event={id}")), actor: Some(user) }).await;
     Ok(())
@@ -925,13 +859,7 @@ pub(crate) async fn answer(state: &AppState, user: Uuid, id: Uuid, status: &str)
 /// Events holding a room during [from, to): one interval per occurrence (`except`: an event
 /// being changed).
 pub(crate) async fn room_events(state: &AppState, room: Uuid, from: DateTime<Utc>, to: DateTime<Utc>, except: Option<Uuid>) -> AppResult<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM cal_events WHERE room_id = $1 AND ($4::uuid IS NULL OR id <> $4) AND starts_at < $3 AND (recurrence IS NOT NULL OR ends_at > $2)",
-    )
-    .bind(room)
-    .bind(from)
-    .bind(to)
-    .bind(except)
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM cal_events WHERE room_id = $1 AND ($4::uuid IS NULL OR id <> $4) AND starts_at < $3 AND (recurrence IS NOT NULL OR ends_at > $2)", room, from, to, except)
     .fetch_all(&state.db)
     .await?;
     let events = load_events(state, &ids).await?;
@@ -1029,16 +957,14 @@ fn hash(t: &str) -> String {
 }
 
 async fn feed_info(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let has: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cal_feeds WHERE user_id = $1)").bind(auth.id).fetch_one(&state.db).await?;
+    let has: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM cal_feeds WHERE user_id = $1) AS "v!""#, auth.id).fetch_one(&state.db).await?;
     Ok(Json(json!({ "active": has })))
 }
 
 /// Makes a new link (the old one stops working). The link is shown only now.
 async fn new_feed(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     let token = random_token(24);
-    sqlx::query("INSERT INTO cal_feeds (user_id, token_hash) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET token_hash = $2, created_at = now()")
-        .bind(auth.id)
-        .bind(hash(&token))
+    sqlx::query!("INSERT INTO cal_feeds (user_id, token_hash) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET token_hash = $2, created_at = now()", auth.id, hash(&token))
         .execute(&state.db)
         .await?;
     let base = state.config.public_url.clone();
@@ -1046,7 +972,7 @@ async fn new_feed(State(state): State<AppState>, auth: AuthUser) -> AppResult<Js
 }
 
 async fn drop_feed(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    sqlx::query("DELETE FROM cal_feeds WHERE user_id = $1").bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM cal_feeds WHERE user_id = $1", auth.id).execute(&state.db).await?;
     Ok(Json(json!({ "active": false })))
 }
 
@@ -1057,11 +983,9 @@ async fn drop_feed(State(state): State<AppState>, auth: AuthUser) -> AppResult<J
 /// Every minute: reminds the owner and guests who haven't declined.
 pub async fn run_reminders(state: &AppState) -> Result<()> {
     let now = Utc::now();
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM cal_events WHERE remind_minutes IS NOT NULL
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM cal_events WHERE remind_minutes IS NOT NULL
            AND starts_at <= now() + make_interval(mins => remind_minutes + 1)
-           AND (recurrence IS NOT NULL OR starts_at >= now() - interval '5 minutes')",
-    )
+           AND (recurrence IS NOT NULL OR starts_at >= now() - interval '5 minutes')")
     .fetch_all(&state.db)
     .await?;
     if ids.is_empty() {
@@ -1074,14 +998,11 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
         let excs: Vec<DateTime<Utc>> = ex.iter().filter(|(id, _)| *id == e.id).map(|(_, t)| *t).collect();
         // Occurrences starting from now until the reminder lead time ahead.
         for occ in occurrences(&e, &excs, now, now + lead + Duration::minutes(1)).into_iter().filter(|o| *o >= now && *o - lead <= now) {
-            let declined: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM cal_attendees WHERE event_id = $1 AND status = 'declined'").bind(e.id).fetch_all(&state.db).await?;
+            let declined: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM cal_attendees WHERE event_id = $1 AND status = 'declined'", e.id).fetch_all(&state.db).await?;
             let mut who = vec![e.owner_id];
             who.extend(guests.iter().copied().filter(|g| !declined.contains(g)));
             for u in who {
-                let fresh = sqlx::query("INSERT INTO cal_reminders_sent (event_id, user_id, occurrence_start) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
-                    .bind(e.id)
-                    .bind(u)
-                    .bind(occ)
+                let fresh = sqlx::query!("INSERT INTO cal_reminders_sent (event_id, user_id, occurrence_start) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", e.id, u, occ)
                     .execute(&state.db)
                     .await?
                     .rows_affected();
@@ -1093,7 +1014,7 @@ pub async fn run_reminders(state: &AppState) -> Result<()> {
             }
         }
     }
-    sqlx::query("DELETE FROM cal_reminders_sent WHERE sent_at < now() - interval '60 days'").execute(&state.db).await?;
+    sqlx::query!("DELETE FROM cal_reminders_sent WHERE sent_at < now() - interval '60 days'").execute(&state.db).await?;
     Ok(())
 }
 

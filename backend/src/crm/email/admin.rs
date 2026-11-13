@@ -35,12 +35,10 @@ fn require(auth: &AuthUser) -> AppResult<()> {
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let rows: Vec<(Uuid, Uuid, String, String, String, String, bool, Option<DateTime<Utc>>, Option<String>, i32, i32, i32, i64, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT m.id, m.owner_id, trim(u.first_name || ' ' || u.last_name), u.email, m.email, m.auth_kind, m.sync_enabled, m.last_sync_at, m.last_error,
-                cardinality(m.shared_with), cardinality(m.shared_roles), cardinality(m.shared_departments),
-                (SELECT COUNT(*) FROM crm_emails e WHERE e.mailbox_id = m.id), m.created_at
-         FROM crm_mailboxes m JOIN users u ON u.id = m.owner_id ORDER BY lower(u.last_name), lower(m.email)",
-    )
+    let rows: Vec<(Uuid, Uuid, String, String, String, String, bool, Option<DateTime<Utc>>, Option<String>, i32, i32, i32, i64, DateTime<Utc>)> = sqlx::query!(r#"SELECT m.id AS "id!", m.owner_id AS "owner_id!", trim(u.first_name || ' ' || u.last_name) AS "c2!", u.email AS "email!", m.email AS "c4!", m.auth_kind AS "auth_kind!", m.sync_enabled AS "sync_enabled!", m.last_sync_at AS "last_sync_at?", m.last_error AS "last_error?",
+                cardinality(m.shared_with) AS "c9!", cardinality(m.shared_roles) AS "c10!", cardinality(m.shared_departments) AS "c11!",
+                (SELECT COUNT(*) FROM crm_emails e WHERE e.mailbox_id = m.id) AS "c12!", m.created_at AS "created_at!"
+         FROM crm_mailboxes m JOIN users u ON u.id = m.owner_id ORDER BY lower(u.last_name), lower(m.email)"#).map(|r| (r.id, r.owner_id, r.c2, r.email, r.c4, r.auth_kind, r.sync_enabled, r.last_sync_at, r.last_error, r.c9, r.c10, r.c11, r.c12, r.created_at))
     .fetch_all(&state.db)
     .await?;
     let items: Vec<Value> = rows
@@ -54,11 +52,9 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
             })
         })
         .collect();
-    let without: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.email FROM users u
+    let without: Vec<(Uuid, String, String)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.email AS "email!" FROM users u
          WHERE u.is_active AND NOT u.is_guest AND NOT u.is_system AND NOT EXISTS (SELECT 1 FROM crm_mailboxes m WHERE m.owner_id = u.id)
-         ORDER BY lower(u.last_name) LIMIT 2000",
-    )
+         ORDER BY lower(u.last_name) LIMIT 2000"#).map(|r| (r.id, r.c1, r.email))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -144,11 +140,11 @@ async fn bulk(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bulk>
         };
         let outcome: Result<Uuid, String> = async {
             let s = settings(body, None).map_err(|e| e.to_string())?;
-            let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_mailboxes WHERE owner_id = $1 AND lower(email) = $2)").bind(user).bind(&s.email).fetch_one(&state.db).await.map_err(|e| e.to_string())?;
+            let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_mailboxes WHERE owner_id = $1 AND lower(email) = $2) AS "v!""#, user, &s.email).fetch_one(&state.db).await.map_err(|e| e.to_string())?;
             if taken {
                 return Err("already connected".into());
             }
-            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_mailboxes WHERE owner_id = $1").bind(user).fetch_one(&state.db).await.map_err(|e| e.to_string())?;
+            let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_mailboxes WHERE owner_id = $1"#, user).fetch_one(&state.db).await.map_err(|e| e.to_string())?;
             if n >= 10 {
                 return Err("the employee already has 10 mailboxes".into());
             }
@@ -156,25 +152,9 @@ async fn bulk(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bulk>
             if r.0.is_err() || r.1.is_err() {
                 return Err(format!("could not connect: {}", [r.0.err().map(|e| format!("IMAP {e}")), r.1.err()].into_iter().flatten().collect::<Vec<_>>().join("; ")));
             }
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO crm_mailboxes (owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
+            let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_mailboxes (owner_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, smtp_auth,
                      username, secret, allow_invalid_certs, create_leads, sync_days, sync_enabled)
-                 VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE) RETURNING id",
-            )
-            .bind(user)
-            .bind(&s.email)
-            .bind(&s.imap_host)
-            .bind(s.imap_port)
-            .bind(&s.imap_security)
-            .bind(&s.smtp_host)
-            .bind(s.smtp_port)
-            .bind(&s.smtp_security)
-            .bind(s.smtp_auth)
-            .bind(&s.username)
-            .bind(crypto::seal(&state.config.data_key, &s.password))
-            .bind(s.allow_invalid_certs)
-            .bind(s.create_leads)
-            .bind(s.sync_days)
+                 VALUES ($1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE) RETURNING id", user, &s.email, &s.imap_host, s.imap_port, &s.imap_security, &s.smtp_host, s.smtp_port, &s.smtp_security, s.smtp_auth, &s.username, crypto::seal(&state.config.data_key, &s.password), s.allow_invalid_certs, s.create_leads, s.sync_days)
             .fetch_one(&state.db)
             .await
             .map_err(|e| e.to_string())?;
@@ -212,7 +192,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     require(&auth)?;
     load_mailbox(&state, id).await?;
     if let Some(on) = b.sync_enabled {
-        sqlx::query("UPDATE crm_mailboxes SET sync_enabled = $2, updated_at = now() WHERE id = $1").bind(id).bind(on).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_mailboxes SET sync_enabled = $2, updated_at = now() WHERE id = $1", id, on).execute(&state.db).await?;
         crate::audit::record(&state.db, Some(auth.id), if on { "crm.mailbox.resume" } else { "crm.mailbox.pause" }, "crm_mailbox", Some(id.to_string()), json!({}), None).await;
     }
     Ok(Json(json!({ "ok": true })))
@@ -228,7 +208,7 @@ async fn sync(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let m = load_mailbox(&state, id).await?;
-    sqlx::query("DELETE FROM crm_mailboxes WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_mailboxes WHERE id = $1", id).execute(&state.db).await?;
     crate::audit::record(&state.db, Some(auth.id), "crm.mailbox.disconnect", "crm_mailbox", Some(id.to_string()), json!({ "email": m.email, "by_admin": true }), None).await;
     if m.owner_id != auth.id {
         crate::notify::notify(

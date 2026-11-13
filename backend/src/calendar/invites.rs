@@ -41,7 +41,7 @@ pub struct EmailGuest {
 }
 
 pub async fn guests_of(state: &AppState, event: Uuid) -> AppResult<Vec<EmailGuest>> {
-    Ok(sqlx::query_as("SELECT id, email, name, status FROM cal_email_guests WHERE event_id = $1 ORDER BY email").bind(event).fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(EmailGuest, r#"SELECT id, email, name AS "name?", status FROM cal_email_guests WHERE event_id = $1 ORDER BY email"#, event).fetch_all(&state.db).await?)
 }
 
 /// A guest given in the editor: an email address and, optionally, a name.
@@ -98,13 +98,13 @@ pub fn link(state: &AppState, id: Uuid) -> String {
 }
 
 async fn company(state: &AppState) -> String {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "NERP".into())
 }
 
 /// The event as an iCalendar VEVENT: the owner as organiser, everyone invited as attendees.
 pub async fn vevent(state: &AppState, e: &Event) -> AppResult<ical::VEvent> {
-    let (oname, oemail): (String, String) = sqlx::query_as("SELECT trim(first_name || ' ' || last_name), email FROM users WHERE id = $1").bind(e.owner_id).fetch_one(&state.db).await?;
+    let (oname, oemail): (String, String) = sqlx::query!(r#"SELECT trim(first_name || ' ' || last_name) AS "c0!", email AS "email!" FROM users WHERE id = $1"#, e.owner_id).map(|r| (r.c0, r.email)).fetch_one(&state.db).await?;
     let inside: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT trim(u.first_name || ' ' || u.last_name), u.email, a.status FROM cal_attendees a JOIN users u ON u.id = a.user_id WHERE a.event_id = $1 ORDER BY u.first_name",
     )
@@ -115,7 +115,7 @@ pub async fn vevent(state: &AppState, e: &Event) -> AppResult<ical::VEvent> {
     for g in guests_of(state, e.id).await? {
         attendees.push(ical::Person { name: g.name.clone().unwrap_or_else(|| g.email.clone()), email: g.email, partstat: ical::partstat(&g.status) });
     }
-    let exdates: Vec<DateTime<Utc>> = sqlx::query_scalar("SELECT occurrence_start FROM cal_exceptions WHERE event_id = $1 ORDER BY 1").bind(e.id).fetch_all(&state.db).await?;
+    let exdates: Vec<DateTime<Utc>> = sqlx::query_scalar!("SELECT occurrence_start FROM cal_exceptions WHERE event_id = $1 ORDER BY 1", e.id).fetch_all(&state.db).await?;
     Ok(ical::VEvent {
         uid: format!("{}@nerp", e.id),
         sequence: e.sequence,
@@ -220,16 +220,16 @@ async fn send_inner(state: &AppState, e: &Event, to: &[EmailGuest], change: Chan
 
 async fn guest_and_event(state: &AppState, token: &str) -> AppResult<(EmailGuest, Event)> {
     let id = verify(state, token)?;
-    let (event_id,): (Uuid,) = sqlx::query_as("SELECT event_id FROM cal_email_guests WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("invitation"))?;
-    let g: EmailGuest = sqlx::query_as("SELECT id, email, name, status FROM cal_email_guests WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (event_id,): (Uuid,) = sqlx::query!(r#"SELECT event_id FROM cal_email_guests WHERE id = $1"#, id).map(|r| (r.event_id,)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("invitation"))?;
+    let g: EmailGuest = sqlx::query_as!(EmailGuest, r#"SELECT id, email, name AS "name?", status FROM cal_email_guests WHERE id = $1"#, id).fetch_one(&state.db).await?;
     let (e, _) = super::load_events(state, &[event_id]).await?.into_iter().next().ok_or(AppError::NotFound("invitation"))?;
     Ok((g, e))
 }
 
 async fn view_json(state: &AppState, g: &EmailGuest, e: &Event) -> AppResult<Value> {
-    let organizer: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(e.owner_id).fetch_one(&state.db).await?;
+    let organizer: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, e.owner_id).fetch_one(&state.db).await?;
     let next = if e.recurrence.is_some() {
-        let ex: Vec<DateTime<Utc>> = sqlx::query_scalar("SELECT occurrence_start FROM cal_exceptions WHERE event_id = $1").bind(e.id).fetch_all(&state.db).await?;
+        let ex: Vec<DateTime<Utc>> = sqlx::query_scalar!("SELECT occurrence_start FROM cal_exceptions WHERE event_id = $1", e.id).fetch_all(&state.db).await?;
         super::occurrences(e, &ex, Utc::now(), Utc::now() + chrono::Duration::days(400)).into_iter().next()
     } else {
         None
@@ -262,11 +262,11 @@ async fn rsvp_answer(State(state): State<AppState>, Path(token): Path<String>, J
     if a.status == "declined" && e.slot_link_id.is_some() {
         let mut view = view_json(&state, &g, &e).await?;
         let who = g.name.clone().unwrap_or_else(|| g.email.clone());
-        let mut people: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM cal_attendees WHERE event_id = $1").bind(e.id).fetch_all(&state.db).await?;
+        let mut people: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM cal_attendees WHERE event_id = $1", e.id).fetch_all(&state.db).await?;
         people.push(e.owner_id);
         let chat = crate::im::linked_chat_people(&state, crate::im::Link::Event(e.id)).await?;
         super::slots::booking_cancelled(&state, e.id, &who).await;
-        sqlx::query("DELETE FROM cal_events WHERE id = $1").bind(e.id).execute(&state.db).await?;
+        sqlx::query!("DELETE FROM cal_events WHERE id = $1", e.id).execute(&state.db).await?;
         crate::im::linked_chat_gone(&state, chat).await;
         notify(&state, &people, NewNotification { kind: "calendar.cancelled", title: format!("{who} cancelled “{}” on {}", e.title, super::when(&e, e.starts_at)), body: None, link: Some("/calendar".into()), actor: None }).await;
         view["cancelled"] = json!(true);
@@ -274,12 +274,12 @@ async fn rsvp_answer(State(state): State<AppState>, Path(token): Path<String>, J
         return Ok(Json(view));
     }
     if g.status != a.status {
-        sqlx::query("UPDATE cal_email_guests SET status = $2, answered_at = now() WHERE id = $1").bind(g.id).bind(&a.status).execute(&state.db).await?;
+        sqlx::query!("UPDATE cal_email_guests SET status = $2, answered_at = now() WHERE id = $1", g.id, &a.status).execute(&state.db).await?;
         let who = g.name.clone().unwrap_or_else(|| g.email.clone());
         let verb = match a.status.as_str() { "accepted" => "accepted", "declined" => "declined", _ => "might come to" };
         notify(&state, &[e.owner_id], NewNotification { kind: "calendar.answer", title: format!("{who} {verb} “{}”", e.title), body: None, link: Some(format!("/calendar?event={}", e.id)), actor: None }).await;
     }
-    let g: EmailGuest = sqlx::query_as("SELECT id, email, name, status FROM cal_email_guests WHERE id = $1").bind(g.id).fetch_one(&state.db).await?;
+    let g: EmailGuest = sqlx::query_as!(EmailGuest, r#"SELECT id, email, name AS "name?", status FROM cal_email_guests WHERE id = $1"#, g.id).fetch_one(&state.db).await?;
     Ok(Json(view_json(&state, &g, &e).await?))
 }
 

@@ -101,7 +101,7 @@ pub async fn seal(state: &AppState) -> anyhow::Result<i64> {
     let mut total = 0;
     loop {
         let mut tx = state.db.begin().await?;
-        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)").bind(LOCK).fetch_one(&mut *tx).await?;
+        let locked: bool = sqlx::query_scalar!(r#"SELECT pg_try_advisory_xact_lock($1) AS "v!""#, LOCK).fetch_one(&mut *tx).await?;
         if !locked {
             return Ok(total);
         }
@@ -126,14 +126,8 @@ pub async fn seal(state: &AppState) -> anyhow::Result<i64> {
             hashes.push(h.clone());
             prev = h;
         }
-        sqlx::query(
-            "UPDATE audit_log a SET chain_pos = v.pos, prev_hash = v.prev, hash = v.h
-             FROM UNNEST($1::uuid[], $2::bigint[], $3::bytea[], $4::bytea[]) AS v(id, pos, prev, h) WHERE a.id = v.id",
-        )
-        .bind(&ids)
-        .bind(&poss)
-        .bind(&prevs)
-        .bind(&hashes)
+        sqlx::query!("UPDATE audit_log a SET chain_pos = v.pos, prev_hash = v.prev, hash = v.h
+             FROM UNNEST($1::uuid[], $2::bigint[], $3::bytea[], $4::bytea[]) AS v(id, pos, prev, h) WHERE a.id = v.id", &ids, &poss, &prevs, &hashes)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -147,11 +141,11 @@ pub async fn seal(state: &AppState) -> anyhow::Result<i64> {
 /// Writes a signed checkpoint of the head if it moved and the last one is older than `every`
 /// seconds (0 = whenever it moved).
 async fn anchor(state: &AppState, every: i64) -> anyhow::Result<Option<i64>> {
-    let head: Option<(i64, Vec<u8>)> = sqlx::query_as("SELECT chain_pos, hash FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1")
+    let head: Option<(i64, Vec<u8>)> = sqlx::query!(r#"SELECT chain_pos AS "chain_pos!", hash AS "hash!" FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1"#).map(|r| (r.chain_pos, r.hash))
         .fetch_optional(&state.db)
         .await?;
     let Some((pos, hash)) = head else { return Ok(None) };
-    let last: Option<(i64, DateTime<Utc>)> = sqlx::query_as("SELECT chain_pos, created_at FROM audit_anchors ORDER BY id DESC LIMIT 1").fetch_optional(&state.db).await?;
+    let last: Option<(i64, DateTime<Utc>)> = sqlx::query!(r#"SELECT chain_pos, created_at FROM audit_anchors ORDER BY id DESC LIMIT 1"#).map(|r| (r.chain_pos, r.created_at)).fetch_optional(&state.db).await?;
     if let Some((lpos, at)) = last {
         if lpos == pos || (Utc::now() - at).num_seconds() < every {
             return Ok(None);
@@ -160,11 +154,7 @@ async fn anchor(state: &AppState, every: i64) -> anyhow::Result<Option<i64>> {
     // Truncated to microseconds, as the database keeps it.
     let at = DateTime::<Utc>::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap_or_else(Utc::now);
     let mac = anchor_mac(state, pos, &hash, at);
-    sqlx::query("INSERT INTO audit_anchors (chain_pos, hash, mac, created_at) VALUES ($1, $2, $3, $4)")
-        .bind(pos)
-        .bind(&hash)
-        .bind(&mac)
-        .bind(at)
+    sqlx::query!("INSERT INTO audit_anchors (chain_pos, hash, mac, created_at) VALUES ($1, $2, $3, $4)", pos, &hash, &mac, at)
         .execute(&state.db)
         .await?;
     Ok(Some(pos))
@@ -181,11 +171,8 @@ pub async fn run_verify(state: &AppState) -> anyhow::Result<()> {
     seal(state).await?;
     let r = verify(state, None).await?;
     if r["ok"] != json!(true) {
-        let admins: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id
-             JOIN users u ON u.id = ur.user_id WHERE rp.permission IN ('*', $1) AND u.is_active",
-        )
-        .bind(perm::AUDIT_VIEW)
+        let admins: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id
+             JOIN users u ON u.id = ur.user_id WHERE rp.permission IN ('*', $1) AND u.is_active", perm::AUDIT_VIEW)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -221,7 +208,7 @@ struct Checkpoint {
 async fn verify(state: &AppState, cp: Option<&Checkpoint>) -> anyhow::Result<Value> {
     let started = std::time::Instant::now();
     let mut tx = state.db.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
+    sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await?;
     let mut problems: Vec<Value> = vec![];
     let mut problem = |pos: i64, kind: &str, text: String| {
         if problems.len() < 20 {
@@ -231,7 +218,7 @@ async fn verify(state: &AppState, cp: Option<&Checkpoint>) -> anyhow::Result<Val
     let mut prev = GENESIS.to_vec();
     let mut expect = 1i64;
     let mut hashes: std::collections::HashMap<i64, Vec<u8>> = Default::default();
-    let anchors: Vec<(i64, i64, Vec<u8>, Vec<u8>, DateTime<Utc>)> = sqlx::query_as("SELECT id, chain_pos, hash, mac, created_at FROM audit_anchors ORDER BY id").fetch_all(&mut *tx).await?;
+    let anchors: Vec<(i64, i64, Vec<u8>, Vec<u8>, DateTime<Utc>)> = sqlx::query!(r#"SELECT id, chain_pos, hash, mac, created_at FROM audit_anchors ORDER BY id"#).map(|r| (r.id, r.chain_pos, r.hash, r.mac, r.created_at)).fetch_all(&mut *tx).await?;
     let wanted: std::collections::HashSet<i64> = anchors.iter().map(|a| a.1).chain(cp.map(|c| c.position)).collect();
     loop {
         let rows: Vec<Rec> = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLS} FROM audit_log WHERE chain_pos >= $1 ORDER BY chain_pos LIMIT $2")))
@@ -281,7 +268,7 @@ async fn verify(state: &AppState, cp: Option<&Checkpoint>) -> anyhow::Result<Val
         }
         checkpoint = json!({ "position": c.position, "ok": ok });
     }
-    let unsealed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE chain_pos IS NULL").fetch_one(&mut *tx).await?;
+    let unsealed: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM audit_log WHERE chain_pos IS NULL"#).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     let result = json!({
         "ok": problems.is_empty(),
@@ -295,8 +282,7 @@ async fn verify(state: &AppState, cp: Option<&Checkpoint>) -> anyhow::Result<Val
         "checked_at": Utc::now(),
         "took_ms": started.elapsed().as_millis() as u64,
     });
-    sqlx::query("INSERT INTO settings (key, value) VALUES ('audit_verify_last', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value")
-        .bind(&result)
+    sqlx::query!("INSERT INTO settings (key, value) VALUES ('audit_verify_last', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", &result)
         .execute(&state.db)
         .await?;
     Ok(result)
@@ -304,12 +290,12 @@ async fn verify(state: &AppState, cp: Option<&Checkpoint>) -> anyhow::Result<Val
 
 async fn status(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::AUDIT_VIEW)?;
-    let head: Option<(i64, Vec<u8>, DateTime<Utc>)> = sqlx::query_as("SELECT chain_pos, hash, created_at FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1")
+    let head: Option<(i64, Vec<u8>, DateTime<Utc>)> = sqlx::query!(r#"SELECT chain_pos AS "chain_pos!", hash AS "hash!", created_at AS "created_at!" FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1"#).map(|r| (r.chain_pos, r.hash, r.created_at))
         .fetch_optional(&state.db)
         .await?;
-    let unsealed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE chain_pos IS NULL").fetch_one(&state.db).await?;
-    let last_cp: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT max(created_at) FROM audit_anchors").fetch_one(&state.db).await?;
-    let last: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'audit_verify_last'").fetch_optional(&state.db).await?;
+    let unsealed: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM audit_log WHERE chain_pos IS NULL"#).fetch_one(&state.db).await?;
+    let last_cp: Option<DateTime<Utc>> = sqlx::query_scalar!(r#"SELECT max(created_at) AS "v?" FROM audit_anchors"#).fetch_one(&state.db).await?;
+    let last: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'audit_verify_last'").fetch_optional(&state.db).await?;
     Ok(Json(json!({
         "head": head.map(|(p, h, at)| json!({ "position": p, "hash": hex::encode(h), "at": at })),
         "unsealed": unsealed,
@@ -332,7 +318,7 @@ async fn checkpoint_now(State(state): State<AppState>, auth: AuthUser) -> AppRes
     auth.require(perm::AUDIT_VIEW)?;
     seal(&state).await.map_err(AppError::Internal)?;
     let pos = anchor(&state, 0).await.map_err(AppError::Internal)?;
-    let head: Option<(i64, Vec<u8>)> = sqlx::query_as("SELECT chain_pos, hash FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1")
+    let head: Option<(i64, Vec<u8>)> = sqlx::query!(r#"SELECT chain_pos AS "chain_pos!", hash AS "hash!" FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1"#).map(|r| (r.chain_pos, r.hash))
         .fetch_optional(&state.db)
         .await?;
     Ok(Json(json!({ "new": pos.is_some(), "head": head.map(|(p, h)| json!({ "position": p, "hash": hex::encode(h) })) })))

@@ -82,10 +82,7 @@ pub async fn of_items(state: &AppState, items: &[Uuid]) -> AppResult<Vec<Requisi
     .fetch_all(&state.db)
     .await?;
     let ids: Vec<Uuid> = reqs.iter().map(|r| r.id).collect();
-    let banks: Vec<(Uuid, Uuid, String, Value, bool)> = sqlx::query_as(
-        "SELECT requisite_id, id, name, fields, is_default FROM crm_requisite_banks WHERE requisite_id = ANY($1) ORDER BY is_default DESC, sort",
-    )
-    .bind(&ids)
+    let banks: Vec<(Uuid, Uuid, String, Value, bool)> = sqlx::query!(r#"SELECT requisite_id, id, name, fields, is_default FROM crm_requisite_banks WHERE requisite_id = ANY($1) ORDER BY is_default DESC, sort"#, &ids).map(|r| (r.requisite_id, r.id, r.name, r.fields, r.is_default))
     .fetch_all(&state.db)
     .await?;
     for r in &mut reqs {
@@ -153,14 +150,10 @@ async fn duplicates(state: &AppState, auth: &AuthUser, country: &str, values: &[
     if compacts.is_empty() {
         return Ok(vec![]);
     }
-    let rows: Vec<(Uuid, i16, String, Option<Uuid>, String, String, String)> = sqlx::query_as(
-        "SELECT i.id, i.entity_type, i.title, i.assigned_to, x.code, x.value, r.country
+    let rows: Vec<(Uuid, i16, String, Option<Uuid>, String, String, String)> = sqlx::query!(r#"SELECT i.id, i.entity_type, i.title, i.assigned_to, x.code, x.value, r.country
          FROM crm_requisite_ids x JOIN crm_requisites r ON r.id = x.requisite_id JOIN crm_items i ON i.id = x.item_id
          WHERE x.value = ANY($1) AND i.deleted_at IS NULL AND ($2::uuid IS NULL OR x.item_id <> $2)
-         LIMIT 50",
-    )
-    .bind(&compacts)
-    .bind(exclude_item)
+         LIMIT 50"#, &compacts, exclude_item).map(|r| (r.id, r.entity_type, r.title, r.assigned_to, r.code, r.value, r.country))
     .fetch_all(&state.db)
     .await?;
     let mut vis: HashMap<i16, super::access::Visible> = HashMap::new();
@@ -316,72 +309,41 @@ fn clean(b: Body) -> AppResult<Clean> {
 
 async fn save(state: &AppState, auth: &AuthUser, item: Uuid, et: i16, existing: Option<Uuid>, c: Clean, is_default: bool) -> AppResult<Uuid> {
     let mut tx = state.db.begin().await?;
-    let has_default: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_requisites WHERE item_id = $1 AND is_default AND id IS DISTINCT FROM $2)")
-        .bind(item)
-        .bind(existing)
+    let has_default: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_requisites WHERE item_id = $1 AND is_default AND id IS DISTINCT FROM $2) AS "v!""#, item, existing)
         .fetch_one(&mut *tx)
         .await?;
     // The first requisite becomes the default; choosing another default moves it.
     let default = is_default || !has_default;
     if default && has_default {
-        sqlx::query("UPDATE crm_requisites SET is_default = FALSE WHERE item_id = $1 AND is_default").bind(item).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_requisites SET is_default = FALSE WHERE item_id = $1 AND is_default", item).execute(&mut *tx).await?;
     }
     let id = match existing {
         Some(id) => {
-            sqlx::query(
-                "UPDATE crm_requisites SET kind = $2, country = $3, name = $4, fields = $5, address = $6, is_default = $7, updated_at = now() WHERE id = $1",
-            )
-            .bind(id)
-            .bind(&c.kind)
-            .bind(&c.country)
-            .bind(&c.name)
-            .bind(Value::Object(c.fields.clone()))
-            .bind(&c.address)
-            .bind(default)
+            sqlx::query!("UPDATE crm_requisites SET kind = $2, country = $3, name = $4, fields = $5, address = $6, is_default = $7, updated_at = now() WHERE id = $1", id, &c.kind, &c.country, &c.name, Value::Object(c.fields.clone()), c.address.clone(), default)
             .execute(&mut *tx)
             .await?;
-            sqlx::query("DELETE FROM crm_requisite_banks WHERE requisite_id = $1").bind(id).execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM crm_requisite_ids WHERE requisite_id = $1").bind(id).execute(&mut *tx).await?;
+            sqlx::query!("DELETE FROM crm_requisite_banks WHERE requisite_id = $1", id).execute(&mut *tx).await?;
+            sqlx::query!("DELETE FROM crm_requisite_ids WHERE requisite_id = $1", id).execute(&mut *tx).await?;
             id
         }
         None => {
-            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_requisites WHERE item_id = $1").bind(item).fetch_one(&mut *tx).await?;
+            let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_requisites WHERE item_id = $1"#, item).fetch_one(&mut *tx).await?;
             if n >= 50 {
                 return Err(AppError::bad("a record can have at most 50 requisites"));
             }
-            sqlx::query_scalar(
-                "INSERT INTO crm_requisites (item_id, kind, country, name, fields, address, is_default, sort, created_by)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-            )
-            .bind(item)
-            .bind(&c.kind)
-            .bind(&c.country)
-            .bind(&c.name)
-            .bind(Value::Object(c.fields.clone()))
-            .bind(&c.address)
-            .bind(default)
-            .bind(100 + n as i32)
-            .bind(auth.id)
+            sqlx::query_scalar!("INSERT INTO crm_requisites (item_id, kind, country, name, fields, address, is_default, sort, created_by)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", item, &c.kind, &c.country, &c.name, Value::Object(c.fields.clone()), c.address.clone(), default, 100 + n as i32, auth.id)
             .fetch_one(&mut *tx)
             .await?
         }
     };
     for (i, (name, fields, is_default)) in c.banks.iter().enumerate() {
-        sqlx::query("INSERT INTO crm_requisite_banks (requisite_id, name, fields, is_default, sort) VALUES ($1, $2, $3, $4, $5)")
-            .bind(id)
-            .bind(name)
-            .bind(Value::Object(fields.clone()))
-            .bind(is_default)
-            .bind(i as i32)
+        sqlx::query!("INSERT INTO crm_requisite_banks (requisite_id, name, fields, is_default, sort) VALUES ($1, $2, $3, $4, $5)", id, name, Value::Object(fields.clone()), is_default, i as i32)
             .execute(&mut *tx)
             .await?;
     }
     for (code, value) in &c.ids {
-        sqlx::query("INSERT INTO crm_requisite_ids (requisite_id, item_id, code, value) VALUES ($1, $2, $3, $4)")
-            .bind(id)
-            .bind(item)
-            .bind(code)
-            .bind(value)
+        sqlx::query!("INSERT INTO crm_requisite_ids (requisite_id, item_id, code, value) VALUES ($1, $2, $3, $4)", id, item, code, value)
             .execute(&mut *tx)
             .await?;
     }
@@ -401,7 +363,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser, Path(item): Path<Uu
 
 async fn respond(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Json<Value>> {
     let r = load(state, id).await?;
-    let ids: Vec<(String, String)> = sqlx::query_as("SELECT code, value FROM crm_requisite_ids WHERE requisite_id = $1").bind(id).fetch_all(&state.db).await?;
+    let ids: Vec<(String, String)> = sqlx::query!(r#"SELECT code, value FROM crm_requisite_ids WHERE requisite_id = $1"#, id).map(|r| (r.code, r.value)).fetch_all(&state.db).await?;
     let dups = duplicates(state, auth, &r.country, &ids, Some(r.item_id)).await?;
     let mut v = serde_json::to_value(&r).unwrap();
     v["duplicates"] = json!(dups);
@@ -427,13 +389,10 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     let cur = load(&state, id).await?;
     let et = owner(&state, &auth, cur.item_id, "write").await?;
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM crm_requisites WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM crm_requisites WHERE id = $1", id).execute(&mut *tx).await?;
     if cur.is_default {
         // Promote the next one.
-        sqlx::query(
-            "UPDATE crm_requisites SET is_default = TRUE WHERE id = (SELECT id FROM crm_requisites WHERE item_id = $1 ORDER BY sort, created_at LIMIT 1)",
-        )
-        .bind(cur.item_id)
+        sqlx::query!("UPDATE crm_requisites SET is_default = TRUE WHERE id = (SELECT id FROM crm_requisites WHERE item_id = $1 ORDER BY sort, created_at LIMIT 1)", cur.item_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -451,12 +410,11 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 /// The requisites a deal or lead may be billed to: those of its company and contacts.
 async fn buyer_options(state: &AppState, item: Uuid, company: Option<Uuid>) -> AppResult<Vec<(Requisite, String)>> {
-    let contacts: Vec<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort")
-        .bind(item)
+    let contacts: Vec<Uuid> = sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort", item)
         .fetch_all(&state.db)
         .await?;
     let owners: Vec<Uuid> = company.into_iter().chain(contacts.iter().copied()).collect();
-    let titles: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, title FROM crm_items WHERE id = ANY($1) AND deleted_at IS NULL").bind(&owners).fetch_all(&state.db).await?;
+    let titles: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id, title FROM crm_items WHERE id = ANY($1) AND deleted_at IS NULL"#, &owners).map(|r| (r.id, r.title)).fetch_all(&state.db).await?;
     let mut reqs = of_items(state, &owners).await?;
     // Company first, then contacts in their order; each owner's default first.
     reqs.sort_by_key(|r| (owners.iter().position(|o| *o == r.item_id).unwrap_or(usize::MAX), !r.is_default, r.sort));
@@ -473,8 +431,7 @@ async fn buyer_options(state: &AppState, item: Uuid, company: Option<Uuid>) -> A
 /// or lead if still valid, else the first default among its company and contacts. For a
 /// company or contact, its own default.
 pub async fn buyer_of(state: &AppState, item: Uuid) -> AppResult<Option<Requisite>> {
-    let (et, company, chosen): (i16, Option<Uuid>, Option<Uuid>) = sqlx::query_as("SELECT entity_type, company_id, requisite_id FROM crm_items WHERE id = $1")
-        .bind(item)
+    let (et, company, chosen): (i16, Option<Uuid>, Option<Uuid>) = sqlx::query!(r#"SELECT entity_type, company_id, requisite_id FROM crm_items WHERE id = $1"#, item).map(|r| (r.entity_type, r.company_id, r.requisite_id))
         .fetch_one(&state.db)
         .await?;
     if et == COMPANY || et == CONTACT {
@@ -511,7 +468,7 @@ async fn deal_or_lead(state: &AppState, auth: &AuthUser, item: Uuid, action: &st
         return Err(AppError::bad("only records linked to a client have a buyer"));
     }
     require(state, auth, row.entity_type, action, row.assigned_to).await?;
-    let chosen: Option<Uuid> = sqlx::query_scalar("SELECT requisite_id FROM crm_items WHERE id = $1").bind(item).fetch_one(&state.db).await?;
+    let chosen: Option<Uuid> = sqlx::query_scalar!(r#"SELECT requisite_id AS "requisite_id?" FROM crm_items WHERE id = $1"#, item).fetch_one(&state.db).await?;
     Ok((row.company_id, chosen, row.entity_type))
 }
 
@@ -541,7 +498,7 @@ async fn put_buyer(State(state): State<AppState>, auth: AuthUser, Path(item): Pa
         && !buyer_options(&state, item, company).await?.iter().any(|(x, _)| x.id == r) {
             return Err(AppError::bad("choose requisites of this record's company or contacts"));
         }
-    sqlx::query("UPDATE crm_items SET requisite_id = $2, updated_at = now() WHERE id = $1").bind(item).bind(b.requisite_id).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_items SET requisite_id = $2, updated_at = now() WHERE id = $1", item, b.requisite_id).execute(&state.db).await?;
     broadcast(&state, et, item, false).await;
     get_buyer(State(state), auth, Path(item)).await
 }

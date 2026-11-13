@@ -53,7 +53,7 @@ struct ReportQuery {
 
 /// The caller's time zone, falling back to UTC.
 async fn user_tz(state: &AppState, auth: &AuthUser) -> Tz {
-    let name: Option<String> = sqlx::query_scalar("SELECT timezone FROM users WHERE id = $1").bind(auth.id).fetch_optional(&state.db).await.ok().flatten();
+    let name: Option<String> = sqlx::query_scalar!("SELECT timezone FROM users WHERE id = $1", auth.id).fetch_optional(&state.db).await.ok().flatten();
     name.and_then(|n| n.parse::<Tz>().ok()).unwrap_or(Tz::UTC)
 }
 
@@ -403,9 +403,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
     let (prev_start, prev_end) = (day_start(tz, prev_from), start);
 
     if let Some(c) = q.category_id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2)")
-            .bind(c)
-            .bind(t.id)
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = $2) AS "v!""#, c, t.id)
             .fetch_one(&state.db)
             .await?;
         if !ok {
@@ -429,7 +427,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
     let funnel_category = match q.category_id {
         Some(c) => Some(c),
         None => {
-            let cats: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM crm_categories WHERE entity_type = $1 LIMIT 2").bind(t.id).fetch_all(&state.db).await?;
+            let cats: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM crm_categories WHERE entity_type = $1 LIMIT 2", t.id).fetch_all(&state.db).await?;
             if cats.len() == 1 { cats.first().copied() } else { None }
         }
     };
@@ -498,9 +496,7 @@ struct Targets {
 
 async fn targets_for(state: &AppState, t: &EntityType, scope: &Visible, users: &[Uuid], category: Option<Uuid>, month: NaiveDate, tz: Tz) -> AppResult<Targets> {
     let (start, end) = (day_start(tz, month), day_start(tz, month + Months::new(1)));
-    let rows: Vec<(Option<Uuid>, Decimal)> = sqlx::query_as("SELECT user_id, amount FROM crm_sales_targets WHERE entity_type = $1 AND month = $2")
-        .bind(t.id)
-        .bind(month)
+    let rows: Vec<(Option<Uuid>, Decimal)> = sqlx::query!(r#"SELECT user_id, amount FROM crm_sales_targets WHERE entity_type = $1 AND month = $2"#, t.id, month).map(|r| (r.user_id, r.amount))
         .fetch_all(&state.db)
         .await?;
     let team_target = rows.iter().find(|r| r.0.is_none()).map(|r| r.1);
@@ -519,7 +515,7 @@ async fn targets_for(state: &AppState, t: &EntityType, scope: &Visible, users: &
     }
     ids.sort();
     ids.dedup();
-    let names: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, trim(first_name || ' ' || last_name) FROM users WHERE id = ANY($1)").bind(&ids).fetch_all(&state.db).await?;
+    let names: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!" FROM users WHERE id = ANY($1)"#, &ids).map(|r| (r.id, r.c1)).fetch_all(&state.db).await?;
     let mut list: Vec<UserTarget> = names
         .into_iter()
         .map(|(id, name)| UserTarget {
@@ -554,14 +550,10 @@ async fn get_targets(State(state): State<AppState>, auth: AuthUser, Path(code): 
     }
     let tz = user_tz(&state, &auth).await;
     let month = parse_month(q.month.as_deref(), Utc::now().with_timezone(&tz).date_naive())?;
-    let rows: Vec<(Option<Uuid>, Decimal)> = sqlx::query_as("SELECT user_id, amount FROM crm_sales_targets WHERE entity_type = $1 AND month = $2")
-        .bind(t.id)
-        .bind(month)
+    let rows: Vec<(Option<Uuid>, Decimal)> = sqlx::query!(r#"SELECT user_id, amount FROM crm_sales_targets WHERE entity_type = $1 AND month = $2"#, t.id, month).map(|r| (r.user_id, r.amount))
         .fetch_all(&state.db)
         .await?;
-    let people: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT id, trim(first_name || ' ' || last_name), avatar_file_id FROM users WHERE is_active AND NOT is_system ORDER BY first_name, last_name LIMIT 1000",
-    )
+    let people: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!", avatar_file_id AS "avatar_file_id?" FROM users WHERE is_active AND NOT is_system ORDER BY first_name, last_name LIMIT 1000"#).map(|r| (r.id, r.c1, r.avatar_file_id))
     .fetch_all(&state.db)
     .await?;
     let users: Vec<Value> = people
@@ -612,16 +604,11 @@ async fn put_targets(State(state): State<AppState>, auth: AuthUser, Path(code): 
         check(&r.target)?;
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM crm_sales_targets WHERE entity_type = $1 AND month = $2").bind(t.id).bind(month).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM crm_sales_targets WHERE entity_type = $1 AND month = $2", t.id, month).execute(&mut *tx).await?;
     let entries = std::iter::once((None, b.team_target)).chain(b.users.iter().map(|r| (Some(r.user_id), r.target)));
     for (user, amount) in entries {
         let Some(amount) = amount.filter(|a| !a.is_zero()) else { continue };
-        sqlx::query("INSERT INTO crm_sales_targets (entity_type, user_id, month, amount, updated_by) VALUES ($1, $2, $3, $4, $5)")
-            .bind(t.id)
-            .bind(user)
-            .bind(month)
-            .bind(amount.round_dp(4))
-            .bind(auth.id)
+        sqlx::query!("INSERT INTO crm_sales_targets (entity_type, user_id, month, amount, updated_by) VALUES ($1, $2, $3, $4, $5)", t.id, user, month, amount.round_dp(4), auth.id)
             .execute(&mut *tx)
             .await
             .map_err(|e| match &e {

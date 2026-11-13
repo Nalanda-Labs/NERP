@@ -77,13 +77,13 @@ async fn check(state: &AppState, b: &Input) -> AppResult<()> {
         }
     }
     if let Some(Some(t)) = b.doc_template_id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_doc_templates WHERE id = $1)").bind(t).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_doc_templates WHERE id = $1) AS "v!""#, t).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("that document template doesn't exist"));
         }
     }
     if let Some(t) = &b.entity_types {
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_entity_types WHERE id = ANY($1)").bind(t).fetch_one(&state.db).await?;
+        let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_entity_types WHERE id = ANY($1)"#, t).fetch_one(&state.db).await?;
         if n as usize != t.len() {
             return Err(AppError::bad("unknown record type"));
         }
@@ -109,7 +109,7 @@ async fn one(state: &AppState, id: Uuid) -> AppResult<Value> {
 }
 
 async fn list(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM sign_templates ORDER BY lower(name)").fetch_all(&state.db).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM sign_templates ORDER BY lower(name)").fetch_all(&state.db).await?;
     let mut items = Vec::new();
     for id in ids {
         items.push(one(&state, id).await?);
@@ -122,13 +122,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Inp
     check(&state, &b).await?;
     let name = crate::routes::required("name", b.name.as_deref().unwrap_or(""), 120)?;
     let signers = b.signers.as_deref().ok_or_else(|| AppError::bad("add the signers"))?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO sign_templates (name, message, doc_template_id, signers, entity_types, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id")
-        .bind(&name)
-        .bind(crate::routes::clean(b.message.clone()).map(|m| m.chars().take(2000).collect::<String>()))
-        .bind(b.doc_template_id.flatten())
-        .bind(specs(signers))
-        .bind(b.entity_types.clone().unwrap_or_default())
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO sign_templates (name, message, doc_template_id, signers, entity_types, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", &name, crate::routes::clean(b.message.clone()).map(|m| m.chars().take(2000).collect::<String>()), b.doc_template_id.flatten(), specs(signers), &b.entity_types.clone().unwrap_or_default(), auth.id)
         .fetch_one(&state.db)
         .await?;
     one(&state, id).await.map(Json)
@@ -159,7 +153,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     manage(&auth)?;
-    let n = sqlx::query("DELETE FROM sign_templates WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM sign_templates WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("signing template"));
     }
@@ -192,8 +186,8 @@ async fn user(state: &AppState, id: Option<Uuid>) -> AppResult<Option<(String, S
 /// an email address is reported, so the template isn't sent half-filled.
 pub(crate) async fn resolve(state: &AppState, item: Uuid, sender: Uuid, signers: &Value) -> AppResult<Vec<(String, String)>> {
     let row = load_row(state, item, false).await?;
-    let contact: Option<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort LIMIT 1").bind(item).fetch_optional(&state.db).await?;
-    let company: Option<Uuid> = sqlx::query_scalar("SELECT company_id FROM crm_items WHERE id = $1").bind(item).fetch_one(&state.db).await?;
+    let contact: Option<Uuid> = sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1 ORDER BY is_primary DESC, sort LIMIT 1", item).fetch_optional(&state.db).await?;
+    let company: Option<Uuid> = sqlx::query_scalar!(r#"SELECT company_id AS "company_id?" FROM crm_items WHERE id = $1"#, item).fetch_one(&state.db).await?;
     let mut out: Vec<(String, String)> = Vec::new();
     for s in signers.as_array().cloned().unwrap_or_default() {
         let role = s["role"].as_str().unwrap_or("");
@@ -216,7 +210,7 @@ pub(crate) async fn resolve(state: &AppState, item: Uuid, sender: Uuid, signers:
 }
 
 async fn template_row(state: &AppState, id: Uuid) -> AppResult<(Option<String>, Option<Uuid>, Value, Vec<i16>)> {
-    sqlx::query_as("SELECT message, doc_template_id, signers, entity_types FROM sign_templates WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("signing template"))
+    sqlx::query!(r#"SELECT message, doc_template_id, signers, entity_types FROM sign_templates WHERE id = $1"#, id).map(|r| (r.message, r.doc_template_id, r.signers, r.entity_types)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("signing template"))
 }
 
 async fn preview(State(state): State<AppState>, auth: AuthUser, Path((item, template)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
@@ -238,7 +232,7 @@ pub(crate) async fn start(state: &AppState, by: Uuid, item: Uuid, template: Uuid
     let list = resolve(state, item, by, &signers).await?;
     let doc = match (document, doc_template) {
         (Some(d), _) => {
-            let of: Option<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_documents WHERE id = $1").bind(d).fetch_optional(&state.db).await?;
+            let of: Option<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_documents WHERE id = $1", d).fetch_optional(&state.db).await?;
             if of != Some(item) {
                 return Err(AppError::NotFound("document"));
             }
@@ -247,20 +241,16 @@ pub(crate) async fn start(state: &AppState, by: Uuid, item: Uuid, template: Uuid
         (None, Some(t)) => {
             let sender = crate::auth::load_auth_user(state, by).await?;
             let d = super::docs::api::generate(state, &sender, item, t).await?;
-            let ready: bool = sqlx::query_scalar("SELECT status = 'ready' FROM crm_documents WHERE id = $1").bind(d).fetch_one(&state.db).await?;
+            let ready: bool = sqlx::query_scalar!(r#"SELECT status = 'ready' AS "v!" FROM crm_documents WHERE id = $1"#, d).fetch_one(&state.db).await?;
             if !ready {
-                sqlx::query("INSERT INTO sign_pending (document_id, template_id, requested_by) VALUES ($1, $2, $3) ON CONFLICT (document_id) DO NOTHING")
-                    .bind(d)
-                    .bind(template)
-                    .bind(by)
+                sqlx::query!("INSERT INTO sign_pending (document_id, template_id, requested_by) VALUES ($1, $2, $3) ON CONFLICT (document_id) DO NOTHING", d, template, by)
                     .execute(&state.db)
                     .await?;
                 return Ok(json!({ "status": "preparing", "document_id": d }));
             }
             d
         }
-        (None, None) => sqlx::query_scalar("SELECT id FROM crm_documents WHERE item_id = $1 AND status = 'ready' ORDER BY created_at DESC LIMIT 1")
-            .bind(item)
+        (None, None) => sqlx::query_scalar!("SELECT id FROM crm_documents WHERE item_id = $1 AND status = 'ready' ORDER BY created_at DESC LIMIT 1", item)
             .fetch_optional(&state.db)
             .await?
             .ok_or_else(|| AppError::bad("the record has no ready document to sign; make one first"))?,
@@ -287,7 +277,7 @@ pub const JOB: &str = "crm.sign_pending";
 /// A document finished rendering: if it was waiting to go out for signature, a job sends it
 /// (a job, not a call: making a document can finish at once, inside the sending itself).
 pub async fn document_ready(state: &AppState, document: Uuid) {
-    let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sign_pending WHERE document_id = $1)").bind(document).fetch_one(&state.db).await.unwrap_or(false);
+    let waiting: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM sign_pending WHERE document_id = $1) AS "v!""#, document).fetch_one(&state.db).await.unwrap_or(false);
     if waiting {
         if let Err(e) = crate::jobs::enqueue(&state.db, JOB, json!({ "document_id": document }), None).await {
             tracing::warn!(document = %document, error = ?e, "could not queue sending for signature");
@@ -299,9 +289,9 @@ pub async fn document_ready(state: &AppState, document: Uuid) {
 /// The job: sends a waiting document for signature.
 pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     let document: Uuid = serde_json::from_value(payload["document_id"].clone())?;
-    let waiting: Option<(Uuid, Option<Uuid>)> = sqlx::query_as("DELETE FROM sign_pending WHERE document_id = $1 RETURNING template_id, requested_by").bind(document).fetch_optional(&state.db).await?;
+    let waiting: Option<(Uuid, Option<Uuid>)> = sqlx::query!(r#"DELETE FROM sign_pending WHERE document_id = $1 RETURNING template_id, requested_by"#, document).map(|r| (r.template_id, r.requested_by)).fetch_optional(&state.db).await?;
     let Some((template, Some(by))) = waiting else { return Ok(()) };
-    let item: Option<Uuid> = sqlx::query_scalar("SELECT item_id FROM crm_documents WHERE id = $1 AND status = 'ready'").bind(document).fetch_optional(&state.db).await?;
+    let item: Option<Uuid> = sqlx::query_scalar!("SELECT item_id FROM crm_documents WHERE id = $1 AND status = 'ready'", document).fetch_optional(&state.db).await?;
     let Some(item) = item else { return Ok(()) };
     if let Err(e) = start(state, by, item, template, Some(document)).await {
         tracing::warn!(document = %document, error = ?e, "could not send the document for signature");

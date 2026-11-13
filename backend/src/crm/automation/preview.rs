@@ -130,10 +130,7 @@ async fn preview(State(state): State<AppState>, auth: AuthUser, Json(b): Json<In
         }
         v
     });
-    let sample: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT i.id, i.title, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = ANY($1)",
-    )
-    .bind(&sample_ids)
+    let sample: Vec<(Uuid, String, String)> = sqlx::query!(r#"SELECT i.id, i.title, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = ANY($1)"#, &sample_ids).map(|r| (r.id, r.title, r.code))
     .fetch_all(&state.db)
     .await?;
     // Per week, oldest first, for a small chart.

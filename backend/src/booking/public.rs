@@ -84,27 +84,14 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<For
     let base = slugify(b.slug.as_deref().unwrap_or(&name), "book");
     let mut slug = base.clone();
     for n in 2.. {
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM booking_forms WHERE slug = $1)").bind(&slug).fetch_one(&state.db).await?;
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM booking_forms WHERE slug = $1) AS "v!""#, &slug).fetch_one(&state.db).await?;
         if !taken {
             break;
         }
         slug = format!("{base}-{n}");
     }
-    sqlx::query(
-        "INSERT INTO booking_forms (name, slug, intro, service_ids, resource_ids, ask_phone, phone_required, choose_resource, waitlist, thanks, created_by)
-         VALUES ($1, $2, $3, $4, $5, COALESCE($6, TRUE), COALESCE($7, FALSE), COALESCE($8, TRUE), COALESCE($9, TRUE), $10, $11)",
-    )
-    .bind(&name)
-    .bind(&slug)
-    .bind(clean(b.intro.flatten()))
-    .bind(b.service_ids.unwrap_or_default())
-    .bind(b.resource_ids.unwrap_or_default())
-    .bind(b.ask_phone)
-    .bind(b.phone_required)
-    .bind(b.choose_resource)
-    .bind(b.waitlist)
-    .bind(clean(b.thanks.flatten()))
-    .bind(auth.id)
+    sqlx::query!("INSERT INTO booking_forms (name, slug, intro, service_ids, resource_ids, ask_phone, phone_required, choose_resource, waitlist, thanks, created_by)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6, TRUE), COALESCE($7, FALSE), COALESCE($8, TRUE), COALESCE($9, TRUE), $10, $11)", &name, &slug, clean(b.intro.flatten()), &b.service_ids.unwrap_or_default(), &b.resource_ids.unwrap_or_default(), b.ask_phone, b.phone_required, b.choose_resource, b.waitlist, clean(b.thanks.flatten()), auth.id)
     .execute(&state.db)
     .await?;
     list(State(state), auth).await
@@ -116,25 +103,10 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         Some(n) => Some(required("name", n, 200)?),
         None => None,
     };
-    let n = sqlx::query(
-        "UPDATE booking_forms SET name = COALESCE($2, name), intro = CASE WHEN $3 THEN $4 ELSE intro END, service_ids = COALESCE($5, service_ids),
+    let n = sqlx::query!("UPDATE booking_forms SET name = COALESCE($2, name), intro = CASE WHEN $3 THEN $4 ELSE intro END, service_ids = COALESCE($5, service_ids),
             resource_ids = COALESCE($6, resource_ids), ask_phone = COALESCE($7, ask_phone), phone_required = COALESCE($8, phone_required),
             choose_resource = COALESCE($9, choose_resource), waitlist = COALESCE($10, waitlist), thanks = CASE WHEN $11 THEN $12 ELSE thanks END,
-            is_active = COALESCE($13, is_active) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(b.intro.is_some())
-    .bind(clean(b.intro.flatten()))
-    .bind(b.service_ids)
-    .bind(b.resource_ids)
-    .bind(b.ask_phone)
-    .bind(b.phone_required)
-    .bind(b.choose_resource)
-    .bind(b.waitlist)
-    .bind(b.thanks.is_some())
-    .bind(clean(b.thanks.flatten()))
-    .bind(b.is_active)
+            is_active = COALESCE($13, is_active) WHERE id = $1", id, name, b.intro.is_some(), clean(b.intro.flatten()), b.service_ids.as_deref(), b.resource_ids.as_deref(), b.ask_phone, b.phone_required, b.choose_resource, b.waitlist, b.thanks.is_some(), clean(b.thanks.flatten()), b.is_active)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -146,7 +118,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     manage(&auth)?;
-    sqlx::query("DELETE FROM booking_forms WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM booking_forms WHERE id = $1", id).execute(&state.db).await?;
     list(State(state), auth).await
 }
 
@@ -165,7 +137,7 @@ async fn active_form(state: &AppState, slug: &str) -> AppResult<Form> {
 /// The resources a form offers for a service.
 async fn eligible(state: &AppState, f: &Form, service: Option<Uuid>) -> AppResult<Vec<Resource>> {
     let svc_res: Vec<Uuid> = match service {
-        Some(s) => sqlx::query_scalar("SELECT resource_ids FROM booking_services WHERE id = $1").bind(s).fetch_optional(&state.db).await?.unwrap_or_default(),
+        Some(s) => sqlx::query_scalar!("SELECT resource_ids FROM booking_services WHERE id = $1", s).fetch_optional(&state.db).await?.unwrap_or_default(),
         None => vec![],
     };
     let all: Vec<Resource> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{RESOURCE_SELECT} WHERE r.is_active ORDER BY r.sort, r.name"))).fetch_all(&state.db).await?;
@@ -184,7 +156,7 @@ async fn form(State(state): State<AppState>, Path(slug): Path<String>) -> AppRes
         .map(service_json)
         .collect();
     let resources = eligible(&state, &f, None).await?;
-    let currency: String = sqlx::query_scalar("SELECT currency FROM booking_settings WHERE id").fetch_one(&state.db).await?;
+    let currency: String = sqlx::query_scalar!("SELECT currency FROM booking_settings WHERE id").fetch_one(&state.db).await?;
     Ok(Json(json!({
         "name": f.name, "intro": f.intro, "ask_phone": f.ask_phone, "phone_required": f.phone_required, "choose_resource": f.choose_resource, "waitlist": f.waitlist,
         "currency": currency,
@@ -322,13 +294,13 @@ async fn book(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(slug):
 // ---------------------------------------------------------------------------
 
 async fn by_token(state: &AppState, token: &str) -> AppResult<Uuid> {
-    sqlx::query_scalar("SELECT id FROM bookings WHERE token_hash = $1").bind(hash(token)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("booking"))
+    sqlx::query_scalar!("SELECT id FROM bookings WHERE token_hash = $1", hash(token)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("booking"))
 }
 
 async fn client_view(state: &AppState, id: Uuid) -> AppResult<Value> {
     let b = load(state, id).await?;
-    let names: Vec<String> = sqlx::query_scalar("SELECT r.name FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1").bind(id).fetch_all(&state.db).await?;
-    let tz: Option<String> = sqlx::query_scalar("SELECT r.timezone FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1 LIMIT 1").bind(id).fetch_optional(&state.db).await?;
+    let names: Vec<String> = sqlx::query_scalar!("SELECT r.name FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1", id).fetch_all(&state.db).await?;
+    let tz: Option<String> = sqlx::query_scalar!("SELECT r.timezone FROM booking_resources_used u JOIN booking_resources r ON r.id = u.resource_id WHERE u.booking_id = $1 LIMIT 1", id).fetch_optional(&state.db).await?;
     let can_change = ["booked", "confirmed", "waitlist"].contains(&b.status.as_str()) && b.starts_at > Utc::now();
     Ok(json!({
         "number": b.number, "status": b.status, "starts_at": b.starts_at, "ends_at": b.ends_at, "timezone": tz.unwrap_or_else(|| "UTC".into()),
@@ -360,12 +332,12 @@ async fn manage_act(State(state): State<AppState>, Path(token): Path<String>, Js
         "cancel" => "cancelled",
         _ => return Err(AppError::bad("confirm or cancel")),
     };
-    sqlx::query("UPDATE bookings SET status = $2, updated_at = now() WHERE id = $1").bind(id).bind(new).execute(&state.db).await?;
+    sqlx::query!("UPDATE bookings SET status = $2, updated_at = now() WHERE id = $1", id, new).execute(&state.db).await?;
     for item in [b.contact_id, b.deal_id].into_iter().flatten() {
         let _ = crate::crm::timeline(&state.db, item, "booking", None, None, json!({ "event": format!("client_{new}"), "booking_id": id, "number": b.number, "starts_at": b.starts_at })).await;
     }
     super::bookings::crm_event(&state, id, new).await;
-    let people: Vec<Uuid> = sqlx::query_scalar("SELECT r.user_id FROM booking_resources r WHERE r.id = ANY($1) AND r.user_id IS NOT NULL").bind(&b.resource_ids).fetch_all(&state.db).await?;
+    let people: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT r.user_id AS "user_id!" FROM booking_resources r WHERE r.id = ANY($1) AND r.user_id IS NOT NULL"#, &b.resource_ids).fetch_all(&state.db).await?;
     crate::notify::notify(&state, &people, crate::notify::NewNotification {
         kind: "booking.client",
         title: format!("{} {} booking #{}", b.client_name, if new == "cancelled" { "cancelled" } else { "confirmed" }, b.number),

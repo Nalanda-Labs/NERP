@@ -41,16 +41,16 @@ pub enum Notice {
 }
 
 pub async fn is_inbox(state: &AppState, mailbox: Uuid) -> AppResult<bool> {
-    Ok(sqlx::query_scalar::<_, Option<bool>>("SELECT mailbox_id = $1 FROM support_settings WHERE id").bind(mailbox).fetch_one(&state.db).await?.unwrap_or(false))
+    Ok(sqlx::query_scalar!(r#"SELECT mailbox_id = $1 AS "v?" FROM support_settings WHERE id"#, mailbox).fetch_one(&state.db).await?.unwrap_or(false))
 }
 
 async fn inbox(state: &AppState) -> AppResult<Option<Uuid>> {
-    Ok(sqlx::query_scalar("SELECT mailbox_id FROM support_settings WHERE id").fetch_one(&state.db).await?)
+    Ok(sqlx::query_scalar!(r#"SELECT mailbox_id AS "mailbox_id?" FROM support_settings WHERE id"#).fetch_one(&state.db).await?)
 }
 
 /// The customer's link to their request.
 async fn link(state: &AppState, ticket: Uuid) -> AppResult<Option<String>> {
-    let secret: Option<Vec<u8>> = sqlx::query_scalar("SELECT access_secret FROM support_tickets WHERE id = $1").bind(ticket).fetch_optional(&state.db).await?.flatten();
+    let secret: Option<Vec<u8>> = sqlx::query_scalar!("SELECT access_secret FROM support_tickets WHERE id = $1", ticket).fetch_optional(&state.db).await?.flatten();
     Ok(secret.and_then(|s| crate::crypto::open(&state.config.data_key, &s)).map(|t| format!("{}/help/t/{t}", state.config.public_url)))
 }
 
@@ -67,14 +67,12 @@ pub async fn tell_customer(state: &AppState, ticket: Uuid, notice: Notice) -> Ap
     if let Some(m) = message {
         // The Message-ID is fixed now, so the customer's answer finds this ticket.
         let domain = match inbox(state).await? {
-            Some(mb) => sqlx::query_scalar::<_, String>("SELECT email FROM crm_mailboxes WHERE id = $1").bind(mb).fetch_optional(&state.db).await?,
+            Some(mb) => sqlx::query_scalar!("SELECT email FROM crm_mailboxes WHERE id = $1", mb).fetch_optional(&state.db).await?,
             None => None,
         }
         .and_then(|e| e.rsplit('@').next().map(String::from))
         .unwrap_or_else(|| "nerp.local".into());
-        sqlx::query("UPDATE support_messages SET email_status = 'queued', email_message_id = COALESCE(email_message_id, $2) WHERE id = $1")
-            .bind(m)
-            .bind(format!("{}@{domain}", m.simple()))
+        sqlx::query!("UPDATE support_messages SET email_status = 'queued', email_message_id = COALESCE(email_message_id, $2) WHERE id = $1", m, format!("{}@{domain}", m.simple()))
             .execute(&state.db)
             .await?;
     }
@@ -96,7 +94,7 @@ pub async fn run_send(state: &AppState, payload: &Value) -> Result<()> {
     let Some(to) = t.requester_email.clone() else { return Ok(()) };
     let company = crate::routes::auth::company_name(state).await;
     let link = link(state, ticket).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let allow_reopen: bool = sqlx::query_scalar("SELECT allow_reopen FROM support_settings WHERE id").fetch_one(&state.db).await?;
+    let allow_reopen: bool = sqlx::query_scalar!("SELECT allow_reopen FROM support_settings WHERE id").fetch_one(&state.db).await?;
     let name = t.requester_name.clone().filter(|n| !n.contains('@')).unwrap_or_else(|| "there".into());
     let tag = format!("[#{}]", t.number);
     let (subject, paragraphs, own_id): (String, Vec<String>, Option<String>) = match kind {
@@ -111,10 +109,7 @@ pub async fn run_send(state: &AppState, payload: &Value) -> Result<()> {
         ),
         "reply" => {
             let Some(m) = message else { return Ok(()) };
-            let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT m.body, m.email_message_id, u.first_name || ' ' || u.last_name FROM support_messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.id = $1",
-            )
-            .bind(m)
+            let row: Option<(String, Option<String>, Option<String>)> = sqlx::query!(r#"SELECT m.body AS "body!", m.email_message_id AS "email_message_id?", u.first_name || ' ' || u.last_name AS "c2?" FROM support_messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.id = $1"#, m).map(|r| (r.body, r.email_message_id, r.c2))
             .fetch_optional(&state.db)
             .await?;
             let Some((body, mid, author)) = row else { return Ok(()) };
@@ -154,13 +149,13 @@ pub async fn run_send(state: &AppState, payload: &Value) -> Result<()> {
         let footer = format!("You get this email because you asked {company} for help.");
         jobs::send_email(state, crate::mail::notice(&to, &company, &subject, &subject, &paragraphs, button, &footer)).await?;
         if let Some(m) = message {
-            sqlx::query("UPDATE support_messages SET email_status = 'sent' WHERE id = $1").bind(m).execute(&state.db).await?;
+            sqlx::query!("UPDATE support_messages SET email_status = 'sent' WHERE id = $1", m).execute(&state.db).await?;
         }
         return Ok(());
     };
     let result = send_through(state, &mb, &t, &to, &subject, &paragraphs, link.as_deref(), own_id).await;
     if let Some(m) = message {
-        sqlx::query("UPDATE support_messages SET email_status = $2 WHERE id = $1").bind(m).bind(if result.is_ok() { "sent" } else { "failed" }).execute(&state.db).await?;
+        sqlx::query!("UPDATE support_messages SET email_status = $2 WHERE id = $1", m, if result.is_ok() { "sent" } else { "failed" }).execute(&state.db).await?;
     }
     if let Err(e) = result {
         tracing::warn!(ticket = %ticket, error = %e, "help-desk email not sent");
@@ -184,10 +179,7 @@ async fn send_through(state: &AppState, mb: &MailboxRow, t: &tickets::TicketRow,
     mb.guard(state).await?;
     let password = mb.credential(state).await?;
     // Threading: answer the customer's latest email, and list the conversation so far.
-    let ids: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT email_message_id, by_support FROM support_messages WHERE ticket_id = $1 AND email_message_id IS NOT NULL ORDER BY created_at DESC LIMIT 20",
-    )
-    .bind(t.id)
+    let ids: Vec<(String, bool)> = sqlx::query!(r#"SELECT email_message_id AS "email_message_id!", by_support AS "by_support!" FROM support_messages WHERE ticket_id = $1 AND email_message_id IS NOT NULL ORDER BY created_at DESC LIMIT 20"#, t.id).map(|r| (r.email_message_id, r.by_support))
     .fetch_all(&state.db)
     .await
     .map_err(|e| e.to_string())?;
@@ -267,7 +259,7 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
         Some(id) if !id.is_empty() => id.to_string(),
         _ => format!("{}@nerp.generated", hex::encode(&Sha256::digest(raw)[..16])),
     };
-    let dup: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM support_messages WHERE email_message_id = $1)").bind(&message_id).fetch_one(&state.db).await?;
+    let dup: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM support_messages WHERE email_message_id = $1) AS "v!""#, &message_id).fetch_one(&state.db).await?;
     if dup {
         return Ok(false);
     }
@@ -304,7 +296,7 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
     }
 
     // An employee writing in is asked for by their account.
-    let user: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE lower(email) = $1 AND is_active AND NOT is_system").bind(&from).fetch_optional(&state.db).await?;
+    let user: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM users WHERE lower(email) = $1 AND is_active AND NOT is_system", &from).fetch_optional(&state.db).await?;
 
     // Which ticket: one of our messages it answers, else the number in the subject.
     let mut refs: Vec<String> = msg.references().map(|r| r.iter().map(String::from).collect()).unwrap_or_default();
@@ -314,16 +306,12 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
     let mut ticket: Option<Uuid> = if refs.is_empty() {
         None
     } else {
-        sqlx::query_scalar("SELECT ticket_id FROM support_messages WHERE email_message_id = ANY($1) ORDER BY created_at DESC LIMIT 1").bind(&refs).fetch_optional(&state.db).await?
+        sqlx::query_scalar!("SELECT ticket_id FROM support_messages WHERE email_message_id = ANY($1) ORDER BY created_at DESC LIMIT 1", &refs).fetch_optional(&state.db).await?
     };
     if ticket.is_none()
         && let Some(n) = subject_number(&subject) {
-            ticket = sqlx::query_scalar(
-                "SELECT t.id FROM support_tickets t LEFT JOIN users u ON u.id = t.requester_id
-                 WHERE t.number = $1 AND (t.requester_email = $2 OR lower(u.email) = $2)",
-            )
-            .bind(n)
-            .bind(&from)
+            ticket = sqlx::query_scalar!(r#"SELECT t.id AS "id!" FROM support_tickets t LEFT JOIN users u ON u.id = t.requester_id
+                 WHERE t.number = $1 AND (t.requester_email = $2 OR lower(u.email) = $2)"#, n, &from)
             .fetch_optional(&state.db)
             .await?;
         }

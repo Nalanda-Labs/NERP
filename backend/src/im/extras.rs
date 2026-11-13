@@ -43,12 +43,9 @@ pub async fn enrich(state: &AppState, viewer: Uuid, items: &mut [Value]) -> AppR
     if ids.is_empty() {
         return Ok(());
     }
-    let reactions: Vec<(Uuid, String, Vec<Uuid>, Vec<String>)> = sqlx::query_as(
-        "SELECT r.message_id, r.emoji, array_agg(r.user_id ORDER BY r.created_at), array_agg(u.first_name ORDER BY r.created_at)
+    let reactions: Vec<(Uuid, String, Vec<Uuid>, Vec<String>)> = sqlx::query!(r#"SELECT r.message_id AS "message_id!", r.emoji AS "emoji!", array_agg(r.user_id ORDER BY r.created_at) AS "c2!", array_agg(u.first_name ORDER BY r.created_at) AS "c3!"
          FROM im_reactions r JOIN users u ON u.id = r.user_id WHERE r.message_id = ANY($1)
-         GROUP BY r.message_id, r.emoji ORDER BY MIN(r.created_at)",
-    )
-    .bind(&ids)
+         GROUP BY r.message_id, r.emoji ORDER BY MIN(r.created_at)"#, &ids).map(|r| (r.message_id, r.emoji, r.c2, r.c3))
     .fetch_all(&state.db)
     .await?;
     let mut by_msg: HashMap<Uuid, Vec<Value>> = HashMap::new();
@@ -56,18 +53,14 @@ pub async fn enrich(state: &AppState, viewer: Uuid, items: &mut [Value]) -> AppR
         by_msg.entry(m).or_default().push(json!({ "emoji": emoji, "count": users.len(), "mine": users.contains(&viewer), "names": names }));
     }
     let polls: Vec<(Uuid, String, Vec<String>, bool, bool, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT message_id, question, options, multiple, anonymous, closed_at FROM im_polls WHERE message_id = ANY($1)")
-            .bind(&ids)
+        sqlx::query!(r#"SELECT message_id, question, options, multiple, anonymous, closed_at FROM im_polls WHERE message_id = ANY($1)"#, &ids).map(|r| (r.message_id, r.question, r.options, r.multiple, r.anonymous, r.closed_at))
             .fetch_all(&state.db)
             .await?;
     let mut poll_by: HashMap<Uuid, Value> = HashMap::new();
     if !polls.is_empty() {
         let pids: Vec<Uuid> = polls.iter().map(|p| p.0).collect();
-        let votes: Vec<(Uuid, i32, Uuid, String)> = sqlx::query_as(
-            "SELECT v.message_id, v.option, v.user_id, trim(u.first_name || ' ' || u.last_name) FROM im_poll_votes v JOIN users u ON u.id = v.user_id
-             WHERE v.message_id = ANY($1) ORDER BY v.voted_at",
-        )
-        .bind(&pids)
+        let votes: Vec<(Uuid, i32, Uuid, String)> = sqlx::query!(r#"SELECT v.message_id AS "message_id!", v.option AS "option!", v.user_id AS "user_id!", trim(u.first_name || ' ' || u.last_name) AS "c3!" FROM im_poll_votes v JOIN users u ON u.id = v.user_id
+             WHERE v.message_id = ANY($1) ORDER BY v.voted_at"#, &pids).map(|r| (r.message_id, r.option, r.user_id, r.c3))
         .fetch_all(&state.db)
         .await?;
         for (id, question, options, multiple, anonymous, closed) in polls {
@@ -108,8 +101,7 @@ async fn changed(state: &AppState, chat: Uuid, message: Uuid) -> AppResult<()> {
 }
 
 async fn message_chat(state: &AppState, id: Uuid) -> AppResult<(Uuid, Option<Uuid>, String, bool)> {
-    sqlx::query_as("SELECT chat_id, user_id, kind, deleted_at IS NOT NULL FROM im_messages WHERE id = $1")
-        .bind(id)
+    sqlx::query!(r#"SELECT chat_id AS "chat_id!", user_id AS "user_id?", kind AS "kind!", deleted_at IS NOT NULL AS "c3!" FROM im_messages WHERE id = $1"#, id).map(|r| (r.chat_id, r.user_id, r.kind, r.c3))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("message"))
@@ -141,23 +133,14 @@ async fn new_poll(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         return Err(AppError::bad("a poll has 2 to 10 answers"));
     }
     let mut tx = state.db.begin().await?;
-    let mid: Uuid = sqlx::query_scalar("INSERT INTO im_messages (chat_id, user_id, body, kind, parent_id) VALUES ($1, $2, $3, 'poll', $4) RETURNING id")
-        .bind(id)
-        .bind(auth.id)
-        .bind(&question)
-        .bind(b.parent_id)
+    let mid: Uuid = sqlx::query_scalar!("INSERT INTO im_messages (chat_id, user_id, body, kind, parent_id) VALUES ($1, $2, $3, 'poll', $4) RETURNING id", id, auth.id, &question, b.parent_id)
         .fetch_one(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO im_polls (message_id, question, options, multiple, anonymous) VALUES ($1, $2, $3, $4, $5)")
-        .bind(mid)
-        .bind(&question)
-        .bind(&options)
-        .bind(b.multiple)
-        .bind(b.anonymous)
+    sqlx::query!("INSERT INTO im_polls (message_id, question, options, multiple, anonymous) VALUES ($1, $2, $3, $4, $5)", mid, &question, &options, b.multiple, b.anonymous)
         .execute(&mut *tx)
         .await?;
     if b.parent_id.is_none() {
-        sqlx::query("UPDATE im_chats SET last_message_at = now() WHERE id = $1").bind(id).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE im_chats SET last_message_at = now() WHERE id = $1", id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     broadcast_message(&state, mid).await?;
@@ -179,7 +162,7 @@ async fn vote(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
         return Err(AppError::bad("that isn't a poll"));
     }
     let (n, multiple, closed): (i32, bool, bool) =
-        sqlx::query_as("SELECT cardinality(options), multiple, closed_at IS NOT NULL FROM im_polls WHERE message_id = $1").bind(id).fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT cardinality(options) AS "c0!", multiple AS "multiple!", closed_at IS NOT NULL AS "c2!" FROM im_polls WHERE message_id = $1"#, id).map(|r| (r.c0, r.multiple, r.c2)).fetch_one(&state.db).await?;
     if closed {
         return Err(AppError::bad("the poll is closed"));
     }
@@ -193,9 +176,9 @@ async fn vote(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
         return Err(AppError::bad("choose one answer"));
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM im_poll_votes WHERE message_id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM im_poll_votes WHERE message_id = $1 AND user_id = $2", id, auth.id).execute(&mut *tx).await?;
     for o in &chosen {
-        sqlx::query("INSERT INTO im_poll_votes (message_id, user_id, option) VALUES ($1, $2, $3)").bind(id).bind(auth.id).bind(o).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO im_poll_votes (message_id, user_id, option) VALUES ($1, $2, $3)", id, auth.id, o).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     changed(&state, chat, id).await?;
@@ -211,7 +194,7 @@ async fn close_poll(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     if author != Some(auth.id) && !s.manage {
         return Err(AppError::bad("only whoever asked closes the poll"));
     }
-    sqlx::query("UPDATE im_polls SET closed_at = COALESCE(closed_at, now()) WHERE message_id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE im_polls SET closed_at = COALESCE(closed_at, now()) WHERE message_id = $1", id).execute(&state.db).await?;
     changed(&state, chat, id).await?;
     Ok(Json(message_view(&state, auth.id, id).await?))
 }
@@ -237,18 +220,12 @@ async fn react(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     if !REACTIONS.contains(&b.emoji.as_str()) {
         return Err(AppError::bad("unknown reaction"));
     }
-    let removed = sqlx::query("DELETE FROM im_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3")
-        .bind(id)
-        .bind(auth.id)
-        .bind(&b.emoji)
+    let removed = sqlx::query!("DELETE FROM im_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3", id, auth.id, &b.emoji)
         .execute(&state.db)
         .await?
         .rows_affected();
     if removed == 0 {
-        sqlx::query("INSERT INTO im_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
-            .bind(id)
-            .bind(auth.id)
-            .bind(&b.emoji)
+        sqlx::query!("INSERT INTO im_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", id, auth.id, &b.emoji)
             .execute(&state.db)
             .await?;
         if let Some(a) = author.filter(|a| *a != auth.id) {
@@ -274,12 +251,8 @@ async fn react(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 /// The text of a message, quoted with who wrote it, for a task or event made from it.
 async fn quote(state: &AppState, chat: Uuid, message: Option<Uuid>) -> AppResult<Option<(String, String)>> {
     let Some(m) = message else { return Ok(None) };
-    let row: Option<(String, Option<String>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT m.body, trim(u.first_name || ' ' || u.last_name), m.parent_id FROM im_messages m LEFT JOIN users u ON u.id = m.user_id
-         WHERE m.id = $1 AND m.chat_id = $2 AND m.deleted_at IS NULL",
-    )
-    .bind(m)
-    .bind(chat)
+    let row: Option<(String, Option<String>, Option<Uuid>)> = sqlx::query!(r#"SELECT m.body AS "body!", trim(u.first_name || ' ' || u.last_name) AS "c1?", m.parent_id AS "parent_id?" FROM im_messages m LEFT JOIN users u ON u.id = m.user_id
+         WHERE m.id = $1 AND m.chat_id = $2 AND m.deleted_at IS NULL"#, m, chat).map(|r| (r.body, r.c1, r.parent_id))
     .fetch_optional(&state.db)
     .await?;
     let Some((body, author, _)) = row else { return Err(AppError::bad("that message isn't in this chat")) };
@@ -328,7 +301,7 @@ async fn make_task(State(state): State<AppState>, auth: AuthUser, Path(id): Path
         ..Default::default()
     })
     .await?;
-    let (number, title): (i64, String) = sqlx::query_as("SELECT number, title FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+    let (number, title): (i64, String) = sqlx::query!(r#"SELECT number, title FROM tasks WHERE id = $1"#, task).map(|r| (r.number, r.title)).fetch_one(&state.db).await?;
     let who = names(&state, &[auth.id]).await?;
     system_message(&state, id, format!("{who} made a task: #{number} {title}")).await?;
     let all = members(&state, id).await?;

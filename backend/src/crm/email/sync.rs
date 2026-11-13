@@ -66,9 +66,7 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
         Some(id) if !id.is_empty() => id.to_string(),
         _ => format!("{}@nerp.generated", hex::encode(&Sha256::digest(raw)[..16])),
     };
-    let dup: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_emails WHERE mailbox_id = $1 AND message_id = $2)")
-        .bind(mb.id)
-        .bind(&message_id)
+    let dup: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_emails WHERE mailbox_id = $1 AND message_id = $2) AS "v!""#, mb.id, &message_id)
         .fetch_one(&state.db)
         .await?;
     if dup {
@@ -93,22 +91,18 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
     let thread: Option<Uuid> = if refs.is_empty() {
         None
     } else {
-        sqlx::query_scalar("SELECT thread_id FROM crm_emails WHERE message_id = ANY($1) ORDER BY sent_at LIMIT 1").bind(&refs).fetch_optional(&state.db).await?
+        sqlx::query_scalar!("SELECT thread_id FROM crm_emails WHERE message_id = ANY($1) ORDER BY sent_at LIMIT 1", &refs).fetch_optional(&state.db).await?
     };
 
     let mut links: Vec<Uuid> = match thread {
-        Some(t) => sqlx::query_scalar("SELECT DISTINCT l.item_id FROM crm_email_links l JOIN crm_emails e ON e.id = l.email_id WHERE e.thread_id = $1")
-            .bind(t)
+        Some(t) => sqlx::query_scalar!("SELECT DISTINCT l.item_id FROM crm_email_links l JOIN crm_emails e ON e.id = l.email_id WHERE e.thread_id = $1", t)
             .fetch_all(&state.db)
             .await?,
         None => vec![],
     };
     // Records with one of the other parties' addresses.
-    let matched: Vec<(Uuid, i16)> = sqlx::query_as(
-        "SELECT DISTINCT i.id, i.entity_type FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
-         WHERE m.kind = 'email' AND m.normalized = ANY($1) AND i.deleted_at IS NULL LIMIT 50",
-    )
-    .bind(&others)
+    let matched: Vec<(Uuid, i16)> = sqlx::query!(r#"SELECT DISTINCT i.id, i.entity_type FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+         WHERE m.kind = 'email' AND m.normalized = ANY($1) AND i.deleted_at IS NULL LIMIT 50"#, &others).map(|r| (r.id, r.entity_type))
     .fetch_all(&state.db)
     .await?;
     for (id, _) in &matched {
@@ -121,13 +115,10 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
     if thread.is_none() && !matched.is_empty() {
         let people: Vec<Uuid> = matched.iter().filter(|(_, t)| *t == crate::crm::CONTACT || *t == crate::crm::COMPANY).map(|(i, _)| *i).collect();
         if !people.is_empty() {
-            let open: Option<Uuid> = sqlx::query_scalar(
-                "SELECT i.id FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
+            let open: Option<Uuid> = sqlx::query_scalar!("SELECT i.id FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
                  WHERE i.deleted_at IS NULL AND NOT i.is_closed AND t.has_client AND t.id <> 1
                    AND (i.company_id = ANY($1) OR EXISTS (SELECT 1 FROM crm_item_contacts c WHERE c.item_id = i.id AND c.contact_id = ANY($1)))
-                 ORDER BY i.updated_at DESC LIMIT 1",
-            )
-            .bind(&people)
+                 ORDER BY i.updated_at DESC LIMIT 1", &people)
             .fetch_optional(&state.db)
             .await?;
             if let Some(o) = open.filter(|o| !links.contains(o)) {
@@ -164,29 +155,9 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
         file_ids.push(f);
     }
 
-    let inserted = sqlx::query(
-        "INSERT INTO crm_emails (id, mailbox_id, direction, status, message_id, in_reply_to, refs, thread_id, from_addr, from_name, to_addrs, cc_addrs,
+    let inserted = sqlx::query!("INSERT INTO crm_emails (id, mailbox_id, direction, status, message_id, in_reply_to, refs, thread_id, from_addr, from_name, to_addrs, cc_addrs,
              subject, body_text, body_html, snippet, attachments, sent_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT DO NOTHING",
-    )
-    .bind(id)
-    .bind(mb.id)
-    .bind(if outgoing { "out" } else { "in" })
-    .bind(if outgoing { "sent" } else { "received" })
-    .bind(&message_id)
-    .bind(&in_reply_to)
-    .bind(&refs)
-    .bind(thread_id)
-    .bind(&from_addr)
-    .bind(&from_name)
-    .bind(as_json(&to))
-    .bind(as_json(&cc))
-    .bind(&subject)
-    .bind(&text)
-    .bind(&html)
-    .bind(snippet(text.as_deref().unwrap_or("")))
-    .bind(Value::Array(atts))
-    .bind(sent_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) ON CONFLICT DO NOTHING", id, mb.id, if outgoing { "out" } else { "in" }, if outgoing { "sent" } else { "received" }, &message_id, in_reply_to.as_deref(), &refs, thread_id, &from_addr, &from_name, as_json(&to), as_json(&cc), &subject, text.as_deref(), html.as_deref(), snippet(text.as_deref().unwrap_or("")), Value::Array(atts), sent_at)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -197,7 +168,7 @@ pub async fn ingest(state: &AppState, mb: &MailboxRow, sent: bool, raw: &[u8]) -
         return Ok(Ingested::Duplicate);
     }
     for f in &file_ids {
-        sqlx::query("INSERT INTO crm_email_files (file_id, email_id) VALUES ($1, $2)").bind(f).bind(id).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO crm_email_files (file_id, email_id) VALUES ($1, $2)", f, id).execute(&state.db).await?;
     }
     super::file_on_records(state, id, &links, if outgoing { Some(mb.owner_id) } else { None }).await?;
     if !outgoing {
@@ -234,10 +205,7 @@ fn folder_state(mb: &MailboxRow, folder: &str) -> (Option<u32>, u32) {
 }
 
 async fn save_folder(state: &AppState, mb: Uuid, folder: &str, validity: u32, last_uid: u32) -> AppResult<()> {
-    sqlx::query("UPDATE crm_mailboxes SET folders = jsonb_set(folders, ARRAY[$2], $3::jsonb, TRUE) WHERE id = $1")
-        .bind(mb)
-        .bind(folder)
-        .bind(json!({ "validity": validity, "last_uid": last_uid }))
+    sqlx::query!("UPDATE crm_mailboxes SET folders = jsonb_set(folders, ARRAY[$2], $3::jsonb, TRUE) WHERE id = $1", mb, folder, json!({ "validity": validity, "last_uid": last_uid }))
         .execute(&state.db)
         .await?;
     Ok(())
@@ -278,7 +246,7 @@ pub async fn sync(state: &AppState, mb: &MailboxRow) -> Result<Report, String> {
         None => {
             let s = find_sent(&mut session).await;
             if let Some(s) = &s {
-                let _ = sqlx::query("UPDATE crm_mailboxes SET sent_folder = $2 WHERE id = $1").bind(mb.id).bind(s).execute(&state.db).await;
+                let _ = sqlx::query!("UPDATE crm_mailboxes SET sent_folder = $2 WHERE id = $1", mb.id, s).execute(&state.db).await;
             }
             s
         }

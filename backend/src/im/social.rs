@@ -97,15 +97,13 @@ async fn general(State(state): State<AppState>, auth: AuthUser) -> AppResult<Jso
     if auth.is_guest() {
         return Err(AppError::NotFound("chat"));
     }
-    let id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM im_chats WHERE is_general").fetch_optional(&state.db).await?;
+    let id: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM im_chats WHERE is_general").fetch_optional(&state.db).await?;
     let id = match id {
         Some(id) => id,
         None => {
-            let made: Option<Uuid> = sqlx::query_scalar(
-                "INSERT INTO im_chats (kind, title, description, audience, is_general)
+            let made: Option<Uuid> = sqlx::query_scalar!("INSERT INTO im_chats (kind, title, description, audience, is_general)
                  VALUES ('group', 'General', 'Everyone in the company', 'everyone', TRUE)
-                 ON CONFLICT (is_general) WHERE is_general DO NOTHING RETURNING id",
-            )
+                 ON CONFLICT (is_general) WHERE is_general DO NOTHING RETURNING id")
             .fetch_optional(&state.db)
             .await?;
             match made {
@@ -113,7 +111,7 @@ async fn general(State(state): State<AppState>, auth: AuthUser) -> AppResult<Jso
                     system_message(&state, id, "The company's general chat: everyone is in it".into()).await?;
                     id
                 }
-                None => sqlx::query_scalar("SELECT id FROM im_chats WHERE is_general").fetch_one(&state.db).await?,
+                None => sqlx::query_scalar!("SELECT id FROM im_chats WHERE is_general").fetch_one(&state.db).await?,
             }
         }
     };
@@ -137,15 +135,11 @@ async fn discover(State(state): State<AppState>, auth: AuthUser, Query(q): Query
         return Ok(Json(json!({ "items": [] })));
     }
     let term = q.q.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).map(|t| format!("%{}%", t.replace('%', "\\%").replace('_', "\\_")));
-    let rows: Vec<(Uuid, String, String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT c.id, c.kind, c.title, c.description, (SELECT COUNT(*) FROM im_members x WHERE x.chat_id = c.id)
+    let rows: Vec<(Uuid, String, String, Option<String>, i64)> = sqlx::query!(r#"SELECT c.id AS "id!", c.kind AS "kind!", c.title AS "title!", c.description AS "description?", (SELECT COUNT(*) FROM im_members x WHERE x.chat_id = c.id) AS "c4!"
          FROM im_chats c WHERE c.visibility = 'open'
            AND NOT EXISTS (SELECT 1 FROM im_members m WHERE m.chat_id = c.id AND m.user_id = $1)
            AND ($2::text IS NULL OR lower(c.title) LIKE $2 OR lower(COALESCE(c.description, '')) LIKE $2)
-         ORDER BY c.last_message_at DESC LIMIT 200",
-    )
-    .bind(auth.id)
-    .bind(term)
+         ORDER BY c.last_message_at DESC LIMIT 200"#, auth.id, term).map(|r| (r.id, r.kind, r.title, r.description, r.c4))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, kind, title, d, n)| json!({ "id": id, "kind": kind, "title": title, "description": d, "members": n })).collect::<Vec<_>>() })))
@@ -157,7 +151,7 @@ async fn join(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
         if s.visibility != "open" || s.audience != "manual" || s.linked {
             return Err(AppError::NotFound("chat"));
         }
-        sqlx::query("INSERT INTO im_members (chat_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(id).bind(auth.id).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO im_members (chat_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", id, auth.id).execute(&state.db).await?;
         if s.kind != "channel" {
             system_message(&state, id, format!("{} joined", names(&state, &[auth.id]).await?)).await?;
         }
@@ -189,16 +183,16 @@ async fn set_role(State(state): State<AppState>, auth: AuthUser, Path((id, user)
     if !["owner", "admin", "member"].contains(&b.role.as_str()) {
         return Err(AppError::bad("role must be owner, admin or member"));
     }
-    let current: Option<String> = sqlx::query_scalar("SELECT role FROM im_members WHERE chat_id = $1 AND user_id = $2").bind(id).bind(user).fetch_optional(&state.db).await?;
+    let current: Option<String> = sqlx::query_scalar!("SELECT role FROM im_members WHERE chat_id = $1 AND user_id = $2", id, user).fetch_optional(&state.db).await?;
     let Some(current) = current else { return Err(AppError::bad("they aren't in the chat")) };
     if current == "owner" && b.role != "owner" {
         return Err(AppError::bad("hand the chat over to someone else first"));
     }
     let mut tx = state.db.begin().await?;
     if b.role == "owner" {
-        sqlx::query("UPDATE im_members SET role = 'admin' WHERE chat_id = $1 AND role = 'owner'").bind(id).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE im_members SET role = 'admin' WHERE chat_id = $1 AND role = 'owner'", id).execute(&mut *tx).await?;
     }
-    sqlx::query("UPDATE im_members SET role = $3 WHERE chat_id = $1 AND user_id = $2").bind(id).bind(user).bind(&b.role).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE im_members SET role = $3 WHERE chat_id = $1 AND user_id = $2", id, user, &b.role).execute(&mut *tx).await?;
     tx.commit().await?;
     let (me, them) = (names(&state, &[auth.id]).await?, names(&state, &[user]).await?);
     let note = match b.role.as_str() {
@@ -222,7 +216,7 @@ async fn my_settings(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         return Err(AppError::NotFound("chat"));
     }
     if let Some(m) = b.muted {
-        sqlx::query("UPDATE im_members SET muted = $3 WHERE chat_id = $1 AND user_id = $2").bind(id).bind(auth.id).bind(m).execute(&state.db).await?;
+        sqlx::query!("UPDATE im_members SET muted = $3 WHERE chat_id = $1 AND user_id = $2", id, auth.id, m).execute(&state.db).await?;
     }
     tell(&state, vec![auth.id], "im.chat", json!({ "chat_id": id })).await;
     Ok(Json(chat_view(&state, &auth, id).await?))
@@ -242,14 +236,14 @@ async fn clear(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
         return Err(AppError::NotFound("chat"));
     }
     if !b.everyone {
-        sqlx::query("UPDATE im_members SET cleared_at = now(), last_read_at = now() WHERE chat_id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&state.db).await?;
+        sqlx::query!("UPDATE im_members SET cleared_at = now(), last_read_at = now() WHERE chat_id = $1 AND user_id = $2", id, auth.id).execute(&state.db).await?;
         tell(&state, vec![auth.id], "im.chat", json!({ "chat_id": id, "cleared": true })).await;
         return Ok(Json(json!({ "ok": true })));
     }
     if s.kind == "direct" || !s.manage {
         return Err(AppError::bad("only the chat's owner and admins delete its history for everyone"));
     }
-    sqlx::query("DELETE FROM im_messages WHERE chat_id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM im_messages WHERE chat_id = $1", id).execute(&state.db).await?;
     system_message(&state, id, format!("{} deleted the chat's history", names(&state, &[auth.id]).await?)).await?;
     let all = members(&state, id).await?;
     tell(&state, all, "im.chat", json!({ "chat_id": id, "cleared": true })).await;
@@ -259,20 +253,17 @@ async fn clear(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 /// Deletes messages past their chat's time limit (or the company's), and keeps company-wide and department
 /// chats' members in step with the company.
 pub async fn run_maintenance(state: &AppState) -> Result<()> {
-    let mut gone: Vec<Uuid> = sqlx::query_scalar(
-        "DELETE FROM im_messages m USING im_chats c
+    let mut gone: Vec<Uuid> = sqlx::query_scalar!("DELETE FROM im_messages m USING im_chats c
          WHERE c.id = m.chat_id AND c.auto_delete_hours IS NOT NULL AND m.created_at < now() - make_interval(hours => c.auto_delete_hours)
            AND m.parent_id IS NULL
-         RETURNING m.chat_id",
-    )
+         RETURNING m.chat_id")
     .fetch_all(&state.db)
     .await?;
     // The company's limit, for every chat.
-    let days: Option<serde_json::Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'chat_retention_days'").fetch_optional(&state.db).await?;
+    let days: Option<serde_json::Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'chat_retention_days'").fetch_optional(&state.db).await?;
     if let Some(d) = days.and_then(|v| v.as_i64()).filter(|d| *d > 0) {
         gone.extend(
-            sqlx::query_scalar::<_, Uuid>("DELETE FROM im_messages WHERE created_at < now() - make_interval(days => $1) RETURNING chat_id")
-                .bind(d as i32)
+            sqlx::query_scalar!("DELETE FROM im_messages WHERE created_at < now() - make_interval(days => $1) RETURNING chat_id", d as i32)
                 .fetch_all(&state.db)
                 .await?,
         );
@@ -292,14 +283,11 @@ pub async fn run_maintenance(state: &AppState) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn folder_list(state: &AppState, user: Uuid) -> AppResult<Value> {
-    let rows: Vec<(Uuid, String, Vec<Uuid>, i64)> = sqlx::query_as(
-        "SELECT f.id, f.name, ARRAY(SELECT fc.chat_id FROM im_folder_chats fc WHERE fc.folder_id = f.id),
+    let rows: Vec<(Uuid, String, Vec<Uuid>, i64)> = sqlx::query!(r#"SELECT f.id AS "id!", f.name AS "name!", ARRAY(SELECT fc.chat_id FROM im_folder_chats fc WHERE fc.folder_id = f.id) AS "c2!",
             (SELECT COUNT(*) FROM im_folder_chats fc JOIN im_members me ON me.chat_id = fc.chat_id AND me.user_id = $1
              JOIN im_messages m ON m.chat_id = fc.chat_id AND m.parent_id IS NULL AND m.created_at > me.last_read_at AND m.user_id IS DISTINCT FROM $1 AND m.deleted_at IS NULL
-             WHERE fc.folder_id = f.id)
-         FROM im_folders f WHERE f.user_id = $1 ORDER BY f.sort, f.created_at",
-    )
-    .bind(user)
+             WHERE fc.folder_id = f.id) AS "c3!"
+         FROM im_folders f WHERE f.user_id = $1 ORDER BY f.sort, f.created_at"#, user).map(|r| (r.id, r.name, r.c2, r.c3))
     .fetch_all(&state.db)
     .await?;
     Ok(json!({ "items": rows.into_iter().map(|(id, name, chats, unread)| json!({ "id": id, "name": name, "chat_ids": chats, "unread": unread })).collect::<Vec<_>>() }))
@@ -319,11 +307,8 @@ struct FolderInput {
 
 async fn set_folder_chats(state: &AppState, user: Uuid, folder: Uuid, chats: &[Uuid]) -> AppResult<()> {
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM im_folder_chats WHERE folder_id = $1").bind(folder).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO im_folder_chats (folder_id, chat_id) SELECT $1, chat_id FROM im_members WHERE user_id = $2 AND chat_id = ANY($3)")
-        .bind(folder)
-        .bind(user)
-        .bind(chats)
+    sqlx::query!("DELETE FROM im_folder_chats WHERE folder_id = $1", folder).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO im_folder_chats (folder_id, chat_id) SELECT $1, chat_id FROM im_members WHERE user_id = $2 AND chat_id = ANY($3)", folder, user, chats)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -332,14 +317,11 @@ async fn set_folder_chats(state: &AppState, user: Uuid, folder: Uuid, chats: &[U
 
 async fn new_folder(State(state): State<AppState>, auth: AuthUser, Json(b): Json<FolderInput>) -> AppResult<Json<Value>> {
     let name = required("folder name", b.name.as_deref().unwrap_or(""), 60)?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM im_folders WHERE user_id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM im_folders WHERE user_id = $1"#, auth.id).fetch_one(&state.db).await?;
     if n >= 20 {
         return Err(AppError::bad("at most 20 folders"));
     }
-    let id: Uuid = sqlx::query_scalar("INSERT INTO im_folders (user_id, name, sort) VALUES ($1, $2, $3) RETURNING id")
-        .bind(auth.id)
-        .bind(name)
-        .bind(b.sort.unwrap_or(n as i32))
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO im_folders (user_id, name, sort) VALUES ($1, $2, $3) RETURNING id", auth.id, name, b.sort.unwrap_or(n as i32))
         .fetch_one(&state.db)
         .await?;
     if let Some(c) = b.chat_ids {
@@ -349,17 +331,17 @@ async fn new_folder(State(state): State<AppState>, auth: AuthUser, Json(b): Json
 }
 
 async fn own_folder(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<()> {
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM im_folders WHERE id = $1 AND user_id = $2)").bind(id).bind(auth.id).fetch_one(&state.db).await?;
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM im_folders WHERE id = $1 AND user_id = $2) AS "v!""#, id, auth.id).fetch_one(&state.db).await?;
     if ok { Ok(()) } else { Err(AppError::NotFound("folder")) }
 }
 
 async fn update_folder(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<FolderInput>) -> AppResult<Json<Value>> {
     own_folder(&state, &auth, id).await?;
     if let Some(n) = &b.name {
-        sqlx::query("UPDATE im_folders SET name = $2 WHERE id = $1").bind(id).bind(required("folder name", n, 60)?).execute(&state.db).await?;
+        sqlx::query!("UPDATE im_folders SET name = $2 WHERE id = $1", id, required("folder name", n, 60)?).execute(&state.db).await?;
     }
     if let Some(s) = b.sort {
-        sqlx::query("UPDATE im_folders SET sort = $2 WHERE id = $1").bind(id).bind(s).execute(&state.db).await?;
+        sqlx::query!("UPDATE im_folders SET sort = $2 WHERE id = $1", id, s).execute(&state.db).await?;
     }
     if let Some(c) = b.chat_ids {
         set_folder_chats(&state, auth.id, id, &c).await?;
@@ -369,6 +351,6 @@ async fn update_folder(State(state): State<AppState>, auth: AuthUser, Path(id): 
 
 async fn delete_folder(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     own_folder(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM im_folders WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM im_folders WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(folder_list(&state, auth.id).await?))
 }

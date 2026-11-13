@@ -73,13 +73,10 @@ where
         })
         .collect();
     let hashes: Vec<String> = codes.iter().map(|c| hash_token(&normalize_recovery(c))).collect();
-    sqlx::query("DELETE FROM user_recovery_codes WHERE user_id = $1")
-        .bind(user)
+    sqlx::query!("DELETE FROM user_recovery_codes WHERE user_id = $1", user)
         .execute(executor)
         .await?;
-    sqlx::query("INSERT INTO user_recovery_codes (user_id, code_hash) SELECT $1, UNNEST($2::text[])")
-        .bind(user)
-        .bind(&hashes)
+    sqlx::query!("INSERT INTO user_recovery_codes (user_id, code_hash) SELECT $1, UNNEST($2::text[])", user, &hashes)
         .execute(executor)
         .await?;
     Ok(codes)
@@ -91,12 +88,8 @@ pub async fn use_recovery_code(state: &AppState, user: Uuid, code: &str) -> AppR
     if normalized.len() != 10 {
         return Ok(false);
     }
-    let used = sqlx::query(
-        "UPDATE user_recovery_codes SET used_at = now()
-         WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL",
-    )
-    .bind(user)
-    .bind(hash_token(&normalized))
+    let used = sqlx::query!("UPDATE user_recovery_codes SET used_at = now()
+         WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL", user, hash_token(&normalized))
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -104,10 +97,7 @@ pub async fn use_recovery_code(state: &AppState, user: Uuid, code: &str) -> AppR
 }
 
 pub async fn remaining_recovery_codes(state: &AppState, user: Uuid) -> AppResult<i64> {
-    Ok(sqlx::query_scalar(
-        "SELECT COUNT(*) FROM user_recovery_codes WHERE user_id = $1 AND used_at IS NULL",
-    )
-    .bind(user)
+    Ok(sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM user_recovery_codes WHERE user_id = $1 AND used_at IS NULL"#, user)
     .fetch_one(&state.db)
     .await?)
 }

@@ -68,21 +68,15 @@ fn render(name: &str, entries: &[Entry]) -> String {
 
 async fn feed(State(state): State<AppState>, Path(file): Path<String>) -> AppResult<Response> {
     let token = file.strip_suffix(".ics").unwrap_or(&file);
-    let user: Uuid = sqlx::query_scalar("SELECT f.user_id FROM cal_feeds f JOIN users u ON u.id = f.user_id WHERE f.token_hash = $1 AND u.is_active")
-        .bind(hash(token))
+    let user: Uuid = sqlx::query_scalar!("SELECT f.user_id FROM cal_feeds f JOIN users u ON u.id = f.user_id WHERE f.token_hash = $1 AND u.is_active", hash(token))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("calendar"))?;
-    let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await?;
+    let name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, user).fetch_one(&state.db).await?;
     let (from, to) = (Utc::now() - Duration::days(60), Utc::now() + Duration::days(365));
     let base = &state.config.public_url;
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id AND a.user_id = $1
-         WHERE (e.owner_id = $1 OR (a.user_id = $1 AND a.status <> 'declined')) AND e.starts_at < $3 AND (e.recurrence IS NOT NULL OR e.ends_at >= $2)",
-    )
-    .bind(user)
-    .bind(from)
-    .bind(to)
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id AND a.user_id = $1
+         WHERE (e.owner_id = $1 OR (a.user_id = $1 AND a.status <> 'declined')) AND e.starts_at < $3 AND (e.recurrence IS NOT NULL OR e.ends_at >= $2)", user, from, to)
     .fetch_all(&state.db)
     .await?;
     let events = load_events(&state, &ids).await?;
@@ -103,15 +97,10 @@ async fn feed(State(state): State<AppState>, Path(file): Path<String>) -> AppRes
             });
         }
     }
-    let acts: Vec<(Uuid, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Uuid, String, String)> = sqlx::query_as(
-        "SELECT a.id, a.kind, a.subject, COALESCE(a.starts_at, a.deadline), a.ends_at, a.item_id, t.code, i.title
+    let acts: Vec<(Uuid, String, String, DateTime<Utc>, Option<DateTime<Utc>>, Uuid, String, String)> = sqlx::query!(r#"SELECT a.id AS "id!", a.kind AS "kind!", a.subject AS "subject!", COALESCE(a.starts_at, a.deadline) AS "c3!", a.ends_at AS "ends_at?", a.item_id AS "item_id!", t.code AS "code!", i.title AS "title!"
          FROM crm_activities a JOIN crm_items i ON i.id = a.item_id JOIN crm_entity_types t ON t.id = i.entity_type
          WHERE a.responsible_id = $1 AND NOT a.is_completed AND a.kind IN ('call', 'meeting')
-           AND COALESCE(a.starts_at, a.deadline) >= $2 AND COALESCE(a.starts_at, a.deadline) < $3 AND i.deleted_at IS NULL",
-    )
-    .bind(user)
-    .bind(from)
-    .bind(to)
+           AND COALESCE(a.starts_at, a.deadline) >= $2 AND COALESCE(a.starts_at, a.deadline) < $3 AND i.deleted_at IS NULL"#, user, from, to).map(|r| (r.id, r.kind, r.subject, r.c3, r.ends_at, r.item_id, r.code, r.title))
     .fetch_all(&state.db)
     .await?;
     for (id, kind, subject, start, end, item, code, title) in acts {

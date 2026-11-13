@@ -44,7 +44,7 @@ struct Shift {
 }
 
 async fn shifts(state: &AppState) -> AppResult<Vec<Shift>> {
-    Ok(sqlx::query_as("SELECT id, name, start_min, end_min, break_minutes, color, is_active FROM hr_shifts ORDER BY start_min, name").fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(Shift, "SELECT id, name, start_min, end_min, break_minutes, color, is_active FROM hr_shifts ORDER BY start_min, name").fetch_all(&state.db).await?)
 }
 
 async fn list(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
@@ -79,12 +79,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Shi
     let name = required("name", b.name.as_deref().unwrap_or(""), 100)?;
     let (s, e, br) = (b.start_min.unwrap_or(540), b.end_min.unwrap_or(1020), b.break_minutes.unwrap_or(0));
     check(s, e, br)?;
-    sqlx::query("INSERT INTO hr_shifts (name, start_min, end_min, break_minutes, color) VALUES ($1, $2, $3, $4, $5)")
-        .bind(name)
-        .bind(s)
-        .bind(e)
-        .bind(br)
-        .bind(b.color.as_deref().map(colour).transpose()?.unwrap_or_else(|| "#1a73e8".into()))
+    sqlx::query!("INSERT INTO hr_shifts (name, start_min, end_min, break_minutes, color) VALUES ($1, $2, $3, $4, $5)", name, s, e, br, b.color.as_deref().map(colour).transpose()?.unwrap_or_else(|| "#1a73e8".into()))
         .execute(&state.db)
         .await?;
     list(State(state), auth).await
@@ -94,21 +89,12 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if !hr_manager(&auth) {
         return Err(AppError::Forbidden);
     }
-    let cur: Option<(i32, i32, i32)> = sqlx::query_as("SELECT start_min, end_min, break_minutes FROM hr_shifts WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let cur: Option<(i32, i32, i32)> = sqlx::query!(r#"SELECT start_min, end_min, break_minutes FROM hr_shifts WHERE id = $1"#, id).map(|r| (r.start_min, r.end_min, r.break_minutes)).fetch_optional(&state.db).await?;
     let (s0, e0, b0) = cur.ok_or(AppError::NotFound("shift"))?;
     check(b.start_min.unwrap_or(s0), b.end_min.unwrap_or(e0), b.break_minutes.unwrap_or(b0))?;
     let name = b.name.as_deref().map(|n| required("name", n, 100)).transpose()?;
-    sqlx::query(
-        "UPDATE hr_shifts SET name = COALESCE($2, name), start_min = COALESCE($3, start_min), end_min = COALESCE($4, end_min),
-             break_minutes = COALESCE($5, break_minutes), color = COALESCE($6, color), is_active = COALESCE($7, is_active) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(b.start_min)
-    .bind(b.end_min)
-    .bind(b.break_minutes)
-    .bind(b.color.as_deref().map(colour).transpose()?)
-    .bind(b.is_active)
+    sqlx::query!("UPDATE hr_shifts SET name = COALESCE($2, name), start_min = COALESCE($3, start_min), end_min = COALESCE($4, end_min),
+             break_minutes = COALESCE($5, break_minutes), color = COALESCE($6, color), is_active = COALESCE($7, is_active) WHERE id = $1", id, name, b.start_min, b.end_min, b.break_minutes, b.color.as_deref().map(colour).transpose()?, b.is_active)
     .execute(&state.db)
     .await?;
     list(State(state), auth).await
@@ -120,7 +106,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if !hr_manager(&auth) {
         return Err(AppError::Forbidden);
     }
-    sqlx::query("DELETE FROM hr_shifts WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM hr_shifts WHERE id = $1", id).execute(&state.db).await?;
     list(State(state), auth).await
 }
 
@@ -138,10 +124,10 @@ async fn rota(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Rot
     }
     // People: a department's, else those I manage (and me).
     let mut people: Vec<Uuid> = match q.department_id {
-        Some(d) => sqlx::query_scalar("SELECT ud.user_id FROM user_departments ud JOIN users u ON u.id = ud.user_id WHERE ud.department_id = $1 AND u.is_active").bind(d).fetch_all(&state.db).await?,
+        Some(d) => sqlx::query_scalar!("SELECT ud.user_id FROM user_departments ud JOIN users u ON u.id = ud.user_id WHERE ud.department_id = $1 AND u.is_active", d).fetch_all(&state.db).await?,
         None => match managed(&state, &auth).await? {
             Some(list) => list,
-            None => sqlx::query_scalar("SELECT id FROM users WHERE is_active").fetch_all(&state.db).await?,
+            None => sqlx::query_scalar!("SELECT id FROM users WHERE is_active").fetch_all(&state.db).await?,
         },
     };
     if !people.contains(&auth.id) && q.department_id.is_none() {
@@ -154,11 +140,8 @@ async fn rota(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Rot
             visible.push(p);
         }
     }
-    let names: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, trim(first_name || ' ' || last_name) FROM users WHERE id = ANY($1) ORDER BY 2").bind(&visible).fetch_all(&state.db).await?;
-    let entries: Vec<(Uuid, NaiveDate, Uuid, i32)> = sqlx::query_as("SELECT r.user_id, r.day, r.shift_id, s.start_min FROM hr_rota r JOIN hr_shifts s ON s.id = r.shift_id WHERE r.user_id = ANY($1) AND r.day BETWEEN $2 AND $3")
-        .bind(&visible)
-        .bind(q.from)
-        .bind(q.to)
+    let names: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!" FROM users WHERE id = ANY($1) ORDER BY 2"#, &visible).map(|r| (r.id, r.c1)).fetch_all(&state.db).await?;
+    let entries: Vec<(Uuid, NaiveDate, Uuid, i32)> = sqlx::query!(r#"SELECT r.user_id, r.day, r.shift_id, s.start_min FROM hr_rota r JOIN hr_shifts s ON s.id = r.shift_id WHERE r.user_id = ANY($1) AND r.day BETWEEN $2 AND $3"#, &visible, q.from, q.to).map(|r| (r.user_id, r.day, r.shift_id, r.start_min))
         .fetch_all(&state.db)
         .await?;
     let starts = super::time::starts(&state, &visible, q.from, q.to).await?;
@@ -227,16 +210,13 @@ async fn assign(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Ass
         for d in days {
             match e.shift_id {
                 Some(s) => {
-                    sqlx::query("INSERT INTO hr_rota (user_id, day, shift_id) VALUES ($1, $2, $3) ON CONFLICT (user_id, day) DO UPDATE SET shift_id = $3")
-                        .bind(e.user_id)
-                        .bind(d)
-                        .bind(s)
+                    sqlx::query!("INSERT INTO hr_rota (user_id, day, shift_id) VALUES ($1, $2, $3) ON CONFLICT (user_id, day) DO UPDATE SET shift_id = $3", e.user_id, d, s)
                         .execute(&mut *tx)
                         .await
                         .map_err(|_| AppError::bad("no such shift"))?;
                 }
                 None => {
-                    sqlx::query("DELETE FROM hr_rota WHERE user_id = $1 AND day = $2").bind(e.user_id).bind(d).execute(&mut *tx).await?;
+                    sqlx::query!("DELETE FROM hr_rota WHERE user_id = $1 AND day = $2", e.user_id, d).execute(&mut *tx).await?;
                 }
             }
         }
@@ -245,7 +225,7 @@ async fn assign(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Ass
         }
     }
     tx.commit().await?;
-    let me: String = sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    let me: String = sqlx::query_scalar!("SELECT first_name FROM users WHERE id = $1", auth.id).fetch_one(&state.db).await?;
     notify(&state, &told, NewNotification { kind: "hr.rota", title: format!("{me} changed your shifts"), body: None, link: Some("/hr/rota".into()), actor: Some(auth.id) }).await;
     Ok(Json(json!({ "ok": true, "changed": b.entries.len() })))
 }

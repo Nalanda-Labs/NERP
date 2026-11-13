@@ -60,17 +60,13 @@ const TRACKED: &[&str] = &[
 
 pub async fn snapshot(state: &AppState, row: &Row) -> AppResult<Snapshot> {
     let category: Option<String> = match row.category_id {
-        Some(c) => sqlx::query_scalar("SELECT name FROM crm_categories WHERE id = $1").bind(c).fetch_optional(&state.db).await?,
+        Some(c) => sqlx::query_scalar!("SELECT name FROM crm_categories WHERE id = $1", c).fetch_optional(&state.db).await?,
         None => None,
     };
-    let multifields: Vec<String> = sqlx::query_scalar("SELECT value FROM crm_multifields WHERE item_id = $1 ORDER BY kind, sort")
-        .bind(row.id)
+    let multifields: Vec<String> = sqlx::query_scalar!("SELECT value FROM crm_multifields WHERE item_id = $1 ORDER BY kind, sort", row.id)
         .fetch_all(&state.db)
         .await?;
-    let contacts: Vec<String> = sqlx::query_scalar(
-        "SELECT i.title FROM crm_item_contacts l JOIN crm_items i ON i.id = l.contact_id WHERE l.item_id = $1 ORDER BY l.is_primary DESC, l.sort",
-    )
-    .bind(row.id)
+    let contacts: Vec<String> = sqlx::query_scalar!("SELECT i.title FROM crm_item_contacts l JOIN crm_items i ON i.id = l.contact_id WHERE l.item_id = $1 ORDER BY l.is_primary DESC, l.sort", row.id)
     .fetch_all(&state.db)
     .await?;
     Ok(Snapshot { row: serde_json::to_value(row).unwrap_or_default(), category, multifields, contacts })
@@ -135,11 +131,8 @@ pub struct Person {
 }
 
 pub async fn observers(state: &AppState, item: Uuid) -> AppResult<Vec<Person>> {
-    Ok(sqlx::query_as(
-        "SELECT u.id, u.first_name || ' ' || u.last_name AS full_name, u.avatar_file_id
-         FROM crm_item_observers o JOIN users u ON u.id = o.user_id WHERE o.item_id = $1 ORDER BY o.created_at",
-    )
-    .bind(item)
+    Ok(sqlx::query_as!(Person, r#"SELECT u.id AS "id!", u.first_name || ' ' || u.last_name AS "full_name!", u.avatar_file_id AS "avatar_file_id?"
+         FROM crm_item_observers o JOIN users u ON u.id = o.user_id WHERE o.item_id = $1 ORDER BY o.created_at"#, item)
     .fetch_all(&state.db)
     .await?)
 }
@@ -148,7 +141,7 @@ pub async fn observers(state: &AppState, item: Uuid) -> AppResult<Vec<Person>> {
 pub async fn tell_followers(state: &AppState, item: Uuid, actor: Uuid, include_responsible: bool, title: String, body: Option<String>) {
     let Ok(row) = load_row(state, item, false).await else { return };
     let Ok(t) = entity_type_by_id(state, row.entity_type).await else { return };
-    let mut to: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM crm_item_observers WHERE item_id = $1").bind(item).fetch_all(&state.db).await.unwrap_or_default();
+    let mut to: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM crm_item_observers WHERE item_id = $1", item).fetch_all(&state.db).await.unwrap_or_default();
     if include_responsible && let Some(a) = row.assigned_to && !to.contains(&a) {
         to.push(a);
     }
@@ -167,7 +160,7 @@ pub async fn tell_followers(state: &AppState, item: Uuid, actor: Uuid, include_r
 }
 
 async fn user_names(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<String>> {
-    Ok(sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = ANY($1) ORDER BY last_name").bind(ids).fetch_all(&state.db).await?)
+    Ok(sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = ANY($1) ORDER BY last_name"#, ids).fetch_all(&state.db).await?)
 }
 
 #[derive(Deserialize)]
@@ -186,7 +179,7 @@ async fn record_chat(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     }
     let link = crate::im::Link::CrmItem(id);
     if !link.has(&state, auth.id).await? {
-        sqlx::query("INSERT INTO crm_item_observers (item_id, user_id, added_by) VALUES ($1, $2, $2) ON CONFLICT DO NOTHING").bind(id).bind(auth.id).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO crm_item_observers (item_id, user_id, added_by) VALUES ($1, $2, $2) ON CONFLICT DO NOTHING", id, auth.id).execute(&state.db).await?;
         broadcast(&state, row.entity_type, id, false).await;
     }
     Ok(Json(json!({ "chat_id": crate::im::linked_chat(&state, link).await? })))
@@ -202,19 +195,16 @@ async fn set_observers(State(state): State<AppState>, auth: AuthUser, Path(id): 
     if ids.len() > 50 {
         return Err(AppError::bad("at most 50 observers"));
     }
-    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active AND NOT is_system").bind(&ids).fetch_one(&state.db).await?;
+    let active: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active AND NOT is_system"#, &ids).fetch_one(&state.db).await?;
     if active != ids.len() as i64 {
         return Err(AppError::bad("observers must be active employees"));
     }
-    let before: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM crm_item_observers WHERE item_id = $1").bind(id).fetch_all(&state.db).await?;
+    let before: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM crm_item_observers WHERE item_id = $1", id).fetch_all(&state.db).await?;
     let added: Vec<Uuid> = ids.iter().copied().filter(|u| !before.contains(u)).collect();
     let removed: Vec<Uuid> = before.iter().copied().filter(|u| !ids.contains(u)).collect();
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM crm_item_observers WHERE item_id = $1 AND user_id = ANY($2)").bind(id).bind(&removed).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO crm_item_observers (item_id, user_id, added_by) SELECT $1, UNNEST($2::uuid[]), $3 ON CONFLICT DO NOTHING")
-        .bind(id)
-        .bind(&added)
-        .bind(auth.id)
+    sqlx::query!("DELETE FROM crm_item_observers WHERE item_id = $1 AND user_id = ANY($2)", id, &removed).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO crm_item_observers (item_id, user_id, added_by) SELECT $1, UNNEST($2::uuid[]), $3 ON CONFLICT DO NOTHING", id, &added, auth.id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -246,15 +236,14 @@ pub async fn link_task(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, state: &A
     for &item in items.iter().take(20) {
         let row = load_row(state, item, false).await?;
         require_read(state, auth, row.entity_type, item, row.assigned_to).await?;
-        sqlx::query("INSERT INTO task_crm_links (task_id, item_id) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(task).bind(item).execute(&mut **tx).await?;
+        sqlx::query!("INSERT INTO task_crm_links (task_id, item_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", task, item).execute(&mut **tx).await?;
     }
     Ok(())
 }
 
 /// After a linked task was created or finished: a timeline entry on each record.
 pub async fn task_event(state: &AppState, task: Uuid, event: &str, actor: Uuid) {
-    let links: Vec<(Uuid, i64, String)> = sqlx::query_as("SELECT l.item_id, t.number, t.title FROM task_crm_links l JOIN tasks t ON t.id = l.task_id WHERE l.task_id = $1")
-        .bind(task)
+    let links: Vec<(Uuid, i64, String)> = sqlx::query!(r#"SELECT l.item_id, t.number, t.title FROM task_crm_links l JOIN tasks t ON t.id = l.task_id WHERE l.task_id = $1"#, task).map(|r| (r.item_id, r.number, r.title))
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -265,8 +254,7 @@ pub async fn task_event(state: &AppState, task: Uuid, event: &str, actor: Uuid) 
         }
         // The last of the record's tasks done: triggers waiting for that move it on.
         if event == "completed" {
-            let open: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM task_crm_links l JOIN tasks t ON t.id = l.task_id WHERE l.item_id = $1 AND t.status <> 'done')")
-                .bind(item)
+            let open: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM task_crm_links l JOIN tasks t ON t.id = l.task_id WHERE l.item_id = $1 AND t.status <> 'done') AS "v!""#, item)
                 .fetch_one(&state.db)
                 .await
                 .unwrap_or(true);
@@ -297,12 +285,9 @@ impl LinkedRecord {
 }
 
 pub async fn task_records(state: &AppState, auth: &AuthUser, task: Uuid) -> AppResult<Vec<LinkedRecord>> {
-    let all: Vec<LinkedRecord> = sqlx::query_as(
-        "SELECT i.id, i.entity_type, t.code, t.name AS type_name, i.number, i.title, i.assigned_to
+    let all: Vec<LinkedRecord> = sqlx::query_as!(LinkedRecord, r#"SELECT i.id, i.entity_type, t.code, t.name AS type_name, i.number, i.title, i.assigned_to AS "assigned_to?"
          FROM task_crm_links l JOIN crm_items i ON i.id = l.item_id JOIN crm_entity_types t ON t.id = i.entity_type
-         WHERE l.task_id = $1 AND i.deleted_at IS NULL ORDER BY l.created_at",
-    )
-    .bind(task)
+         WHERE l.task_id = $1 AND i.deleted_at IS NULL ORDER BY l.created_at"#, task)
     .fetch_all(&state.db)
     .await?;
     let mut out = Vec::new();
@@ -377,7 +362,7 @@ async fn check_types(state: &AppState, types: &[i16]) -> AppResult<Vec<i16>> {
     let mut t = types.to_vec();
     t.sort_unstable();
     t.dedup();
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_entity_types WHERE id = ANY($1)").bind(&t).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_entity_types WHERE id = ANY($1)"#, &t).fetch_one(&state.db).await?;
     if n != t.len() as i64 {
         return Err(AppError::bad("unknown record type"));
     }
@@ -415,19 +400,11 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Json(b):
     if shared && !is_crm_admin(&auth) {
         return Err(AppError::Forbidden);
     }
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_email_templates WHERE owner_id IS NOT DISTINCT FROM $1").bind((!shared).then_some(auth.id)).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_email_templates WHERE owner_id IS NOT DISTINCT FROM $1"#, (!shared).then_some(auth.id)).fetch_one(&state.db).await?;
     if n >= 500 {
         return Err(AppError::bad("at most 500 templates"));
     }
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_email_templates (name, subject, body, entity_types, owner_id, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-    )
-    .bind(required("name", b.name.as_deref().unwrap_or(""), 120)?)
-    .bind(text(b.subject.as_deref(), "subject", 300)?)
-    .bind(text(b.body.as_deref(), "message", 50_000)?)
-    .bind(check_types(&state, &b.entity_types.unwrap_or_default()).await?)
-    .bind((!shared).then_some(auth.id))
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_email_templates (name, subject, body, entity_types, owner_id, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", required("name", b.name.as_deref().unwrap_or(""), 120)?, text(b.subject.as_deref(), "subject", 300)?, text(b.body.as_deref(), "message", 50_000)?, &(check_types(&state, &b.entity_types.unwrap_or_default()).await?), (!shared).then_some(auth.id), auth.id)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(load_template(&state, id).await?))
@@ -446,13 +423,7 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
         Some(false) if cur.owner_id.is_none() => Some(auth.id),
         _ => cur.owner_id,
     };
-    sqlx::query("UPDATE crm_email_templates SET name = $2, subject = $3, body = $4, entity_types = $5, owner_id = $6, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(match &b.name { Some(n) => required("name", n, 120)?, None => cur.name })
-        .bind(match &b.subject { Some(s) => text(Some(s), "subject", 300)?, None => cur.subject })
-        .bind(match &b.body { Some(s) => text(Some(s), "message", 50_000)?, None => cur.body })
-        .bind(match &b.entity_types { Some(t) => check_types(&state, t).await?, None => cur.entity_types })
-        .bind(owner)
+    sqlx::query!("UPDATE crm_email_templates SET name = $2, subject = $3, body = $4, entity_types = $5, owner_id = $6, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 120)?, None => cur.name }, match &b.subject { Some(s) => text(Some(s), "subject", 300)?, None => cur.subject }, match &b.body { Some(s) => text(Some(s), "message", 50_000)?, None => cur.body }, &(match &b.entity_types { Some(t) => check_types(&state, t).await?, None => cur.entity_types }), owner)
         .execute(&state.db)
         .await?;
     Ok(Json(load_template(&state, id).await?))
@@ -461,7 +432,7 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
 async fn delete_template(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let cur = load_template(&state, id).await?;
     may_change(&auth, &cur)?;
-    sqlx::query("DELETE FROM crm_email_templates WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_email_templates WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -482,7 +453,7 @@ async fn render_template(State(state): State<AppState>, auth: AuthUser, Path(id)
     // The sender is whoever writes, not the record's responsible person.
     let mut v = ctx.value;
     super::fields::strip_uf(&mut v["uf"], &super::fields::hidden_codes(&state, &auth, row.entity_type).await?);
-    let me: Option<(String, String)> = sqlx::query_as("SELECT first_name || ' ' || last_name, email FROM users WHERE id = $1").bind(auth.id).fetch_optional(&state.db).await?;
+    let me: Option<(String, String)> = sqlx::query!(r#"SELECT first_name || ' ' || last_name AS "c0!", email AS "email!" FROM users WHERE id = $1"#, auth.id).map(|r| (r.c0, r.email)).fetch_optional(&state.db).await?;
     if let Some((name, email)) = me {
         v["me"] = json!({ "name": name, "email": email });
     }

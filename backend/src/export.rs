@@ -118,10 +118,8 @@ struct Export {
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::SYSTEM_MANAGE)?;
-    let items: Vec<Export> = sqlx::query_as(
-        "SELECT e.*, CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS requested_by_name
-         FROM company_exports e LEFT JOIN users u ON u.id = e.requested_by ORDER BY e.created_at DESC LIMIT 50",
-    )
+    let items: Vec<Export> = sqlx::query_as!(Export, r#"SELECT e.*, CASE WHEN u.id IS NULL THEN NULL ELSE u.first_name || ' ' || u.last_name END AS "requested_by_name?"
+         FROM company_exports e LEFT JOIN users u ON u.id = e.requested_by ORDER BY e.created_at DESC LIMIT 50"#)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": items, "keep_days": keep_days() })))
@@ -138,12 +136,8 @@ fn yes() -> bool {
 
 async fn start(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Json(b): Json<StartInput>) -> AppResult<Json<Value>> {
     auth.require(perm::SYSTEM_MANAGE)?;
-    let id: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO company_exports (include_files, requested_by)
-         SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM company_exports WHERE status = 'running') RETURNING id",
-    )
-    .bind(b.include_files)
-    .bind(auth.id)
+    let id: Option<Uuid> = sqlx::query_scalar!("INSERT INTO company_exports (include_files, requested_by)
+         SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM company_exports WHERE status = 'running') RETURNING id", b.include_files, auth.id)
     .fetch_optional(&state.db)
     .await?;
     let Some(id) = id else { return Err(AppError::Conflict("An export is already running".into())) };
@@ -173,8 +167,7 @@ async fn start(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clie
 }
 
 async fn find(state: &AppState, id: Uuid) -> AppResult<Export> {
-    sqlx::query_as("SELECT e.*, NULL::text AS requested_by_name FROM company_exports e WHERE id = $1")
-        .bind(id)
+    sqlx::query_as!(Export, r#"SELECT e.*, NULL::text AS "requested_by_name?" FROM company_exports e WHERE id = $1"#, id)
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("export"))
@@ -199,14 +192,14 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cli
         return Err(AppError::Conflict("The export is still running".into()));
     }
     let _ = tokio::fs::remove_file(dir(&state).join(format!("{id}.zip"))).await;
-    sqlx::query("DELETE FROM company_exports WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM company_exports WHERE id = $1", id).execute(&state.db).await?;
     audit::record(&state.db, Some(auth.id), "system.export_delete", "export", Some(id.to_string()), json!({}), ip.as_deref()).await;
     Ok(Json(json!({ "ok": true })))
 }
 
 /// At start: exports interrupted by a restart never finish.
 pub async fn at_start(state: &AppState) -> anyhow::Result<()> {
-    sqlx::query("UPDATE company_exports SET status = 'failed', error = 'The server restarted during the export', finished_at = now() WHERE status = 'running'")
+    sqlx::query!("UPDATE company_exports SET status = 'failed', error = 'The server restarted during the export', finished_at = now() WHERE status = 'running'")
         .execute(&state.db)
         .await?;
     for e in std::fs::read_dir(dir(state)).into_iter().flatten().flatten() {
@@ -219,8 +212,7 @@ pub async fn at_start(state: &AppState) -> anyhow::Result<()> {
 
 /// Daily: removes exports older than EXPORT_KEEP_DAYS.
 pub async fn run_purge(state: &AppState) -> anyhow::Result<()> {
-    let old: Vec<Uuid> = sqlx::query_scalar("DELETE FROM company_exports WHERE status <> 'running' AND created_at < now() - make_interval(days => $1::int) RETURNING id")
-        .bind(keep_days() as i32)
+    let old: Vec<Uuid> = sqlx::query_scalar!("DELETE FROM company_exports WHERE status <> 'running' AND created_at < now() - make_interval(days => $1::int) RETURNING id", keep_days() as i32)
         .fetch_all(&state.db)
         .await?;
     for id in old {
@@ -309,7 +301,7 @@ async fn run(state: &AppState, id: Uuid, include_files: bool) -> anyhow::Result<
 
     // One consistent snapshot for every table.
     let mut db = state.db.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *db).await?;
+    sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *db).await?;
     let cols: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT c.table_name::text, c.column_name::text, c.data_type::text, c.is_nullable::text
          FROM information_schema.columns c JOIN information_schema.tables t USING (table_schema, table_name)
@@ -357,7 +349,7 @@ async fn run(state: &AppState, id: Uuid, include_files: bool) -> anyhow::Result<
     let mut file_info = vec![];
     if include_files {
         let files: Vec<(Uuid, String, String, String, Option<String>, i64)> =
-            sqlx::query_as("SELECT id, original_name, mime_type, storage_path, enc_key, size_bytes FROM files ORDER BY created_at, id").fetch_all(&mut *db).await?;
+            sqlx::query!(r#"SELECT id, original_name, mime_type, storage_path, enc_key, size_bytes FROM files ORDER BY created_at, id"#).map(|r| (r.id, r.original_name, r.mime_type, r.storage_path, r.enc_key, r.size_bytes)).fetch_all(&mut *db).await?;
         for (fid, name, mime, rel, key, size) in files {
             let path = format!("files/{fid}/{}", safe_name(&name));
             let blob = match crate::blob::open(&state.config.file_keys, &state.config.upload_dir.join(&rel), key.as_deref()).await {
@@ -376,9 +368,9 @@ async fn run(state: &AppState, id: Uuid, include_files: bool) -> anyhow::Result<
             file_info.push(json!({ "id": fid, "name": name, "mime_type": mime, "size": size, "path": path }));
         }
     }
-    let head: Option<(i64, Vec<u8>)> = sqlx::query_as("SELECT chain_pos, hash FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1").fetch_optional(&mut *db).await?;
-    let schema: Option<i64> = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations").fetch_one(&mut *db).await?;
-    let company: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&mut *db).await?;
+    let head: Option<(i64, Vec<u8>)> = sqlx::query!(r#"SELECT chain_pos AS "chain_pos!", hash AS "hash!" FROM audit_log WHERE chain_pos IS NOT NULL ORDER BY chain_pos DESC LIMIT 1"#).map(|r| (r.chain_pos, r.hash)).fetch_optional(&mut *db).await?;
+    let schema: Option<i64> = sqlx::query_scalar!(r#"SELECT max(version) AS "v?" FROM _sqlx_migrations"#).fetch_one(&mut *db).await?;
+    let company: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&mut *db).await?;
     db.commit().await?;
 
     send(Msg::Start("README.txt".into())).await?;

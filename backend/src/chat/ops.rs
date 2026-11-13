@@ -57,15 +57,12 @@ pub(crate) fn online(hours: &Option<Value>, timezone: &str, at: DateTime<Utc>) -
 /// fill of open chats (and `skip`). None when the channel offers chats to everyone, or nobody
 /// is free.
 pub(crate) async fn pick(state: &AppState, channel: Uuid, skip: &[Uuid]) -> AppResult<Option<Uuid>> {
-    let (ops, distribution, max): (Vec<Uuid>, String, Option<i32>) = sqlx::query_as("SELECT operators, distribution, max_chats FROM chat_channels WHERE id = $1").bind(channel).fetch_one(&state.db).await?;
+    let (ops, distribution, max): (Vec<Uuid>, String, Option<i32>) = sqlx::query!(r#"SELECT operators, distribution, max_chats FROM chat_channels WHERE id = $1"#, channel).map(|r| (r.operators, r.distribution, r.max_chats)).fetch_one(&state.db).await?;
     if distribution == "all" {
         return Ok(None);
     }
-    let active: Vec<(Uuid, i64)> = sqlx::query_as(
-        "SELECT u.h, (SELECT COUNT(*) FROM chat_sessions s WHERE s.assigned_to = u.h AND s.status = 'open')
-         FROM unnest($1::uuid[]) WITH ORDINALITY u(h, n) JOIN users ON users.id = u.h AND users.is_active ORDER BY u.n",
-    )
-    .bind(&ops)
+    let active: Vec<(Uuid, i64)> = sqlx::query!(r#"SELECT u.h AS "h!", (SELECT COUNT(*) FROM chat_sessions s WHERE s.assigned_to = u.h AND s.status = 'open') AS "c1!"
+         FROM unnest($1::uuid[]) WITH ORDINALITY u(h, n) JOIN users ON users.id = u.h AND users.is_active ORDER BY u.n"#, &ops).map(|r| (r.h, r.c1))
     .fetch_all(&state.db)
     .await?;
     let free: Vec<Uuid> = active.into_iter().filter(|(u, n)| !skip.contains(u) && max.is_none_or(|m| *n < m as i64)).map(|(u, _)| u).collect();
@@ -78,39 +75,37 @@ pub(crate) async fn pick(state: &AppState, channel: Uuid, skip: &[Uuid]) -> AppR
 }
 
 async fn system(state: &AppState, session: Uuid, body: &str) -> AppResult<()> {
-    sqlx::query("INSERT INTO chat_messages (session_id, author, body) VALUES ($1, 'system', $2)").bind(session).bind(body).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO chat_messages (session_id, author, body) VALUES ($1, 'system', $2)", session, body).execute(&state.db).await?;
     Ok(())
 }
 
 /// A message to the visitor from the channel (no operator's name on it).
 pub(crate) async fn auto(state: &AppState, session: Uuid, body: &str) -> AppResult<()> {
-    sqlx::query("INSERT INTO chat_messages (session_id, author, body) VALUES ($1, 'operator', $2)").bind(session).bind(body).execute(&state.db).await?;
-    sqlx::query("UPDATE chat_sessions SET last_message_at = now() WHERE id = $1").bind(session).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO chat_messages (session_id, author, body) VALUES ($1, 'operator', $2)", session, body).execute(&state.db).await?;
+    sqlx::query!("UPDATE chat_sessions SET last_message_at = now() WHERE id = $1", session).execute(&state.db).await?;
     Ok(())
 }
 
 async fn first_name(state: &AppState, u: Uuid) -> AppResult<String> {
-    Ok(sqlx::query_scalar("SELECT first_name FROM users WHERE id = $1").bind(u).fetch_one(&state.db).await?)
+    Ok(sqlx::query_scalar!("SELECT first_name FROM users WHERE id = $1", u).fetch_one(&state.db).await?)
 }
 
 /// Every minute: passes on chats nobody answered, tells waiting visitors, closes idle chats.
 pub async fn maintenance(state: &AppState) -> Result<()> {
     // Unanswered since given to someone: to the next operator.
-    let stale: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT s.id, s.channel_id, s.assigned_to FROM chat_sessions s JOIN chat_channels c ON c.id = s.channel_id
+    let stale: Vec<(Uuid, Uuid, Uuid)> = sqlx::query!(r#"SELECT s.id AS "id!", s.channel_id AS "channel_id!", s.assigned_to AS "assigned_to!" FROM chat_sessions s JOIN chat_channels c ON c.id = s.channel_id
          WHERE s.status = 'open' AND s.assigned_to IS NOT NULL AND c.requeue_minutes IS NOT NULL AND c.distribution = 'queue'
            AND s.offered_at < now() - make_interval(mins => c.requeue_minutes)
-           AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.author = 'operator' AND m.user_id = s.assigned_to AND m.created_at >= s.offered_at)",
-    )
+           AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.author = 'operator' AND m.user_id = s.assigned_to AND m.created_at >= s.offered_at)"#).map(|r| (r.id, r.channel_id, r.assigned_to))
     .fetch_all(&state.db)
     .await?;
     for (id, channel, current) in stale {
         let Some(next) = pick(state, channel, &[current]).await? else {
             // Nobody else: keep it, and don't look again until the next round of minutes.
-            sqlx::query("UPDATE chat_sessions SET offered_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("UPDATE chat_sessions SET offered_at = now() WHERE id = $1", id).execute(&state.db).await?;
             continue;
         };
-        sqlx::query("UPDATE chat_sessions SET assigned_to = $2, offered_at = now() WHERE id = $1").bind(id).bind(next).execute(&state.db).await?;
+        sqlx::query!("UPDATE chat_sessions SET assigned_to = $2, offered_at = now() WHERE id = $1", id, next).execute(&state.db).await?;
         let (from, to) = (first_name(state, current).await?, first_name(state, next).await?);
         system(state, id, &format!("Nobody answered: passed from {from} to {to}")).await?;
         notify(state, &[next], NewNotification { kind: "chat.new", title: format!("A chat waiting for an answer was passed to you"), body: None, link: Some(format!("/chats?session={id}")), actor: None }).await;
@@ -126,15 +121,13 @@ pub async fn maintenance(state: &AppState) -> Result<()> {
     .await?;
     for (id, msg) in waiting {
         auto(state, id, &msg).await?;
-        sqlx::query("UPDATE chat_sessions SET no_answer_sent = TRUE WHERE id = $1").bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE chat_sessions SET no_answer_sent = TRUE WHERE id = $1", id).execute(&state.db).await?;
         announce(state, id, "chat.message").await;
     }
     // Idle chats close (with the closing message).
-    let idle: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT s.id FROM chat_sessions s JOIN chat_channels c ON c.id = s.channel_id
+    let idle: Vec<Uuid> = sqlx::query_scalar!("SELECT s.id FROM chat_sessions s JOIN chat_channels c ON c.id = s.channel_id
          WHERE s.status = 'open' AND c.idle_close_minutes IS NOT NULL AND s.last_message_at < now() - make_interval(mins => c.idle_close_minutes)
-           AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.author = 'visitor')",
-    )
+           AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.session_id = s.id AND m.author = 'visitor')")
     .fetch_all(&state.db)
     .await?;
     for id in idle {
@@ -148,7 +141,7 @@ pub async fn maintenance(state: &AppState) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn list_canned(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
-    let rows: Vec<(Uuid, Option<Uuid>, String, String, String)> = sqlx::query_as("SELECT id, channel_id, shortcut, title, body FROM chat_canned ORDER BY lower(shortcut)").fetch_all(&state.db).await?;
+    let rows: Vec<(Uuid, Option<Uuid>, String, String, String)> = sqlx::query!(r#"SELECT id, channel_id, shortcut, title, body FROM chat_canned ORDER BY lower(shortcut)"#).map(|r| (r.id, r.channel_id, r.shortcut, r.title, r.body)).fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, c, s, t, b)| json!({ "id": id, "channel_id": c, "shortcut": s, "title": t, "body": b })).collect::<Vec<_>>() })))
 }
 
@@ -174,12 +167,7 @@ async fn create_canned(State(state): State<AppState>, auth: AuthUser, Json(b): J
     let sc = shortcut(b.shortcut.as_deref().unwrap_or(""))?;
     let title = required("title", b.title.as_deref().unwrap_or(""), 120)?;
     let body = required("text", b.body.as_deref().unwrap_or(""), 4000)?;
-    sqlx::query("INSERT INTO chat_canned (channel_id, shortcut, title, body, created_by) VALUES ($1, $2, $3, $4, $5)")
-        .bind(b.channel_id.flatten())
-        .bind(sc)
-        .bind(title)
-        .bind(body)
-        .bind(auth.id)
+    sqlx::query!("INSERT INTO chat_canned (channel_id, shortcut, title, body, created_by) VALUES ($1, $2, $3, $4, $5)", b.channel_id.flatten(), sc, title, body, auth.id)
         .execute(&state.db)
         .await
         .map_err(|_| AppError::Conflict("that short code is taken".into()))?;
@@ -191,13 +179,7 @@ async fn update_canned(State(state): State<AppState>, auth: AuthUser, Path(id): 
     let sc = b.shortcut.as_deref().map(shortcut).transpose()?;
     let title = b.title.as_deref().map(|t| required("title", t, 120)).transpose()?;
     let body = b.body.as_deref().map(|t| required("text", t, 4000)).transpose()?;
-    sqlx::query("UPDATE chat_canned SET shortcut = COALESCE($2, shortcut), title = COALESCE($3, title), body = COALESCE($4, body), channel_id = CASE WHEN $5 THEN $6 ELSE channel_id END WHERE id = $1")
-        .bind(id)
-        .bind(sc)
-        .bind(title)
-        .bind(body)
-        .bind(b.channel_id.is_some())
-        .bind(b.channel_id.flatten())
+    sqlx::query!("UPDATE chat_canned SET shortcut = COALESCE($2, shortcut), title = COALESCE($3, title), body = COALESCE($4, body), channel_id = CASE WHEN $5 THEN $6 ELSE channel_id END WHERE id = $1", id, sc, title, body, b.channel_id.is_some(), b.channel_id.flatten())
         .execute(&state.db)
         .await
         .map_err(|_| AppError::Conflict("that short code is taken".into()))?;
@@ -206,7 +188,7 @@ async fn update_canned(State(state): State<AppState>, auth: AuthUser, Path(id): 
 
 async fn delete_canned(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     auth.require(perm::CHAT)?;
-    sqlx::query("DELETE FROM chat_canned WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM chat_canned WHERE id = $1", id).execute(&state.db).await?;
     list_canned(State(state), auth).await
 }
 
@@ -231,10 +213,10 @@ async fn transfer(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         return Err(AppError::bad("pass it to a colleague or a channel"));
     }
     let channel = b.channel_id.unwrap_or(s.channel_id);
-    let (ops, cname): (Vec<Uuid>, String) = sqlx::query_as("SELECT operators, name FROM chat_channels WHERE id = $1 AND is_active").bind(channel).fetch_optional(&state.db).await?.ok_or_else(|| AppError::bad("no such channel"))?;
+    let (ops, cname): (Vec<Uuid>, String) = sqlx::query!(r#"SELECT operators, name FROM chat_channels WHERE id = $1 AND is_active"#, channel).map(|r| (r.operators, r.name)).fetch_optional(&state.db).await?.ok_or_else(|| AppError::bad("no such channel"))?;
     let to = match b.user_id {
         Some(u) => {
-            let active: bool = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1").bind(u).fetch_optional(&state.db).await?.unwrap_or(false);
+            let active: bool = sqlx::query_scalar!("SELECT is_active FROM users WHERE id = $1", u).fetch_optional(&state.db).await?.unwrap_or(false);
             if !active || !ops.contains(&u) {
                 return Err(AppError::bad("pass it to an operator of the channel"));
             }
@@ -242,7 +224,7 @@ async fn transfer(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         }
         None => pick(&state, channel, s.assigned_to.as_slice()).await?,
     };
-    sqlx::query("UPDATE chat_sessions SET channel_id = $2, assigned_to = $3, offered_at = now() WHERE id = $1").bind(id).bind(channel).bind(to).execute(&state.db).await?;
+    sqlx::query!("UPDATE chat_sessions SET channel_id = $2, assigned_to = $3, offered_at = now() WHERE id = $1", id, channel, to).execute(&state.db).await?;
     let me = first_name(&state, auth.id).await?;
     let msg = match (to, b.channel_id) {
         (Some(u), Some(_)) => format!("{me} passed the chat to {} in “{cname}”", first_name(&state, u).await?),
@@ -272,11 +254,7 @@ async fn review(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if !(1..=5).contains(&b.score) {
         return Err(AppError::bad("score 1 to 5"));
     }
-    sqlx::query("UPDATE chat_sessions SET review_score = $2, review_comment = $3, reviewed_by = $4, reviewed_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(b.score)
-        .bind(crate::routes::clean(b.comment).map(|c| c.chars().take(2000).collect::<String>()))
-        .bind(auth.id)
+    sqlx::query!("UPDATE chat_sessions SET review_score = $2, review_comment = $3, reviewed_by = $4, reviewed_at = now() WHERE id = $1", id, b.score, crate::routes::clean(b.comment).map(|c| c.chars().take(2000).collect::<String>()), auth.id)
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "ok": true })))

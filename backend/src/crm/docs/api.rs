@@ -217,21 +217,17 @@ async fn may_use(state: &AppState, auth: &AuthUser, t: &Template) -> AppResult<b
     if t.department_ids.is_empty() {
         return Ok(false);
     }
-    Ok(sqlx::query_scalar(
-        "WITH RECURSIVE mine AS (
+    Ok(sqlx::query_scalar!(r#"WITH RECURSIVE mine AS (
              SELECT department_id AS id FROM user_departments WHERE user_id = $1
              UNION SELECT d.parent_id FROM departments d JOIN mine ON d.id = mine.id WHERE d.parent_id IS NOT NULL)
-         SELECT EXISTS (SELECT 1 FROM mine WHERE id = ANY($2))",
-    )
-    .bind(auth.id)
-    .bind(&t.department_ids)
+         SELECT EXISTS (SELECT 1 FROM mine WHERE id = ANY($2)) AS "v!""#, auth.id, &t.department_ids)
     .fetch_one(&state.db)
     .await?)
 }
 
 async fn check_people(state: &AppState, users: &[Uuid], deps: &[Uuid]) -> AppResult<()> {
-    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND NOT is_guest").bind(users).fetch_one(&state.db).await?;
-    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(deps).fetch_one(&state.db).await?;
+    let u: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND NOT is_guest"#, users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM departments WHERE id = ANY($1)"#, deps).fetch_one(&state.db).await?;
     if u as usize != users.len() || d as usize != deps.len() || users.len() + deps.len() > 200 {
         return Err(AppError::bad("choose employees and existing departments"));
     }
@@ -404,22 +400,8 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Json(b):
     };
     let (users, deps) = (b.user_ids.clone().unwrap_or_default(), b.department_ids.clone().unwrap_or_default());
     check_people(&state, &users, &deps).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_doc_templates (name, engine, entity_types, doc_title, locale, source, file_id, number_prefix, is_active, created_by, user_ids, department_ids)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
-    )
-    .bind(&name)
-    .bind(&engine)
-    .bind(&types)
-    .bind(required("document title", b.doc_title.as_deref().unwrap_or("Invoice"), 100)?)
-    .bind(check_locale(b.locale.as_deref().unwrap_or(""))?)
-    .bind(source)
-    .bind(file_id)
-    .bind(check_prefix(b.number_prefix.as_deref().unwrap_or("INV-{YYYY}-"))?)
-    .bind(b.is_active.unwrap_or(true))
-    .bind(auth.id)
-    .bind(&users)
-    .bind(&deps)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_doc_templates (name, engine, entity_types, doc_title, locale, source, file_id, number_prefix, is_active, created_by, user_ids, department_ids)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id", &name, &engine, &types, required("document title", b.doc_title.as_deref().unwrap_or("Invoice"), 100)?, check_locale(b.locale.as_deref().unwrap_or(""))?, source, file_id, check_prefix(b.number_prefix.as_deref().unwrap_or("INV-{YYYY}-"))?, b.is_active.unwrap_or(true), auth.id, &users, &deps)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(load_template(&state, id).await?))
@@ -448,21 +430,8 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
     let users = b.user_ids.clone().unwrap_or(cur.user_ids.clone());
     let deps = b.department_ids.clone().unwrap_or(cur.department_ids.clone());
     check_people(&state, &users, &deps).await?;
-    sqlx::query(
-        "UPDATE crm_doc_templates SET name = $2, entity_types = $3, doc_title = $4, locale = $5, source = $6, file_id = $7,
-             number_prefix = $8, is_active = $9, user_ids = $10, department_ids = $11, updated_at = now() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(match &b.name { Some(n) => required("name", n, 200)?, None => cur.name })
-    .bind(&types)
-    .bind(match &b.doc_title { Some(t) => required("document title", t, 100)?, None => cur.doc_title })
-    .bind(match &b.locale { Some(l) => check_locale(l)?, None => cur.locale })
-    .bind(if cur.engine == "office" { None } else { b.source.or(cur.source) })
-    .bind(file_id)
-    .bind(match &b.number_prefix { Some(p) => check_prefix(p)?, None => cur.number_prefix })
-    .bind(b.is_active.unwrap_or(cur.is_active))
-    .bind(&users)
-    .bind(&deps)
+    sqlx::query!("UPDATE crm_doc_templates SET name = $2, entity_types = $3, doc_title = $4, locale = $5, source = $6, file_id = $7,
+             number_prefix = $8, is_active = $9, user_ids = $10, department_ids = $11, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 200)?, None => cur.name }, &types, match &b.doc_title { Some(t) => required("document title", t, 100)?, None => cur.doc_title }, match &b.locale { Some(l) => check_locale(l)?, None => cur.locale }, if cur.engine == "office" { None } else { b.source.or(cur.source) }, file_id, match &b.number_prefix { Some(p) => check_prefix(p)?, None => cur.number_prefix }, b.is_active.unwrap_or(cur.is_active), &users, &deps)
     .execute(&state.db)
     .await?;
     Ok(Json(load_template(&state, id).await?))
@@ -471,7 +440,7 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
 async fn delete_template(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_admin(&auth)?;
     // Documents already generated keep their PDFs and the template's name.
-    let n = sqlx::query("DELETE FROM crm_doc_templates WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM crm_doc_templates WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("template"));
     }
@@ -607,8 +576,7 @@ pub async fn seed(state: &AppState) -> anyhow::Result<()> {
     for b in BUILTINS {
         // (id, source, file_id, edited by an admin since it was added or last upgraded)
         let existing: Option<(Uuid, Option<String>, Option<Uuid>, bool)> =
-            sqlx::query_as("SELECT id, source, file_id, updated_at > created_at FROM crm_doc_templates WHERE builtin_key = $1")
-                .bind(b.key)
+            sqlx::query!(r#"SELECT id AS "id!", source AS "source?", file_id AS "file_id?", updated_at > created_at AS "c3!" FROM crm_doc_templates WHERE builtin_key = $1"#, b.key).map(|r| (r.id, r.source, r.file_id, r.c3))
                 .fetch_optional(&state.db)
                 .await?;
         if let Some((id, source, file_id, edited)) = existing {
@@ -624,7 +592,7 @@ pub async fn seed(state: &AppState) -> anyhow::Result<()> {
                     };
                     if !same {
                         let f = store_docx(state, name, bytes).await?;
-                        sqlx::query("UPDATE crm_doc_templates SET file_id = $2 WHERE id = $1").bind(id).bind(f).execute(&state.db).await?;
+                        sqlx::query!("UPDATE crm_doc_templates SET file_id = $2 WHERE id = $1", id, f).execute(&state.db).await?;
                         if let Some(old) = file_id {
                             files::delete_stored(state, old).await;
                         }
@@ -633,7 +601,7 @@ pub async fn seed(state: &AppState) -> anyhow::Result<()> {
                 }
                 Src::Text(new) => {
                     if source.as_deref() != Some(new) {
-                        sqlx::query("UPDATE crm_doc_templates SET source = $2 WHERE id = $1").bind(id).bind(new).execute(&state.db).await?;
+                        sqlx::query!("UPDATE crm_doc_templates SET source = $2 WHERE id = $1", id, new).execute(&state.db).await?;
                         tracing::info!(template = b.key, "upgraded built-in document template");
                     }
                 }
@@ -644,19 +612,8 @@ pub async fn seed(state: &AppState) -> anyhow::Result<()> {
             Src::Text(t) => (Some(t), None),
             Src::Docx(bytes, name) => (None, Some(store_docx(state, name, bytes).await?)),
         };
-        sqlx::query(
-            "INSERT INTO crm_doc_templates (name, engine, entity_types, doc_title, source, file_id, number_prefix, builtin_key, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (builtin_key) DO NOTHING",
-        )
-        .bind(b.name)
-        .bind(b.engine)
-        .bind(b.types)
-        .bind(b.title)
-        .bind(source)
-        .bind(file_id)
-        .bind(b.prefix)
-        .bind(b.key)
-        .bind(available(b.engine))
+        sqlx::query!("INSERT INTO crm_doc_templates (name, engine, entity_types, doc_title, source, file_id, number_prefix, builtin_key, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (builtin_key) DO NOTHING", b.name, b.engine, b.types, b.title, source, file_id, b.prefix, b.key, available(b.engine))
         .execute(&state.db)
         .await?;
     }
@@ -730,11 +687,8 @@ pub fn expand_prefix(prefix: &str, now: DateTime<Utc>) -> String {
 /// Next gap-free number for a prefix, inside the caller's transaction.
 async fn next_number(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, prefix: &str) -> sqlx::Result<String> {
     let resolved = expand_prefix(prefix, Utc::now());
-    let n: i64 = sqlx::query_scalar(
-        "INSERT INTO crm_doc_counters (prefix, value) VALUES ($1, 1)
-         ON CONFLICT (prefix) DO UPDATE SET value = crm_doc_counters.value + 1 RETURNING value",
-    )
-    .bind(&resolved)
+    let n: i64 = sqlx::query_scalar!("INSERT INTO crm_doc_counters (prefix, value) VALUES ($1, 1)
+         ON CONFLICT (prefix) DO UPDATE SET value = crm_doc_counters.value + 1 RETURNING value", &resolved)
     .fetch_one(&mut **tx)
     .await?;
     Ok(format!("{resolved}{n:04}"))
@@ -770,16 +724,8 @@ pub async fn generate(state: &AppState, auth: &AuthUser, item: Uuid, template_id
 
     let mut tx = state.db.begin().await?;
     let number = next_number(&mut tx, &t.number_prefix).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_documents (item_id, template_id, template_name, engine, number, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-    )
-    .bind(item)
-    .bind(t.id)
-    .bind(&t.name)
-    .bind(&t.engine)
-    .bind(&number)
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_documents (item_id, template_id, template_name, engine, number, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", item, t.id, &t.name, &t.engine, &number, auth.id)
     .fetch_one(&mut *tx)
     .await?;
     timeline(&mut *tx, item, "document", Some(auth.id), None, json!({ "document_id": id, "number": number, "template": t.name })).await?;
@@ -824,10 +770,7 @@ async fn finish(state: &AppState, id: Uuid, result: Result<Rendered, RenderError
                 Some(b) => Some(files::store_bytes(state, d.created_by, &format!("{safe}.docx"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", b).await?),
                 None => None,
             };
-            sqlx::query("UPDATE crm_documents SET status = 'ready', pdf_file_id = $2, source_file_id = $3, error = NULL, updated_at = now() WHERE id = $1")
-                .bind(id)
-                .bind(pdf)
-                .bind(docx)
+            sqlx::query!("UPDATE crm_documents SET status = 'ready', pdf_file_id = $2, source_file_id = $3, error = NULL, updated_at = now() WHERE id = $1", id, pdf, docx)
                 .execute(&state.db)
                 .await?;
             for f in old.into_iter().flatten() {
@@ -835,9 +778,7 @@ async fn finish(state: &AppState, id: Uuid, result: Result<Rendered, RenderError
             }
         }
         Err(RenderError::Template(e)) | Err(RenderError::Server(e)) => {
-            sqlx::query("UPDATE crm_documents SET status = 'failed', error = $2, updated_at = now() WHERE id = $1")
-                .bind(id)
-                .bind(e.chars().take(8000).collect::<String>())
+            sqlx::query!("UPDATE crm_documents SET status = 'failed', error = $2, updated_at = now() WHERE id = $1", id, e.chars().take(8000).collect::<String>())
                 .execute(&state.db)
                 .await?;
         }
@@ -848,7 +789,7 @@ async fn finish(state: &AppState, id: Uuid, result: Result<Rendered, RenderError
 }
 
 async fn notify(state: &AppState, item: Uuid, id: Uuid) {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM crm_documents WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    let status: Option<String> = sqlx::query_scalar!("SELECT status FROM crm_documents WHERE id = $1", id).fetch_optional(&state.db).await.ok().flatten();
     realtime::publish(state, None, "crm.document", json!({ "item_id": item, "id": id, "status": status })).await;
 }
 
@@ -881,10 +822,7 @@ async fn regenerate(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
     }
     let locale = if t.locale.is_empty() { default_locale(&state).await } else { t.locale.clone() };
     let built = data::build(&state, &auth, d.item_id, et, &d.number, &t.doc_title, &locale).await?;
-    sqlx::query("UPDATE crm_documents SET status = 'pending', error = NULL, template_name = $2, engine = $3, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(&t.name)
-        .bind(&t.engine)
+    sqlx::query!("UPDATE crm_documents SET status = 'pending', error = NULL, template_name = $2, engine = $3, updated_at = now() WHERE id = $1", id, &t.name, &t.engine)
         .execute(&state.db)
         .await?;
     start(&state, id, &t, built).await?;
@@ -897,7 +835,7 @@ async fn delete_document(State(state): State<AppState>, auth: AuthUser, Path(id)
     if d.created_by != Some(auth.id) {
         item_access(&state, &auth, d.item_id, "write").await?;
     }
-    sqlx::query("DELETE FROM crm_documents WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_documents WHERE id = $1", id).execute(&state.db).await?;
     for f in [d.pdf_file_id, d.source_file_id].into_iter().flatten() {
         files::delete_stored(&state, f).await;
     }
@@ -914,19 +852,15 @@ pub async fn can_view_file(state: &AppState, auth: &AuthUser, file: Uuid) -> App
         return Ok(true);
     }
     // Generated documents, and the copies sent for signature (as sent, and signed).
-    let item: Option<Uuid> = sqlx::query_scalar(
-        "SELECT item_id FROM crm_documents WHERE pdf_file_id = $1 OR source_file_id = $1
-         UNION ALL SELECT item_id FROM sign_requests WHERE original_file_id = $1 OR signed_file_id = $1 LIMIT 1",
-    )
-        .bind(file)
+    let item: Option<Uuid> = sqlx::query_scalar!(r#"SELECT item_id AS "item_id!" FROM crm_documents WHERE pdf_file_id = $1 OR source_file_id = $1
+         UNION ALL SELECT item_id FROM sign_requests WHERE original_file_id = $1 OR signed_file_id = $1 LIMIT 1"#, file)
         .fetch_optional(&state.db)
         .await?;
     if let Some(item) = item {
         return Ok(item_access(state, auth, item, "read").await.is_ok());
     }
     if is_crm_admin(auth) {
-        let is_template: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_doc_templates WHERE file_id = $1)")
-            .bind(file)
+        let is_template: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_doc_templates WHERE file_id = $1) AS "v!""#, file)
             .fetch_one(&state.db)
             .await?;
         return Ok(is_template);

@@ -157,12 +157,12 @@ async fn update_plan(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 /// A plan with earnings is kept (turned off) so its entries keep their meaning.
 async fn delete_plan(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     auth.require(perm::COMMISSIONS_MANAGE)?;
-    let used: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM comm_entries WHERE plan_id = $1)").bind(id).fetch_one(&state.db).await?;
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM comm_entries WHERE plan_id = $1) AS "v!""#, id).fetch_one(&state.db).await?;
     if used {
-        sqlx::query("UPDATE comm_plans SET is_active = FALSE, updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE comm_plans SET is_active = FALSE, updated_at = now() WHERE id = $1", id).execute(&state.db).await?;
         return Ok(Json(json!({ "deleted": false, "deactivated": true })));
     }
-    sqlx::query("DELETE FROM comm_plans WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM comm_plans WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -172,7 +172,7 @@ async fn delete_plan(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 async fn open_month(db: &mut sqlx::PgConnection) -> sqlx::Result<NaiveDate> {
     let mut m = first_of(Utc::now().date_naive());
     loop {
-        let locked: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM comm_months WHERE month = $1)").bind(m).fetch_one(&mut *db).await?;
+        let locked: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM comm_months WHERE month = $1) AS "v!""#, m).fetch_one(&mut *db).await?;
         if !locked {
             return Ok(m);
         }
@@ -191,16 +191,10 @@ pub async fn sync_invoice(state: &AppState, item: Uuid) {
 async fn sync(state: &AppState, item: Uuid) -> anyhow::Result<()> {
     let mut tx = state.db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('comm:' || $1::text))").bind(item).execute(&mut *tx).await?;
-    let inv: Option<(Decimal, Decimal, String, Decimal, i64, Option<Uuid>)> = sqlx::query_as(
-        "SELECT a.total, a.credited, a.status, a.fx_rate, i.number, i.assigned_to FROM acc_invoices a JOIN crm_items i ON i.id = a.item_id WHERE a.item_id = $1",
-    )
-    .bind(item)
+    let inv: Option<(Decimal, Decimal, String, Decimal, i64, Option<Uuid>)> = sqlx::query!(r#"SELECT a.total, a.credited, a.status, a.fx_rate, i.number, i.assigned_to FROM acc_invoices a JOIN crm_items i ON i.id = a.item_id WHERE a.item_id = $1"#, item).map(|r| (r.total, r.credited, r.status, r.fx_rate, r.number, r.assigned_to))
     .fetch_optional(&mut *tx)
     .await?;
-    let existing: Vec<(Uuid, Uuid, Decimal, Decimal)> = sqlx::query_as(
-        "SELECT plan_id, user_id, SUM(base), SUM(amount) FROM comm_entries WHERE invoice_id = $1 GROUP BY plan_id, user_id",
-    )
-    .bind(item)
+    let existing: Vec<(Uuid, Uuid, Decimal, Decimal)> = sqlx::query!(r#"SELECT plan_id AS "plan_id!", user_id AS "user_id!", SUM(base) AS "c2!", SUM(amount) AS "c3!" FROM comm_entries WHERE invoice_id = $1 GROUP BY plan_id, user_id"#, item).map(|r| (r.plan_id, r.user_id, r.c2, r.c3))
     .fetch_all(&mut *tx)
     .await?;
     let Some((total, credited, status, fx, number, responsible)) = inv else { return Ok(()) };
@@ -218,12 +212,9 @@ async fn sync(state: &AppState, item: Uuid) -> anyhow::Result<()> {
             }
             rows.iter().filter(|r| products.is_empty() || r.product_id.is_some_and(|p| products.contains(&p))).map(|r| crate::crm::money::line(r).net).sum()
         };
-        let plans: Vec<(Uuid, Vec<Uuid>)> = sqlx::query_as(
-            "SELECT p.id, p.product_ids FROM comm_plans p WHERE p.is_active AND (
+        let plans: Vec<(Uuid, Vec<Uuid>)> = sqlx::query!(r#"SELECT p.id AS "id!", p.product_ids AS "product_ids!" FROM comm_plans p WHERE p.is_active AND (
                  (cardinality(p.user_ids) = 0 AND cardinality(p.department_ids) = 0) OR $1 = ANY(p.user_ids)
-                 OR EXISTS (SELECT 1 FROM user_departments ud WHERE ud.user_id = $1 AND ud.department_id = ANY(p.department_ids)))",
-        )
-        .bind(user)
+                 OR EXISTS (SELECT 1 FROM user_departments ud WHERE ud.user_id = $1 AND ud.department_id = ANY(p.department_ids)))"#, user).map(|r| (r.id, r.product_ids))
         .fetch_all(&mut *tx)
         .await?;
         for (plan, products) in plans {
@@ -252,15 +243,7 @@ async fn sync(state: &AppState, item: Uuid) -> anyhow::Result<()> {
             let why = if status == "void" { "voided".to_string() } else if credited > Decimal::ZERO && paid >= total - credited { "credited".to_string() } else { format!("now {pct}% paid") };
             (rate.round_dp(4), amount, format!("Invoice #{number}: taken back ({why})"))
         };
-        sqlx::query("INSERT INTO comm_entries (plan_id, user_id, invoice_id, month, base, rate, amount, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
-            .bind(plan)
-            .bind(user)
-            .bind(item)
-            .bind(month)
-            .bind(delta)
-            .bind(rate)
-            .bind(amount)
-            .bind(&reason)
+        sqlx::query!("INSERT INTO comm_entries (plan_id, user_id, invoice_id, month, base, rate, amount, reason) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", plan, user, item, month, delta, rate, amount, &reason)
             .execute(&mut *tx)
             .await?;
     }
@@ -271,15 +254,12 @@ async fn sync(state: &AppState, item: Uuid) -> anyhow::Result<()> {
 /// The plan's rate for this much more sale in the month: the highest tier the person's month
 /// total reaches with it.
 async fn rate_for(tx: &mut sqlx::PgConnection, plan: Uuid, user: Uuid, month: NaiveDate, more: Decimal) -> sqlx::Result<Decimal> {
-    let (rate, tiers): (Decimal, Value) = sqlx::query_as("SELECT rate, tiers FROM comm_plans WHERE id = $1").bind(plan).fetch_one(&mut *tx).await?;
+    let (rate, tiers): (Decimal, Value) = sqlx::query!(r#"SELECT rate, tiers FROM comm_plans WHERE id = $1"#, plan).map(|r| (r.rate, r.tiers)).fetch_one(&mut *tx).await?;
     let tiers: Vec<Tier> = serde_json::from_value(tiers).unwrap_or_default();
     if tiers.is_empty() {
         return Ok(rate);
     }
-    let so_far: Decimal = sqlx::query_scalar("SELECT COALESCE(SUM(base), 0) FROM comm_entries WHERE plan_id = $1 AND user_id = $2 AND month = $3")
-        .bind(plan)
-        .bind(user)
-        .bind(month)
+    let so_far: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(base), 0) AS "v!" FROM comm_entries WHERE plan_id = $1 AND user_id = $2 AND month = $3"#, plan, user, month)
         .fetch_one(&mut *tx)
         .await?;
     let reached = so_far + more;
@@ -293,12 +273,9 @@ async fn team(state: &AppState, auth: &AuthUser) -> AppResult<Option<Vec<Uuid>>>
         return Ok(None);
     }
     Ok(Some(
-        sqlx::query_scalar(
-            "WITH RECURSIVE mine AS (SELECT id FROM departments WHERE head_user_id = $1 OR deputy_user_id = $1
+        sqlx::query_scalar!("WITH RECURSIVE mine AS (SELECT id FROM departments WHERE head_user_id = $1 OR deputy_user_id = $1
                                      UNION SELECT d.id FROM departments d JOIN mine m ON d.parent_id = m.id)
-             SELECT DISTINCT ud.user_id FROM user_departments ud WHERE ud.department_id IN (SELECT id FROM mine)",
-        )
-        .bind(auth.id)
+             SELECT DISTINCT ud.user_id FROM user_departments ud WHERE ud.department_id IN (SELECT id FROM mine)", auth.id)
         .fetch_all(&state.db)
         .await?,
     ))
@@ -325,19 +302,15 @@ async fn statement(State(state): State<AppState>, auth: AuthUser, Query(q): Quer
     if user != auth.id && !team(&state, &auth).await?.is_none_or(|t| t.contains(&user)) {
         return Err(AppError::Forbidden);
     }
-    let entries: Vec<(Uuid, String, Uuid, i64, String, Decimal, Decimal, Decimal, String, chrono::DateTime<Utc>)> = sqlx::query_as(
-        "SELECT e.id, p.name, e.invoice_id, i.number, i.title, e.base, e.rate, e.amount, e.reason, e.created_at
+    let entries: Vec<(Uuid, String, Uuid, i64, String, Decimal, Decimal, Decimal, String, chrono::DateTime<Utc>)> = sqlx::query!(r#"SELECT e.id, p.name, e.invoice_id, i.number, i.title, e.base, e.rate, e.amount, e.reason, e.created_at
          FROM comm_entries e JOIN comm_plans p ON p.id = e.plan_id JOIN crm_items i ON i.id = e.invoice_id
-         WHERE e.user_id = $1 AND e.month = $2 ORDER BY e.created_at",
-    )
-    .bind(user)
-    .bind(month)
+         WHERE e.user_id = $1 AND e.month = $2 ORDER BY e.created_at"#, user, month).map(|r| (r.id, r.name, r.invoice_id, r.number, r.title, r.base, r.rate, r.amount, r.reason, r.created_at))
     .fetch_all(&state.db)
     .await?;
     let earned: Decimal = entries.iter().filter(|e| e.7 > Decimal::ZERO).map(|e| e.7).sum();
     let back: Decimal = entries.iter().filter(|e| e.7 < Decimal::ZERO).map(|e| e.7).sum();
-    let locked: Option<chrono::DateTime<Utc>> = sqlx::query_scalar("SELECT locked_at FROM comm_months WHERE month = $1").bind(month).fetch_optional(&state.db).await?;
-    let name: Option<String> = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(user).fetch_optional(&state.db).await?;
+    let locked: Option<chrono::DateTime<Utc>> = sqlx::query_scalar!("SELECT locked_at FROM comm_months WHERE month = $1", month).fetch_optional(&state.db).await?;
+    let name: Option<String> = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, user).fetch_optional(&state.db).await?;
     let base = crate::accounting::base_currency(&state).await.unwrap_or_default();
     Ok(Json(json!({
         "user": { "id": user, "name": name }, "month": month.format("%Y-%m").to_string(), "currency": base, "locked_at": locked,
@@ -355,14 +328,10 @@ struct MonthQ {
 }
 
 async fn month_totals(state: &AppState, month: NaiveDate, only: Option<&[Uuid]>) -> AppResult<Vec<(Uuid, String, String, Decimal, Decimal)>> {
-    Ok(sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.email,
-                COALESCE(SUM(e.amount) FILTER (WHERE e.amount > 0), 0), COALESCE(SUM(e.amount) FILTER (WHERE e.amount < 0), 0)
+    Ok(sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.email AS "email!",
+                COALESCE(SUM(e.amount) FILTER (WHERE e.amount > 0), 0) AS "c3!", COALESCE(SUM(e.amount) FILTER (WHERE e.amount < 0), 0) AS "c4!"
          FROM comm_entries e JOIN users u ON u.id = e.user_id WHERE e.month = $1 AND ($2::uuid[] IS NULL OR e.user_id = ANY($2))
-         GROUP BY u.id ORDER BY 2",
-    )
-    .bind(month)
-    .bind(only)
+         GROUP BY u.id ORDER BY 2"#, month, only).map(|r| (r.id, r.c1, r.email, r.c3, r.c4))
     .fetch_all(&state.db)
     .await?)
 }
@@ -375,7 +344,7 @@ async fn summary(State(state): State<AppState>, auth: AuthUser, Query(q): Query<
         return Err(AppError::Forbidden);
     }
     let rows = month_totals(&state, month, team.as_deref()).await?;
-    let locked: Option<chrono::DateTime<Utc>> = sqlx::query_scalar("SELECT locked_at FROM comm_months WHERE month = $1").bind(month).fetch_optional(&state.db).await?;
+    let locked: Option<chrono::DateTime<Utc>> = sqlx::query_scalar!("SELECT locked_at FROM comm_months WHERE month = $1", month).fetch_optional(&state.db).await?;
     let net: Decimal = rows.iter().map(|r| r.3 + r.4).sum();
     Ok(Json(json!({
         "month": month.format("%Y-%m").to_string(), "locked_at": locked, "net": net, "can_manage": auth.can(perm::COMMISSIONS_MANAGE),
@@ -389,7 +358,7 @@ async fn lock(State(state): State<AppState>, auth: AuthUser, Path(month): Path<S
     if m > first_of(Utc::now().date_naive()) {
         return Err(AppError::bad("a month can be locked once it has started"));
     }
-    sqlx::query("INSERT INTO comm_months (month, locked_by) VALUES ($1, $2) ON CONFLICT DO NOTHING").bind(m).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO comm_months (month, locked_by) VALUES ($1, $2) ON CONFLICT DO NOTHING", m, auth.id).execute(&state.db).await?;
     audit::record(&state.db, Some(auth.id), "commissions.lock", "comm_month", Some(m.to_string()), json!({}), None).await;
     Ok(Json(json!({ "month": m.format("%Y-%m").to_string(), "locked": true })))
 }
@@ -398,7 +367,7 @@ async fn lock(State(state): State<AppState>, auth: AuthUser, Path(month): Path<S
 async fn unlock(State(state): State<AppState>, auth: AuthUser, Path(month): Path<String>) -> AppResult<Json<Value>> {
     auth.require(perm::COMMISSIONS_MANAGE)?;
     let m = parse_month(Some(&month))?;
-    sqlx::query("DELETE FROM comm_months WHERE month = $1").bind(m).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM comm_months WHERE month = $1", m).execute(&state.db).await?;
     audit::record(&state.db, Some(auth.id), "commissions.unlock", "comm_month", Some(m.to_string()), json!({}), None).await;
     Ok(Json(json!({ "month": m.format("%Y-%m").to_string(), "locked": false })))
 }
@@ -407,17 +376,15 @@ async fn unlock(State(state): State<AppState>, auth: AuthUser, Path(month): Path
 /// open month like any other.
 async fn recalculate(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     auth.require(perm::COMMISSIONS_MANAGE)?;
-    let items: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT item_id FROM acc_invoices WHERE status IN ('paid', 'credited') OR item_id IN (SELECT invoice_id FROM comm_entries)
-            OR item_id IN (SELECT al.doc_id FROM acc_allocations al WHERE al.doc_kind = 'invoice')",
-    )
+    let items: Vec<Uuid> = sqlx::query_scalar!("SELECT item_id FROM acc_invoices WHERE status IN ('paid', 'credited') OR item_id IN (SELECT invoice_id FROM comm_entries)
+            OR item_id IN (SELECT al.doc_id FROM acc_allocations al WHERE al.doc_kind = 'invoice')")
     .fetch_all(&state.db)
     .await?;
-    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comm_entries").fetch_one(&state.db).await?;
+    let before: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM comm_entries"#).fetch_one(&state.db).await?;
     for i in &items {
         sync(&state, *i).await.map_err(AppError::Internal)?;
     }
-    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comm_entries").fetch_one(&state.db).await?;
+    let after: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM comm_entries"#).fetch_one(&state.db).await?;
     audit::record(&state.db, Some(auth.id), "commissions.recalculate", "comm_month", None, json!({ "invoices": items.len(), "new_entries": after - before }), None).await;
     Ok(Json(json!({ "invoices": items.len(), "new_entries": after - before })))
 }

@@ -52,18 +52,15 @@ async fn open_shop(state: &AppState) -> AppResult<Settings> {
 }
 
 async fn company(state: &AppState) -> Option<String> {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().map(str::to_string)).filter(|s| !s.is_empty())
 }
 
 async fn shop(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let s = open_shop(&state).await?;
-    let categories: Vec<(String, String)> = sqlx::query_as(
-        "SELECT c.name, c.slug FROM shop_categories c
+    let categories: Vec<(String, String)> = sqlx::query!(r#"SELECT c.name, c.slug FROM shop_categories c
          WHERE EXISTS (SELECT 1 FROM crm_products p WHERE p.shop_category_id = c.id AND p.in_shop AND p.is_active AND p.currency = $1)
-         ORDER BY c.sort, c.name",
-    )
-    .bind(&s.currency)
+         ORDER BY c.sort, c.name"#, s.currency.as_deref()).map(|r| (r.name, r.slug))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -233,7 +230,7 @@ async fn product(State(state): State<AppState>, Path(slug): Path<String>) -> App
     let mut selected = None;
     if let Some(parent) = p.parent_id {
         selected = Some(p.slug.clone());
-        let parent_slug: Option<String> = sqlx::query_scalar("SELECT slug FROM crm_products WHERE id = $1").bind(parent).fetch_one(&state.db).await?;
+        let parent_slug: Option<String> = sqlx::query_scalar!(r#"SELECT slug AS "slug?" FROM crm_products WHERE id = $1"#, parent).fetch_one(&state.db).await?;
         p = listed(&state, &s, &parent_slug.ok_or(AppError::NotFound("product"))?).await?;
     }
     let defs = crate::crm::catalog::props(&state).await?;
@@ -278,12 +275,8 @@ async fn product(State(state): State<AppState>, Path(slug): Path<String>) -> App
 async fn image(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
     let s = open_shop(&state).await?;
     // A variant without a photo of its own shows its parent's.
-    let file: Option<Uuid> = sqlx::query_scalar(
-        "SELECT COALESCE(p.image_file_id, pp.image_file_id) FROM crm_products p LEFT JOIN crm_products pp ON pp.id = p.parent_id
-         WHERE p.slug = $1 AND p.in_shop AND p.is_active AND p.currency = $2",
-    )
-        .bind(&slug)
-        .bind(&s.currency)
+    let file: Option<Uuid> = sqlx::query_scalar!("SELECT COALESCE(p.image_file_id, pp.image_file_id) FROM crm_products p LEFT JOIN crm_products pp ON pp.id = p.parent_id
+         WHERE p.slug = $1 AND p.in_shop AND p.is_active AND p.currency = $2", &slug, s.currency.as_deref())
         .fetch_optional(&state.db)
         .await?
         .flatten();
@@ -439,7 +432,7 @@ async fn checkout(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b)
     }
     if address.is_none() {
         let not_needed: Option<bool> = match b.delivery_id {
-            Some(d) => sqlx::query_scalar("SELECT NOT needs_address FROM shop_delivery WHERE id = $1 AND active").bind(d).fetch_optional(&state.db).await?,
+            Some(d) => sqlx::query_scalar!(r#"SELECT NOT needs_address AS "v!" FROM shop_delivery WHERE id = $1 AND active"#, d).fetch_optional(&state.db).await?,
             None => None,
         };
         if not_needed != Some(true) {
@@ -469,8 +462,7 @@ async fn checkout(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| AppError::bad("a product in your cart is no longer sold; remove it and try again"))?;
-        let has_variants: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_products WHERE parent_id = $1 AND in_shop AND is_active)")
-            .bind(p.id)
+        let has_variants: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_products WHERE parent_id = $1 AND in_shop AND is_active) AS "v!""#, p.id)
             .fetch_one(&mut *tx)
             .await?;
         if has_variants {
@@ -532,7 +524,7 @@ async fn checkout(State(state): State<AppState>, ClientIp(ip): ClientIp, Json(b)
             }
             // The order did not go through: put the units back.
             if !moved.is_empty() {
-                let counted: Vec<Uuid> = sqlx::query_scalar("SELECT product_id FROM inv_movements WHERE id = ANY($1)").bind(&moved).fetch_all(&state.db).await.unwrap_or_default();
+                let counted: Vec<Uuid> = sqlx::query_scalar!("SELECT product_id FROM inv_movements WHERE id = ANY($1)", &moved).fetch_all(&state.db).await.unwrap_or_default();
                 if let Ok(mut tx) = state.db.begin().await {
                     for r in rows.iter().filter(|r| r.product_id.is_some_and(|p| counted.contains(&p))) {
                         let _ = adjust(&mut tx, r.product_id.unwrap(), warehouse, r.quantity, true, Reason { kind: "order_failed", document: None, item: None, user: None }).await;
@@ -558,8 +550,7 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
     let Customer { name, email, phone, address, note } = *c;
     let auth = system_auth();
     // In turn among the handlers who still work here.
-    let active: Vec<Uuid> = sqlx::query_scalar("SELECT h FROM unnest($1::uuid[]) WITH ORDINALITY u(h, n) JOIN users ON users.id = h AND users.is_active ORDER BY n")
-        .bind(&s.handlers)
+    let active: Vec<Uuid> = sqlx::query_scalar!(r#"SELECT h AS "h!" FROM unnest($1::uuid[]) WITH ORDINALITY u(h, n) JOIN users ON users.id = h AND users.is_active ORDER BY n"#, &s.handlers)
         .fetch_all(&state.db)
         .await?;
     let handler = match active.len() {
@@ -570,12 +561,8 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
             Some(active[((i - 1) as usize) % n])
         }
     };
-    let contact: Option<Uuid> = sqlx::query_scalar(
-        "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
-         WHERE m.kind = 'email' AND m.normalized = $1 AND i.entity_type = $2 AND i.deleted_at IS NULL ORDER BY i.updated_at DESC LIMIT 1",
-    )
-    .bind(normalize("email", email))
-    .bind(CONTACT)
+    let contact: Option<Uuid> = sqlx::query_scalar!("SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+         WHERE m.kind = 'email' AND m.normalized = $1 AND i.entity_type = $2 AND i.deleted_at IS NULL ORDER BY i.updated_at DESC LIMIT 1", normalize("email", email), CONTACT)
     .fetch_optional(&state.db)
     .await?;
     let contact = match contact {
@@ -625,52 +612,24 @@ async fn place(state: &AppState, s: &Settings, rows: &[ProductRow], c: &Customer
             Some(p) => match s.currency.as_deref() { Some(c) => crate::crm::money::unit_cost(state, p, c).await?, None => None },
             None => None,
         };
-        sqlx::query(
-            "INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
-             VALUES ($1, $2, $3, $4, $5, $6, $10, $11, $7, $8, $9, $12)",
-        )
-        .bind(id)
-        .bind(r.product_id)
-        .bind(&r.name)
-        .bind(r.price)
-        .bind(r.quantity)
-        .bind(&r.unit)
-        .bind(r.tax_rate)
-        .bind(r.tax_included)
-        .bind(i as i32)
-        .bind(&r.discount_kind)
-        .bind(r.discount_value)
-        .bind(cost)
+        sqlx::query!("INSERT INTO crm_item_products (item_id, product_id, name, price, quantity, unit, discount_kind, discount_value, tax_rate, tax_included, sort, cost)
+             VALUES ($1, $2, $3, $4, $5, $6, $10, $11, $7, $8, $9, $12)", id, r.product_id, &r.name, r.price, r.quantity, &r.unit, r.tax_rate, r.tax_included, i as i32, &r.discount_kind, r.discount_value, cost)
         .execute(&state.db)
         .await?;
     }
-    sqlx::query("UPDATE crm_items SET is_manual_amount = FALSE WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_items SET is_manual_amount = FALSE WHERE id = $1", id).execute(&state.db).await?;
     let tt = totals(state, id).await?;
-    let number: i64 = sqlx::query_scalar("UPDATE crm_items SET title = 'Order ' || number || ': ' || $2 WHERE id = $1 RETURNING number")
-        .bind(id)
-        .bind(name)
+    let number: i64 = sqlx::query_scalar!("UPDATE crm_items SET title = 'Order ' || number || ': ' || $2 WHERE id = $1 RETURNING number", id, name)
         .fetch_one(&state.db)
         .await?;
     let token = random_token(24);
-    sqlx::query("INSERT INTO shop_orders (item_id, token, name, email, phone, address, note, warehouse_id, extras) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)")
-        .bind(id)
-        .bind(&token)
-        .bind(name)
-        .bind(email)
-        .bind(phone)
-        .bind(address)
-        .bind(note)
-        .bind(warehouse)
-        .bind(extra)
+    sqlx::query!("INSERT INTO shop_orders (item_id, token, name, email, phone, address, note, warehouse_id, extras) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", id, &token, name, email, phone, address, note, warehouse, extra)
         .execute(&state.db)
         .await?;
-    sqlx::query("UPDATE shop_coupon_uses SET item_id = $1 WHERE item_id IS NULL AND email = $2 AND coupon_id IN (SELECT id FROM shop_coupons WHERE code = $3)")
-        .bind(id)
-        .bind(email)
-        .bind(extra["coupon"].as_str())
+    sqlx::query!("UPDATE shop_coupon_uses SET item_id = $1 WHERE item_id IS NULL AND email = $2 AND coupon_id IN (SELECT id FROM shop_coupons WHERE code = $3)", id, email, extra["coupon"].as_str())
         .execute(&state.db)
         .await?;
-    sqlx::query("UPDATE inv_movements SET item_id = $1 WHERE id = ANY($2)").bind(id).bind(moved).execute(&state.db).await?;
+    sqlx::query!("UPDATE inv_movements SET item_id = $1 WHERE id = ANY($2)", id, moved).execute(&state.db).await?;
     crate::crm::timeline(&state.db, id, "shop_order", None, None, json!({ "shop": s.name, "total": tt.total.to_string(), "currency": s.currency })).await?;
     broadcast(state, ORDER, id, false).await;
 
@@ -724,12 +683,9 @@ struct OrderRow {
 
 /// Works while the shop is closed too: customers keep their order links.
 async fn order(State(state): State<AppState>, Path(token): Path<String>) -> AppResult<Json<Value>> {
-    let o: OrderRow = sqlx::query_as(
-        "SELECT o.item_id, i.number, i.currency, s.name AS stage, s.semantics, s.sort AS stage_sort, o.name, o.email, o.phone, o.address, o.note, o.created_at
+    let o: OrderRow = sqlx::query_as!(OrderRow, r#"SELECT o.item_id AS "item_id!", i.number AS "number!", i.currency AS "currency!", s.name AS "stage!", s.semantics AS "semantics!", s.sort AS "stage_sort!", o.name AS "name!", o.email AS "email!", o.phone AS "phone?", o.address AS "address!", o.note AS "note?", o.created_at AS "created_at!"
          FROM shop_orders o JOIN crm_items i ON i.id = o.item_id JOIN crm_stages s ON s.id = i.stage_id
-         WHERE o.token = $1 AND i.deleted_at IS NULL",
-    )
-    .bind(&token)
+         WHERE o.token = $1 AND i.deleted_at IS NULL"#, &token)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("order"))?;
@@ -737,11 +693,8 @@ async fn order(State(state): State<AppState>, Path(token): Path<String>) -> AppR
     let rows = crate::crm::money::rows_of(&state, o.item_id).await?;
     let t = sum(&rows);
     // The way through the order's stages, to draw progress.
-    let steps: Vec<(String, i32)> = sqlx::query_as(
-        "SELECT s.name, s.sort FROM crm_stages s JOIN crm_items i ON i.category_id = s.category_id
-         WHERE i.id = $1 AND s.semantics <> 'failure' ORDER BY s.sort",
-    )
-    .bind(o.item_id)
+    let steps: Vec<(String, i32)> = sqlx::query!(r#"SELECT s.name, s.sort FROM crm_stages s JOIN crm_items i ON i.category_id = s.category_id
+         WHERE i.id = $1 AND s.semantics <> 'failure' ORDER BY s.sort"#, o.item_id).map(|r| (r.name, r.sort))
     .fetch_all(&state.db)
     .await?;
     let first = steps.first().map(|(_, sort)| *sort);

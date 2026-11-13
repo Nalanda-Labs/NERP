@@ -118,21 +118,14 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
         let mut x = x.clone();
         x.sort_unstable_by(|a, b| b.cmp(a));
         x.dedup();
-        sqlx::query("UPDATE booking_settings SET extra_reminders = $1 WHERE id").bind(&x).execute(&state.db).await?;
+        sqlx::query!("UPDATE booking_settings SET extra_reminders = $1 WHERE id", &x).execute(&state.db).await?;
     }
-    sqlx::query(
-        "UPDATE booking_settings SET follow_up_hours = COALESCE($1, follow_up_hours),
-            follow_up_text = CASE WHEN $2 THEN $3 ELSE follow_up_text END, no_show_text = CASE WHEN $4 THEN $5 ELSE no_show_text END WHERE id",
-    )
-    .bind(b.follow_up_hours)
-    .bind(follow_text.is_some())
-    .bind(follow_text.flatten())
-    .bind(no_show.is_some())
-    .bind(no_show.flatten())
+    sqlx::query!("UPDATE booking_settings SET follow_up_hours = COALESCE($1, follow_up_hours),
+            follow_up_text = CASE WHEN $2 THEN $3 ELSE follow_up_text END, no_show_text = CASE WHEN $4 THEN $5 ELSE no_show_text END WHERE id", b.follow_up_hours, follow_text.is_some(), follow_text.flatten(), no_show.is_some(), no_show.flatten())
     .execute(&state.db)
     .await?;
     if let Some(Some(c)) = b.deal_category_id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = 2)").bind(c).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_categories WHERE id = $1 AND entity_type = 2) AS "v!""#, c).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("choose a deal pipeline"));
         }
@@ -142,17 +135,9 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
             return Err(AppError::bad("currency is a three-letter code"));
         }
     }
-    sqlx::query(
-        "UPDATE booking_settings SET confirm_email = COALESCE($1, confirm_email), remind_hours = COALESCE($2, remind_hours),
+    sqlx::query!("UPDATE booking_settings SET confirm_email = COALESCE($1, confirm_email), remind_hours = COALESCE($2, remind_hours),
             make_contact = COALESCE($3, make_contact), deal_category_id = CASE WHEN $4 THEN $5 ELSE deal_category_id END,
-            currency = COALESCE($6, currency), updated_at = now() WHERE id",
-    )
-    .bind(b.confirm_email)
-    .bind(b.remind_hours)
-    .bind(b.make_contact)
-    .bind(b.deal_category_id.is_some())
-    .bind(b.deal_category_id.flatten())
-    .bind(b.currency)
+            currency = COALESCE($6, currency), updated_at = now() WHERE id", b.confirm_email, b.remind_hours, b.make_contact, b.deal_category_id.is_some(), b.deal_category_id.flatten(), b.currency)
     .execute(&state.db)
     .await?;
     Ok(Json(settings_json(&state).await?))
@@ -191,12 +176,12 @@ pub(crate) async fn load_resource(state: &AppState, id: Uuid) -> AppResult<Resou
 }
 
 pub(crate) async fn hours_of(state: &AppState, resource: Uuid) -> AppResult<Vec<(i32, i32, i32)>> {
-    Ok(sqlx::query_as("SELECT weekday, start_min, end_min FROM booking_hours WHERE resource_id = $1 ORDER BY weekday, start_min").bind(resource).fetch_all(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT weekday, start_min, end_min FROM booking_hours WHERE resource_id = $1 ORDER BY weekday, start_min"#, resource).map(|r| (r.weekday, r.start_min, r.end_min)).fetch_all(&state.db).await?)
 }
 
 async fn resource_json(state: &AppState, r: Resource) -> AppResult<Value> {
     let hours = hours_of(state, r.id).await?;
-    let off: Vec<(NaiveDate, Option<String>)> = sqlx::query_as("SELECT day, note FROM booking_days_off WHERE resource_id = $1 AND day >= CURRENT_DATE - 30 ORDER BY day").bind(r.id).fetch_all(&state.db).await?;
+    let off: Vec<(NaiveDate, Option<String>)> = sqlx::query!(r#"SELECT day, note FROM booking_days_off WHERE resource_id = $1 AND day >= CURRENT_DATE - 30 ORDER BY day"#, r.id).map(|r| (r.day, r.note)).fetch_all(&state.db).await?;
     Ok(json!({
         "id": r.id, "name": r.name, "kind": r.kind, "description": r.description, "user_id": r.user_id, "user_name": r.user_name,
         "capacity": r.capacity, "allow_overbooking": r.allow_overbooking, "color": r.color, "timezone": r.timezone,
@@ -275,32 +260,17 @@ async fn create_resource(State(state): State<AppState>, auth: AuthUser, Json(b):
     let user = b.user_id.flatten();
     let name = match (clean(b.name.clone()), user) {
         (Some(n), _) => required("name", &n, 200)?,
-        (None, Some(u)) => sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(u).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("user"))?,
+        (None, Some(u)) => sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, u).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("user"))?,
         _ => return Err(AppError::bad("name the resource")),
     };
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO booking_resources (name, kind, description, user_id, capacity, allow_overbooking, color, timezone, slot_minutes, buffer_minutes, min_notice_minutes, max_days_ahead, sort)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO booking_resources (name, kind, description, user_id, capacity, allow_overbooking, color, timezone, slot_minutes, buffer_minutes, min_notice_minutes, max_days_ahead, sort)
          VALUES ($1, $2, $3, $4, COALESCE($5, 1), COALESCE($6, FALSE), COALESCE($7, 'sky'), COALESCE($8, 'UTC'), COALESCE($9, 30), COALESCE($10, 0), COALESCE($11, 60), COALESCE($12, 60), COALESCE($13, 0))
-         RETURNING id",
-    )
-    .bind(&name)
-    .bind(&kind)
-    .bind(clean(b.description.flatten()))
-    .bind(user)
-    .bind(b.capacity)
-    .bind(b.allow_overbooking)
-    .bind(&b.color)
-    .bind(&b.timezone)
-    .bind(b.slot_minutes)
-    .bind(b.buffer_minutes)
-    .bind(b.min_notice_minutes)
-    .bind(b.max_days_ahead)
-    .bind(b.sort)
+         RETURNING id", &name, &kind, clean(b.description.flatten()), user, b.capacity, b.allow_overbooking, b.color.as_deref(), b.timezone.as_deref(), b.slot_minutes, b.buffer_minutes, b.min_notice_minutes, b.max_days_ahead, b.sort)
     .fetch_one(&state.db)
     .await?;
     // Office hours to start with: Monday to Friday, 9 to 6.
     for d in 1..=5 {
-        sqlx::query("INSERT INTO booking_hours (resource_id, weekday, start_min, end_min) VALUES ($1, $2, 540, 1080)").bind(id).bind(d).execute(&state.db).await?;
+        sqlx::query!("INSERT INTO booking_hours (resource_id, weekday, start_min, end_min) VALUES ($1, $2, 540, 1080)", id, d).execute(&state.db).await?;
     }
     get_resource(State(state), auth, Path(id)).await
 }
@@ -313,32 +283,13 @@ async fn update_resource(State(state): State<AppState>, auth: AuthUser, Path(id)
         Some(n) => Some(required("name", n, 200)?),
         None => None,
     };
-    sqlx::query(
-        "UPDATE booking_resources SET name = COALESCE($2, name), kind = COALESCE($3, kind),
+    sqlx::query!("UPDATE booking_resources SET name = COALESCE($2, name), kind = COALESCE($3, kind),
             description = CASE WHEN $4 THEN $5 ELSE description END, user_id = CASE WHEN $6 THEN $7 ELSE user_id END,
             capacity = COALESCE($8, capacity), allow_overbooking = COALESCE($9, allow_overbooking), color = COALESCE($10, color),
             timezone = COALESCE($11, timezone), slot_minutes = COALESCE($12, slot_minutes), buffer_minutes = COALESCE($13, buffer_minutes),
             min_notice_minutes = COALESCE($14, min_notice_minutes), max_days_ahead = COALESCE($15, max_days_ahead),
             is_active = COALESCE($16, is_active), sort = COALESCE($17, sort)
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(&b.kind)
-    .bind(b.description.is_some())
-    .bind(clean(b.description.clone().flatten()))
-    .bind(b.user_id.is_some())
-    .bind(b.user_id.flatten())
-    .bind(b.capacity)
-    .bind(b.allow_overbooking)
-    .bind(&b.color)
-    .bind(&b.timezone)
-    .bind(b.slot_minutes)
-    .bind(b.buffer_minutes)
-    .bind(b.min_notice_minutes)
-    .bind(b.max_days_ahead)
-    .bind(b.is_active)
-    .bind(b.sort)
+         WHERE id = $1", id, name, b.kind.as_deref(), b.description.is_some(), clean(b.description.clone().flatten()), b.user_id.is_some(), b.user_id.flatten(), b.capacity, b.allow_overbooking, b.color.as_deref(), b.timezone.as_deref(), b.slot_minutes, b.buffer_minutes, b.min_notice_minutes, b.max_days_ahead, b.is_active, b.sort)
     .execute(&state.db)
     .await?;
     get_resource(State(state), auth, Path(id)).await
@@ -346,17 +297,14 @@ async fn update_resource(State(state): State<AppState>, auth: AuthUser, Path(id)
 
 async fn delete_resource(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     manage(&auth)?;
-    let future: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM booking_resources_used u JOIN bookings b ON b.id = u.booking_id
-         WHERE u.resource_id = $1 AND b.ends_at > now() AND b.status IN ('booked', 'confirmed')",
-    )
-    .bind(id)
+    let future: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM booking_resources_used u JOIN bookings b ON b.id = u.booking_id
+         WHERE u.resource_id = $1 AND b.ends_at > now() AND b.status IN ('booked', 'confirmed')"#, id)
     .fetch_one(&state.db)
     .await?;
     if future > 0 {
         return Err(AppError::bad(format!("{future} bookings to come use it; switch it off instead, or move them first")));
     }
-    sqlx::query("DELETE FROM booking_resources WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM booking_resources WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -385,9 +333,9 @@ async fn set_hours(State(state): State<AppState>, auth: AuthUser, Path(id): Path
         }
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM booking_hours WHERE resource_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM booking_hours WHERE resource_id = $1", id).execute(&mut *tx).await?;
     for h in &list {
-        sqlx::query("INSERT INTO booking_hours (resource_id, weekday, start_min, end_min) VALUES ($1, $2, $3, $4)").bind(id).bind(h.weekday).bind(h.start_min).bind(h.end_min).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO booking_hours (resource_id, weekday, start_min, end_min) VALUES ($1, $2, $3, $4)", id, h.weekday, h.start_min, h.end_min).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     get_resource(State(state), auth, Path(id)).await
@@ -410,9 +358,9 @@ async fn set_days_off(State(state): State<AppState>, auth: AuthUser, Path(id): P
         return Err(AppError::bad("at most 500 days off"));
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM booking_days_off WHERE resource_id = $1 AND day >= CURRENT_DATE - 30").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM booking_days_off WHERE resource_id = $1 AND day >= CURRENT_DATE - 30", id).execute(&mut *tx).await?;
     for d in &b.days {
-        sqlx::query("INSERT INTO booking_days_off (resource_id, day, note) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING").bind(id).bind(d.day).bind(clean(d.note.clone())).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO booking_days_off (resource_id, day, note) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", id, d.day, clean(d.note.clone())).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     get_resource(State(state), auth, Path(id)).await
@@ -441,7 +389,7 @@ pub(crate) fn service_json(s: &Service) -> Value {
 }
 
 pub(crate) async fn load_services(state: &AppState) -> AppResult<Vec<Service>> {
-    Ok(sqlx::query_as("SELECT id, name, description, duration_minutes, price, is_extra, resource_ids, is_active, sort FROM booking_services ORDER BY is_extra, sort, name").fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(Service, r#"SELECT id, name, description AS "description?", duration_minutes, price, is_extra, resource_ids, is_active, sort FROM booking_services ORDER BY is_extra, sort, name"#).fetch_all(&state.db).await?)
 }
 
 async fn list_services(State(state): State<AppState>, _auth: AuthUser) -> AppResult<Json<Value>> {
@@ -493,21 +441,9 @@ async fn update_service(State(state): State<AppState>, auth: AuthUser, Path(id):
         Some(n) => Some(required("name", n, 200)?),
         None => None,
     };
-    let n = sqlx::query(
-        "UPDATE booking_services SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END,
+    let n = sqlx::query!("UPDATE booking_services SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END,
             duration_minutes = COALESCE($5, duration_minutes), price = COALESCE($6, price), is_extra = COALESCE($7, is_extra),
-            resource_ids = COALESCE($8, resource_ids), is_active = COALESCE($9, is_active), sort = COALESCE($10, sort) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(b.description.is_some())
-    .bind(clean(b.description.flatten()))
-    .bind(b.duration_minutes)
-    .bind(b.price)
-    .bind(b.is_extra)
-    .bind(b.resource_ids)
-    .bind(b.is_active)
-    .bind(b.sort)
+            resource_ids = COALESCE($8, resource_ids), is_active = COALESCE($9, is_active), sort = COALESCE($10, sort) WHERE id = $1", id, name, b.description.is_some(), clean(b.description.flatten()), b.duration_minutes, b.price, b.is_extra, b.resource_ids.as_deref(), b.is_active, b.sort)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -519,7 +455,7 @@ async fn update_service(State(state): State<AppState>, auth: AuthUser, Path(id):
 
 async fn delete_service(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     manage(&auth)?;
-    sqlx::query("DELETE FROM booking_services WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM booking_services WHERE id = $1", id).execute(&state.db).await?;
     list_services(State(state), auth).await
 }
 
@@ -533,10 +469,7 @@ pub(crate) async fn within_hours(state: &AppState, r: &Resource, start: DateTime
     let tz: Tz = r.timezone.parse().unwrap_or(chrono_tz::UTC);
     let (ls, le) = (start.with_timezone(&tz), end.with_timezone(&tz));
     let hours = hours_of(state, r.id).await?;
-    let off: Vec<NaiveDate> = sqlx::query_scalar("SELECT day FROM booking_days_off WHERE resource_id = $1 AND day BETWEEN $2 AND $3")
-        .bind(r.id)
-        .bind(ls.date_naive())
-        .bind(le.date_naive())
+    let off: Vec<NaiveDate> = sqlx::query_scalar!("SELECT day FROM booking_days_off WHERE resource_id = $1 AND day BETWEEN $2 AND $3", r.id, ls.date_naive(), le.date_naive())
         .fetch_all(&state.db)
         .await?;
     if off.contains(&ls.date_naive()) {
@@ -580,10 +513,10 @@ where
     }
     let mut conn = state.db.acquire().await?;
     for id in &ids {
-        sqlx::query("SELECT pg_advisory_lock(hashtextextended('booking:' || $1::text, 0))").bind(id).execute(&mut *conn).await?;
+        sqlx::query!("SELECT pg_advisory_lock(hashtextextended('booking:' || $1::text, 0))", id.to_string()).execute(&mut *conn).await?;
     }
     let out = f().await;
-    if sqlx::query("SELECT pg_advisory_unlock_all()").execute(&mut *conn).await.is_err() {
+    if sqlx::query!("SELECT pg_advisory_unlock_all()").execute(&mut *conn).await.is_err() {
         // A connection that may still hold the locks is not given back to the pool.
         let _ = conn.detach();
     }
@@ -621,7 +554,7 @@ pub(crate) async fn free_slots(state: &AppState, r: &Resource, duration: Duratio
     if for_clients && (day < now.with_timezone(&tz).date_naive() || day > (now + Duration::days(r.max_days_ahead as i64)).with_timezone(&tz).date_naive()) {
         return Ok(vec![]);
     }
-    let off: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM booking_days_off WHERE resource_id = $1 AND day = $2)").bind(r.id).bind(day).fetch_one(&state.db).await?;
+    let off: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM booking_days_off WHERE resource_id = $1 AND day = $2) AS "v!""#, r.id, day).fetch_one(&state.db).await?;
     if off {
         return Ok(vec![]);
     }

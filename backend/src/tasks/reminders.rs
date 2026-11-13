@@ -15,12 +15,10 @@ pub const JOB: &str = "tasks.deadlines";
 
 pub async fn run(state: &AppState) -> Result<()> {
     // Claim rows by setting the marker in the same statement, so two workers never both send.
-    let due_soon: Vec<(Uuid, String, Uuid, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "UPDATE tasks SET deadline_reminded_at = now()
+    let due_soon: Vec<(Uuid, String, Uuid, Option<DateTime<Utc>>)> = sqlx::query!(r#"UPDATE tasks SET deadline_reminded_at = now()
          WHERE status IN ('new','in_progress') AND deadline_reminded_at IS NULL
            AND deadline > now() AND deadline <= now() + interval '24 hours'
-         RETURNING id, title, responsible_id, deadline",
-    )
+         RETURNING id, title, responsible_id, deadline"#).map(|r| (r.id, r.title, r.responsible_id, r.deadline))
     .fetch_all(&state.db)
     .await?;
     for (id, title, responsible, deadline) in &due_soon {
@@ -30,11 +28,9 @@ pub async fn run(state: &AppState) -> Result<()> {
         send(state, &people, "task.due_soon", format!("Due soon: {title}"), when, *id).await;
     }
 
-    let overdue: Vec<(Uuid, String, Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE tasks SET overdue_notified_at = now()
+    let overdue: Vec<(Uuid, String, Uuid, Uuid)> = sqlx::query!(r#"UPDATE tasks SET overdue_notified_at = now()
          WHERE status IN ('new','in_progress','review') AND overdue_notified_at IS NULL AND deadline < now()
-         RETURNING id, title, responsible_id, created_by",
-    )
+         RETURNING id, title, responsible_id, created_by"#).map(|r| (r.id, r.title, r.responsible_id, r.created_by))
     .fetch_all(&state.db)
     .await?;
     for (id, title, responsible, creator) in &overdue {
@@ -52,8 +48,7 @@ pub async fn run(state: &AppState) -> Result<()> {
 }
 
 async fn assistants(state: &AppState, task: Uuid) -> Vec<Uuid> {
-    sqlx::query_scalar("SELECT user_id FROM task_members WHERE task_id = $1 AND role = 'assistant'")
-        .bind(task)
+    sqlx::query_scalar!("SELECT user_id FROM task_members WHERE task_id = $1 AND role = 'assistant'", task)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default()

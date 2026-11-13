@@ -79,7 +79,7 @@ pub async fn rules(state: &AppState) -> AppResult<Rules> {
             return Ok(r.clone());
         }
     }
-    let rows: Vec<(String, Value)> = sqlx::query_as("SELECT key, value FROM settings WHERE key IN ('ip_allow', 'ip_allow_admins_exempt')").fetch_all(&state.db).await?;
+    let rows: Vec<(String, Value)> = sqlx::query!(r#"SELECT key, value FROM settings WHERE key IN ('ip_allow', 'ip_allow_admins_exempt')"#).map(|r| (r.key, r.value)).fetch_all(&state.db).await?;
     let get = |k: &str| rows.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone()).unwrap_or(Value::Null);
     let r = Rules::from_settings(&get("ip_allow"), &get("ip_allow_admins_exempt"));
     *CACHE.lock().expect("ip rules lock") = Some((Instant::now(), r.clone()));

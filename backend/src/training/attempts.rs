@@ -68,7 +68,7 @@ async fn allowed(state: &AppState, t: &Test, user: Uuid) -> AppResult<Option<i64
     if t.attempt_limit == 0 {
         return Ok(None);
     }
-    let extra: Option<i32> = sqlx::query_scalar("SELECT extra FROM training_extra_attempts WHERE test_id = $1 AND user_id = $2").bind(t.id).bind(user).fetch_optional(&state.db).await?;
+    let extra: Option<i32> = sqlx::query_scalar!("SELECT extra FROM training_extra_attempts WHERE test_id = $1 AND user_id = $2", t.id, user).fetch_optional(&state.db).await?;
     Ok(Some((t.attempt_limit + extra.unwrap_or(0)) as i64))
 }
 
@@ -78,20 +78,15 @@ async fn blocker(state: &AppState, t: &Test, user: Uuid) -> AppResult<(Option<St
         return Ok((Some("this test is switched off".into()), None));
     }
     if let Some(p) = t.prerequisite_test_id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'done' AND percent >= $3)")
-            .bind(p)
-            .bind(user)
-            .bind(t.prerequisite_percent)
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'done' AND percent >= $3) AS "v!""#, p, user, t.prerequisite_percent)
             .fetch_one(&state.db)
             .await?;
         if !ok {
-            let title: String = sqlx::query_scalar("SELECT title FROM training_tests WHERE id = $1").bind(p).fetch_one(&state.db).await?;
+            let title: String = sqlx::query_scalar!("SELECT title FROM training_tests WHERE id = $1", p).fetch_one(&state.db).await?;
             return Ok((Some(format!("first score at least {} % in “{title}”", t.prerequisite_percent)), None));
         }
     }
-    let (used, last): (i64, Option<DateTime<Utc>>) = sqlx::query_as("SELECT COUNT(*), MAX(finished_at) FROM training_attempts WHERE test_id = $1 AND user_id = $2")
-        .bind(t.id)
-        .bind(user)
+    let (used, last): (i64, Option<DateTime<Utc>>) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", MAX(finished_at) AS "c1?" FROM training_attempts WHERE test_id = $1 AND user_id = $2"#, t.id, user).map(|r| (r.c0, r.c1))
         .fetch_one(&state.db)
         .await?;
     if allowed(state, t, user).await?.is_some_and(|n| used >= n) {
@@ -123,18 +118,12 @@ pub(super) async fn tests_for(state: &AppState, auth: &AuthUser, course: Uuid) -
     .await?;
     let mut out = Vec::new();
     for t in tests {
-        let (used, best, passed, open): (i64, Option<i32>, bool, Option<Uuid>) = sqlx::query_as(
-            "SELECT COUNT(*), MAX(percent) FILTER (WHERE status = 'done'), COALESCE(BOOL_OR(passed), FALSE),
-                    (SELECT id FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'in_progress' LIMIT 1)
-             FROM training_attempts WHERE test_id = $1 AND user_id = $2",
-        )
-        .bind(t.id)
-        .bind(auth.id)
+        let (used, best, passed, open): (i64, Option<i32>, bool, Option<Uuid>) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", MAX(percent) FILTER (WHERE status = 'done') AS "c1?", COALESCE(BOOL_OR(passed), FALSE) AS "c2!",
+                    (SELECT id FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'in_progress' LIMIT 1) AS "c3?"
+             FROM training_attempts WHERE test_id = $1 AND user_id = $2"#, t.id, auth.id).map(|r| (r.c0, r.c1, r.c2, r.c3))
         .fetch_one(&state.db)
         .await?;
-        let reviewing: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'review')")
-            .bind(t.id)
-            .bind(auth.id)
+        let reviewing: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'review') AS "v!""#, t.id, auth.id)
             .fetch_one(&state.db)
             .await?;
         let limit = allowed(state, &t, auth.id).await?;
@@ -164,7 +153,7 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
         return Err(AppError::bad("enrol in the course first"));
     }
     // An attempt under way is picked up again.
-    let open: Option<Uuid> = sqlx::query_scalar("SELECT id FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'in_progress'").bind(id).bind(auth.id).fetch_optional(&state.db).await?;
+    let open: Option<Uuid> = sqlx::query_scalar!("SELECT id FROM training_attempts WHERE test_id = $1 AND user_id = $2 AND status = 'in_progress'", id, auth.id).fetch_optional(&state.db).await?;
     if let Some(a) = open {
         if expire(&state, a).await? {
             // Ran out of time while away: it is over; start afresh below if allowed.
@@ -175,11 +164,7 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     if let (Some(why), _) = blocker(&state, &t, auth.id).await? {
         return Err(AppError::bad(why));
     }
-    let mut questions: Vec<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT id, kind, points FROM training_questions WHERE course_id = $1 AND NOT self_check AND ($2::uuid IS NULL OR lesson_id = $2) ORDER BY sort, created_at",
-    )
-    .bind(t.course_id)
-    .bind(t.lesson_id)
+    let mut questions: Vec<(Uuid, String, i32)> = sqlx::query!(r#"SELECT id, kind, points FROM training_questions WHERE course_id = $1 AND NOT self_check AND ($2::uuid IS NULL OR lesson_id = $2) ORDER BY sort, created_at"#, t.course_id, t.lesson_id).map(|r| (r.id, r.kind, r.points))
     .fetch_all(&state.db)
     .await?;
     if t.question_count > 0 && (t.question_count as usize) < questions.len() {
@@ -196,15 +181,11 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
     let max: i32 = questions.iter().map(|q| q.2).sum();
     let deadline = (t.time_limit_minutes > 0).then(|| Utc::now() + Duration::minutes(t.time_limit_minutes as i64));
     let mut tx = state.db.begin().await?;
-    let aid: Uuid = sqlx::query_scalar("INSERT INTO training_attempts (test_id, user_id, deadline_at, max_score) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(id)
-        .bind(auth.id)
-        .bind(deadline)
-        .bind(max)
+    let aid: Uuid = sqlx::query_scalar!("INSERT INTO training_attempts (test_id, user_id, deadline_at, max_score) VALUES ($1, $2, $3, $4) RETURNING id", id, auth.id, deadline, max)
         .fetch_one(&mut *tx)
         .await?;
     for (i, (qid, kind, _)) in questions.iter().enumerate() {
-        let mut order: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM training_answers WHERE question_id = $1 ORDER BY sort, id").bind(qid).fetch_all(&mut *tx).await?;
+        let mut order: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM training_answers WHERE question_id = $1 ORDER BY sort, id", qid).fetch_all(&mut *tx).await?;
         if kind == "order" {
             // Never shown already in the right order.
             let right = order.clone();
@@ -217,11 +198,7 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
         } else if t.shuffle_answers {
             shuffle(&mut order);
         }
-        sqlx::query("INSERT INTO training_attempt_answers (attempt_id, question_id, position, answer_order) VALUES ($1, $2, $3, $4)")
-            .bind(aid)
-            .bind(qid)
-            .bind(i as i32)
-            .bind(&order)
+        sqlx::query!("INSERT INTO training_attempt_answers (attempt_id, question_id, position, answer_order) VALUES ($1, $2, $3, $4)", aid, qid, i as i32, &order)
             .execute(&mut *tx)
             .await?;
     }
@@ -276,7 +253,7 @@ async fn view(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Value> {
         return Err(AppError::NotFound("attempt"));
     }
     let t = load_test(state, a.test_id).await?;
-    let course: (Uuid, String) = sqlx::query_as("SELECT id, title FROM training_courses WHERE id = $1").bind(t.course_id).fetch_one(&state.db).await?;
+    let course: (Uuid, String) = sqlx::query!(r#"SELECT id, title FROM training_courses WHERE id = $1"#, t.course_id).map(|r| (r.id, r.title)).fetch_one(&state.db).await?;
     let finished = a.status != "in_progress";
     let reveal = match t.show_answers.as_str() {
         "never" => false,
@@ -363,13 +340,7 @@ async fn answer(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         let right = is_right(&r.kind, &answers, &b.chosen);
         (Some(right), if right { r.max_points } else { 0 }, b.chosen.clone(), None)
     };
-    sqlx::query("UPDATE training_attempt_answers SET answered = TRUE, chosen = $3, written = $4, correct = $5, points = $6 WHERE attempt_id = $1 AND question_id = $2")
-        .bind(id)
-        .bind(b.question_id)
-        .bind(&chosen)
-        .bind(&written)
-        .bind(correct)
-        .bind(points)
+    sqlx::query!("UPDATE training_attempt_answers SET answered = TRUE, chosen = $3, written = $4, correct = $5, points = $6 WHERE attempt_id = $1 AND question_id = $2", id, b.question_id, &chosen, written.as_deref(), correct, points)
         .execute(&state.db)
         .await?;
     view(&state, &auth, id).await.map(Json)
@@ -389,24 +360,20 @@ async fn finish(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 /// Ends the attempt: unanswered questions are wrong; written answers wait for a grader.
 async fn close(state: &AppState, a: &Attempt) -> AppResult<()> {
-    let done = sqlx::query("UPDATE training_attempts SET finished_at = LEAST(now(), COALESCE(deadline_at, now())) WHERE id = $1 AND status = 'in_progress' AND finished_at IS NULL")
-        .bind(a.id)
+    let done = sqlx::query!("UPDATE training_attempts SET finished_at = LEAST(now(), COALESCE(deadline_at, now())) WHERE id = $1 AND status = 'in_progress' AND finished_at IS NULL", a.id)
         .execute(&state.db)
         .await?;
     if done.rows_affected() == 0 {
         return Ok(());
     }
-    sqlx::query("UPDATE training_attempt_answers SET correct = FALSE, points = 0 WHERE attempt_id = $1 AND NOT answered").bind(a.id).execute(&state.db).await?;
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM training_attempt_answers WHERE attempt_id = $1 AND correct IS NULL").bind(a.id).fetch_one(&state.db).await?;
+    sqlx::query!("UPDATE training_attempt_answers SET correct = FALSE, points = 0 WHERE attempt_id = $1 AND NOT answered", a.id).execute(&state.db).await?;
+    let pending: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM training_attempt_answers WHERE attempt_id = $1 AND correct IS NULL"#, a.id).fetch_one(&state.db).await?;
     if pending > 0 {
-        sqlx::query("UPDATE training_attempts SET status = 'review' WHERE id = $1").bind(a.id).execute(&state.db).await?;
+        sqlx::query!("UPDATE training_attempts SET status = 'review' WHERE id = $1", a.id).execute(&state.db).await?;
         let t = load_test(state, a.test_id).await?;
-        let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(a.user_id).fetch_one(&state.db).await?;
-        let graders: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id JOIN users u ON u.id = ur.user_id
-             WHERE rp.permission IN ($1, '*') AND u.is_active",
-        )
-        .bind(perm::TRAINING)
+        let name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, a.user_id).fetch_one(&state.db).await?;
+        let graders: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id JOIN users u ON u.id = ur.user_id
+             WHERE rp.permission IN ($1, '*') AND u.is_active", perm::TRAINING)
         .fetch_all(&state.db)
         .await?;
         notify(state, &graders, NewNotification {
@@ -427,22 +394,14 @@ async fn close(state: &AppState, a: &Attempt) -> AppResult<()> {
 async fn score(state: &AppState, id: Uuid) -> AppResult<()> {
     let a = load(state, id).await?;
     let t = load_test(state, a.test_id).await?;
-    let (earned, missed_required): (i64, bool) = sqlx::query_as(
-        "SELECT COALESCE(SUM(x.points), 0), COALESCE(BOOL_OR(q.required_correct AND NOT COALESCE(x.correct, FALSE)), FALSE)
-         FROM training_attempt_answers x JOIN training_questions q ON q.id = x.question_id WHERE x.attempt_id = $1",
-    )
-    .bind(id)
+    let (earned, missed_required): (i64, bool) = sqlx::query!(r#"SELECT COALESCE(SUM(x.points), 0) AS "c0!", COALESCE(BOOL_OR(q.required_correct AND NOT COALESCE(x.correct, FALSE)), FALSE) AS "c1!"
+         FROM training_attempt_answers x JOIN training_questions q ON q.id = x.question_id WHERE x.attempt_id = $1"#, id).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
     let percent = if a.max_score > 0 { (earned * 100 / a.max_score as i64) as i32 } else { 100 };
     let passed = percent >= t.pass_percent && !missed_required;
     let mark = marks_of(state, t.id).await?.into_iter().find(|(p, _)| percent >= *p).map(|(_, m)| m);
-    sqlx::query("UPDATE training_attempts SET status = 'done', score = $2, percent = $3, passed = $4, mark = $5 WHERE id = $1")
-        .bind(id)
-        .bind(earned as i32)
-        .bind(percent)
-        .bind(passed)
-        .bind(&mark)
+    sqlx::query!("UPDATE training_attempts SET status = 'done', score = $2, percent = $3, passed = $4, mark = $5 WHERE id = $1", id, earned as i32, percent, passed, mark.as_deref())
         .execute(&state.db)
         .await?;
     if passed {
@@ -492,11 +451,7 @@ async fn review(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if a.user_id == auth.id {
         return Err(AppError::bad("someone else grades your answers"));
     }
-    let r: Option<(i32, Option<bool>, String)> = sqlx::query_as(
-        "SELECT q.points, x.correct, q.kind FROM training_attempt_answers x JOIN training_questions q ON q.id = x.question_id WHERE x.attempt_id = $1 AND x.question_id = $2",
-    )
-    .bind(id)
-    .bind(b.question_id)
+    let r: Option<(i32, Option<bool>, String)> = sqlx::query!(r#"SELECT q.points, x.correct, q.kind FROM training_attempt_answers x JOIN training_questions q ON q.id = x.question_id WHERE x.attempt_id = $1 AND x.question_id = $2"#, id, b.question_id).map(|r| (r.points, r.correct, r.kind))
     .fetch_optional(&state.db)
     .await?;
     let (max, already, kind) = r.ok_or(AppError::NotFound("question"))?;
@@ -511,16 +466,10 @@ async fn review(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if note.as_ref().is_some_and(|n| n.chars().count() > 2000) {
         return Err(AppError::bad("the note is too long"));
     }
-    sqlx::query("UPDATE training_attempt_answers SET correct = $3, points = $4, reviewed_by = $5, review_note = $6 WHERE attempt_id = $1 AND question_id = $2")
-        .bind(id)
-        .bind(b.question_id)
-        .bind(b.correct)
-        .bind(points)
-        .bind(auth.id)
-        .bind(&note)
+    sqlx::query!("UPDATE training_attempt_answers SET correct = $3, points = $4, reviewed_by = $5, review_note = $6 WHERE attempt_id = $1 AND question_id = $2", id, b.question_id, b.correct, points, auth.id, note.as_deref())
         .execute(&state.db)
         .await?;
-    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM training_attempt_answers WHERE attempt_id = $1 AND correct IS NULL").bind(id).fetch_one(&state.db).await?;
+    let pending: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM training_attempt_answers WHERE attempt_id = $1 AND correct IS NULL"#, id).fetch_one(&state.db).await?;
     if pending == 0 {
         score(&state, id).await?;
         let done = load(&state, id).await?;
@@ -544,13 +493,10 @@ async fn review(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 async fn gradebook(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manager(&auth)?;
     let c = visible_course(&state, &auth, id).await?;
-    let tests: Vec<(Uuid, String, i32, bool)> = sqlx::query_as("SELECT id, title, attempt_limit, is_active FROM training_tests WHERE course_id = $1 ORDER BY sort, title").bind(id).fetch_all(&state.db).await?;
+    let tests: Vec<(Uuid, String, i32, bool)> = sqlx::query!(r#"SELECT id, title, attempt_limit, is_active FROM training_tests WHERE course_id = $1 ORDER BY sort, title"#, id).map(|r| (r.id, r.title, r.attempt_limit, r.is_active)).fetch_all(&state.db).await?;
     #[allow(clippy::type_complexity)]
-    let people: Vec<(Uuid, String, Option<Uuid>, String, Option<chrono::NaiveDate>, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id, e.source, e.due_on, e.enrolled_at, e.completed_at
-         FROM training_enrolments e JOIN users u ON u.id = e.user_id WHERE e.course_id = $1 ORDER BY u.first_name, u.last_name",
-    )
-    .bind(id)
+    let people: Vec<(Uuid, String, Option<Uuid>, String, Option<chrono::NaiveDate>, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.avatar_file_id AS "avatar_file_id?", e.source AS "source!", e.due_on AS "due_on?", e.enrolled_at AS "enrolled_at!", e.completed_at AS "completed_at?"
+         FROM training_enrolments e JOIN users u ON u.id = e.user_id WHERE e.course_id = $1 ORDER BY u.first_name, u.last_name"#, id).map(|r| (r.id, r.c1, r.avatar_file_id, r.source, r.due_on, r.enrolled_at, r.completed_at))
     .fetch_all(&state.db)
     .await?;
     let today = Utc::now().date_naive();
@@ -559,20 +505,16 @@ async fn gradebook(State(state): State<AppState>, auth: AuthUser, Path(id): Path
         let p = super::progress(&state, uid, id).await?;
         let mut results = Vec::new();
         for (tid, _, limit, _) in &tests {
-            let (used, best, passed, last): (i64, Option<i32>, bool, Option<Uuid>) = sqlx::query_as(
-                "SELECT COUNT(*), MAX(percent) FILTER (WHERE status = 'done'), COALESCE(BOOL_OR(passed), FALSE),
-                        (SELECT id FROM training_attempts WHERE test_id = $1 AND user_id = $2 ORDER BY started_at DESC LIMIT 1)
-                 FROM training_attempts WHERE test_id = $1 AND user_id = $2",
-            )
-            .bind(tid)
-            .bind(uid)
+            let (used, best, passed, last): (i64, Option<i32>, bool, Option<Uuid>) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", MAX(percent) FILTER (WHERE status = 'done') AS "c1?", COALESCE(BOOL_OR(passed), FALSE) AS "c2!",
+                        (SELECT id FROM training_attempts WHERE test_id = $1 AND user_id = $2 ORDER BY started_at DESC LIMIT 1) AS "c3?"
+                 FROM training_attempts WHERE test_id = $1 AND user_id = $2"#, tid, uid).map(|r| (r.c0, r.c1, r.c2, r.c3))
             .fetch_one(&state.db)
             .await?;
-            let extra: Option<i32> = sqlx::query_scalar("SELECT extra FROM training_extra_attempts WHERE test_id = $1 AND user_id = $2").bind(tid).bind(uid).fetch_optional(&state.db).await?;
+            let extra: Option<i32> = sqlx::query_scalar!("SELECT extra FROM training_extra_attempts WHERE test_id = $1 AND user_id = $2", tid, uid).fetch_optional(&state.db).await?;
             results.push(json!({ "test_id": tid, "attempts": used, "best_percent": best, "passed": passed, "last_attempt_id": last,
                                  "extra": extra.unwrap_or(0), "attempts_left": if *limit == 0 { None } else { Some((*limit as i64 + extra.unwrap_or(0) as i64 - used).max(0)) } }));
         }
-        let cert: Option<(Uuid, i64)> = sqlx::query_as("SELECT id, number FROM training_certificates WHERE course_id = $1 AND user_id = $2").bind(id).bind(uid).fetch_optional(&state.db).await?;
+        let cert: Option<(Uuid, i64)> = sqlx::query!(r#"SELECT id, number FROM training_certificates WHERE course_id = $1 AND user_id = $2"#, id, uid).map(|r| (r.id, r.number)).fetch_optional(&state.db).await?;
         rows_out.push(json!({
             "user_id": uid, "name": name, "avatar_file_id": avatar, "source": source, "due_on": due, "enrolled_at": enrolled, "completed_at": completed,
             "overdue": completed.is_none() && due.is_some_and(|d| d < today), "progress": p, "tests": results,
@@ -602,10 +544,7 @@ async fn extra_attempts(State(state): State<AppState>, auth: AuthUser, Path(id):
     if super::enrolment(&state, b.user_id, t.course_id).await?.is_none() {
         return Err(AppError::bad("that person isn't enrolled in the course"));
     }
-    sqlx::query("INSERT INTO training_extra_attempts (test_id, user_id, extra) VALUES ($1, $2, $3) ON CONFLICT (test_id, user_id) DO UPDATE SET extra = $3")
-        .bind(id)
-        .bind(b.user_id)
-        .bind(b.extra)
+    sqlx::query!("INSERT INTO training_extra_attempts (test_id, user_id, extra) VALUES ($1, $2, $3) ON CONFLICT (test_id, user_id) DO UPDATE SET extra = $3", id, b.user_id, b.extra)
         .execute(&state.db)
         .await?;
     if b.extra > 0 {

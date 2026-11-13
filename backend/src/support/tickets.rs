@@ -142,11 +142,11 @@ pub async fn create(state: &AppState, n: NewTicket) -> AppResult<Created> {
     let staff = n.requester_id.is_some();
     let sla_id = sla::choose(state, category, criticality, staff).await?;
     let sla_responsible: Option<Uuid> = match sla_id {
-        Some(s) => sqlx::query_scalar("SELECT responsible_id FROM support_slas WHERE id = $1").bind(s).fetch_optional(&state.db).await?.flatten(),
+        Some(s) => sqlx::query_scalar!("SELECT responsible_id FROM support_slas WHERE id = $1", s).fetch_optional(&state.db).await?.flatten(),
         None => None,
     };
     let category_responsible: Option<Uuid> = match category {
-        Some(c) => sqlx::query_scalar("SELECT responsible_id FROM support_dictionary WHERE id = $1").bind(c).fetch_optional(&state.db).await?.flatten(),
+        Some(c) => sqlx::query_scalar!("SELECT responsible_id FROM support_dictionary WHERE id = $1", c).fetch_optional(&state.db).await?.flatten(),
         None => None,
     };
     let mut responsible = None;
@@ -157,12 +157,8 @@ pub async fn create(state: &AppState, n: NewTicket) -> AppResult<Created> {
         }
     }
     let contact: Option<Uuid> = match &n.requester_email {
-        Some(e) if !staff => sqlx::query_scalar(
-            "SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
-             WHERE m.kind = 'email' AND m.normalized = $1 AND i.entity_type = $2 AND i.deleted_at IS NULL ORDER BY i.created_at LIMIT 1",
-        )
-        .bind(e.to_lowercase())
-        .bind(crate::crm::CONTACT)
+        Some(e) if !staff => sqlx::query_scalar!("SELECT i.id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+             WHERE m.kind = 'email' AND m.normalized = $1 AND i.entity_type = $2 AND i.deleted_at IS NULL ORDER BY i.created_at LIMIT 1", e.to_lowercase(), crate::crm::CONTACT)
         .fetch_optional(&state.db)
         .await?,
         _ => None,
@@ -171,42 +167,13 @@ pub async fn create(state: &AppState, n: NewTicket) -> AppResult<Created> {
     let now = Utc::now();
     let (deadline, notice) = sla::due(state, sla_id, now).await?;
     let mut tx = state.db.begin().await?;
-    let (id, number): (Uuid, i64) = sqlx::query_as(
-        "INSERT INTO support_tickets (title, channel, requester_id, requester_email, requester_name, contact_id, category_id, criticality_id, status_id,
+    let (id, number): (Uuid, i64) = sqlx::query!(r#"INSERT INTO support_tickets (title, channel, requester_id, requester_email, requester_name, contact_id, category_id, criticality_id, status_id,
              sla_id, responsible_id, access_hash, access_secret, waiting_for, waiting_since, deadline_at, notice_at, messages, last_message_at, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'support', $14, $15, $16, 1, $14, $17) RETURNING id, number",
-    )
-    .bind(&title)
-    .bind(n.channel)
-    .bind(n.requester_id)
-    .bind(n.requester_email.as_ref().filter(|_| !staff).map(|e| e.to_lowercase()))
-    .bind(n.requester_name.as_ref().filter(|_| !staff))
-    .bind(contact)
-    .bind(category)
-    .bind(criticality)
-    .bind(status)
-    .bind(sla_id)
-    .bind(responsible)
-    .bind(token.as_deref().map(super::hash))
-    .bind(token.as_deref().map(|t| crypto::seal(&state.config.data_key, t)))
-    .bind(now)
-    .bind(deadline)
-    .bind(notice)
-    .bind(n.created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'support', $14, $15, $16, 1, $14, $17) RETURNING id, number"#, &title, n.channel, n.requester_id, n.requester_email.as_ref().filter(|_| !staff).map(|e| e.to_lowercase()), n.requester_name.as_ref().filter(|_| !staff), contact, category, criticality, status, sla_id, responsible, token.as_deref().map(super::hash), token.as_deref().map(|t| crypto::seal(&state.config.data_key, t)), now, deadline, notice, n.created_by).map(|r| (r.id, r.number))
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query(
-        "INSERT INTO support_messages (ticket_id, kind, by_support, author_id, author_email, author_name, body, file_ids, email_message_id, created_at)
-         VALUES ($1, 'message', FALSE, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(id)
-    .bind(n.requester_id)
-    .bind(n.requester_email.as_ref().filter(|_| !staff))
-    .bind(n.requester_name.as_ref().filter(|_| !staff))
-    .bind(&body)
-    .bind(&n.file_ids)
-    .bind(&n.email_message_id)
-    .bind(now)
+    sqlx::query!("INSERT INTO support_messages (ticket_id, kind, by_support, author_id, author_email, author_name, body, file_ids, email_message_id, created_at)
+         VALUES ($1, 'message', FALSE, $2, $3, $4, $5, $6, $7, $8)", id, n.requester_id, n.requester_email.as_ref().filter(|_| !staff), n.requester_name.as_ref().filter(|_| !staff), &body, &n.file_ids, n.email_message_id.as_deref(), now)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -260,51 +227,33 @@ pub async fn add_message(state: &AppState, t: &TicketRow, author: Author, by_sup
     let now = Utc::now();
     let mut reopened = false;
     if !m.note && !by_support && t.closed_at.is_some() {
-        let allow: bool = sqlx::query_scalar("SELECT allow_reopen FROM support_settings WHERE id").fetch_one(&state.db).await?;
+        let allow: bool = sqlx::query_scalar!("SELECT allow_reopen FROM support_settings WHERE id").fetch_one(&state.db).await?;
         if !allow && t.requester_id.is_none() {
             return Err(AppError::Conflict("this request is closed; please send a new one".into()));
         }
         reopened = true;
     }
     let late = by_support && !m.note && t.deadline_at.is_some_and(|d| d < now);
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO support_messages (ticket_id, kind, by_support, author_id, author_email, author_name, body, file_ids, minutes_spent, is_overdue,
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO support_messages (ticket_id, kind, by_support, author_id, author_email, author_name, body, file_ids, minutes_spent, is_overdue,
              email_message_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
-    )
-    .bind(t.id)
-    .bind(if m.note { "note" } else { "message" })
-    .bind(by_support)
-    .bind(author_id)
-    .bind(author_email)
-    .bind(author_name)
-    .bind(&body)
-    .bind(&m.file_ids)
-    .bind(m.minutes_spent)
-    .bind(late)
-    .bind(&m.email_message_id)
-    .bind(now)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id", t.id, if m.note { "note" } else { "message" }, by_support, author_id, author_email, author_name, &body, &m.file_ids, m.minutes_spent, late, m.email_message_id.as_deref(), now)
     .fetch_one(&state.db)
     .await?;
-    sqlx::query("UPDATE support_tickets SET minutes_spent = minutes_spent + $2, updated_at = now() WHERE id = $1").bind(t.id).bind(m.minutes_spent).execute(&state.db).await?;
+    sqlx::query!("UPDATE support_tickets SET minutes_spent = minutes_spent + $2, updated_at = now() WHERE id = $1", t.id, m.minutes_spent).execute(&state.db).await?;
     if m.note {
         return Ok(id);
     }
-    sqlx::query("UPDATE support_tickets SET messages = messages + 1, last_message_at = $2 WHERE id = $1").bind(t.id).bind(now).execute(&state.db).await?;
+    sqlx::query!("UPDATE support_tickets SET messages = messages + 1, last_message_at = $2 WHERE id = $1", t.id, now).execute(&state.db).await?;
     if by_support {
-        sqlx::query(
-            "UPDATE support_tickets SET waiting_for = 'customer', waiting_since = NULL, deadline_at = NULL, notice_at = NULL, notice_sent = FALSE,
+        sqlx::query!("UPDATE support_tickets SET waiting_for = 'customer', waiting_since = NULL, deadline_at = NULL, notice_at = NULL, notice_sent = FALSE,
                  is_overdue = FALSE, first_response_at = COALESCE(first_response_at, $2)
-             WHERE id = $1",
-        )
-        .bind(t.id)
-        .bind(now)
+             WHERE id = $1", t.id, now)
         .execute(&state.db)
         .await?;
         tell_requester(state, t, Some(id), author_id).await?;
     } else {
         if reopened {
-            sqlx::query("UPDATE support_tickets SET closed_at = NULL, closed_by = NULL, auto_closed = FALSE, mark_id = NULL WHERE id = $1").bind(t.id).execute(&state.db).await?;
+            sqlx::query!("UPDATE support_tickets SET closed_at = NULL, closed_by = NULL, auto_closed = FALSE, mark_id = NULL WHERE id = $1", t.id).execute(&state.db).await?;
             log(state, t.id, author_id, "Reopened by a new message".into()).await?;
         }
         // The clock starts with the first unanswered message, not each one after it.
@@ -326,16 +275,10 @@ pub async fn add_message(state: &AppState, t: &TicketRow, author: Author, by_sup
 }
 
 async fn start_clock(state: &AppState, ticket: Uuid, sla_id: Option<Uuid>, since: DateTime<Utc>) -> AppResult<()> {
-    let hold: bool = sqlx::query_scalar("SELECT on_hold FROM support_tickets WHERE id = $1").bind(ticket).fetch_one(&state.db).await?;
+    let hold: bool = sqlx::query_scalar!("SELECT on_hold FROM support_tickets WHERE id = $1", ticket).fetch_one(&state.db).await?;
     let (deadline, notice) = if hold { (None, None) } else { sla::due(state, sla_id, since).await? };
-    sqlx::query(
-        "UPDATE support_tickets SET waiting_for = 'support', waiting_since = $2, deadline_at = $3, notice_at = $4, notice_sent = FALSE, is_overdue = FALSE
-         WHERE id = $1",
-    )
-    .bind(ticket)
-    .bind(since)
-    .bind(deadline)
-    .bind(notice)
+    sqlx::query!("UPDATE support_tickets SET waiting_for = 'support', waiting_since = $2, deadline_at = $3, notice_at = $4, notice_sent = FALSE, is_overdue = FALSE
+         WHERE id = $1", ticket, since, deadline, notice)
     .execute(&state.db)
     .await?;
     Ok(())
@@ -343,10 +286,7 @@ async fn start_clock(state: &AppState, ticket: Uuid, sla_id: Option<Uuid>, since
 
 /// Something changed: kept in the ticket's history (support sees it).
 pub async fn log(state: &AppState, ticket: Uuid, by: Option<Uuid>, text: String) -> AppResult<()> {
-    sqlx::query("INSERT INTO support_messages (ticket_id, kind, by_support, author_id, body) VALUES ($1, 'log', TRUE, $2, $3)")
-        .bind(ticket)
-        .bind(by)
-        .bind(text)
+    sqlx::query!("INSERT INTO support_messages (ticket_id, kind, by_support, author_id, body) VALUES ($1, 'log', TRUE, $2, $3)", ticket, by, text)
         .execute(&state.db)
         .await?;
     Ok(())
@@ -502,7 +442,7 @@ async fn own_files(state: &AppState, auth: &AuthUser, ids: &[Uuid]) -> AppResult
         return Err(AppError::bad("at most 20 files"));
     }
     for f in ids {
-        let owner: Option<Option<Uuid>> = sqlx::query_scalar("SELECT owner_id FROM files WHERE id = $1").bind(f).fetch_optional(&state.db).await?;
+        let owner: Option<Option<Uuid>> = sqlx::query_scalar!(r#"SELECT owner_id AS "owner_id?" FROM files WHERE id = $1"#, f).fetch_optional(&state.db).await?;
         if owner.flatten() != Some(auth.id) {
             return Err(AppError::NotFound("file"));
         }
@@ -522,7 +462,7 @@ async fn create_ticket(State(state): State<AppState>, auth: AuthUser, Json(b): J
     let requester = match (&customer, b.requester_id) {
         (Some(_), _) => None,
         (None, Some(r)) => {
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active AND NOT is_system)").bind(r).fetch_one(&state.db).await?;
+            let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active AND NOT is_system) AS "v!""#, r).fetch_one(&state.db).await?;
             if !ok {
                 return Err(AppError::bad("unknown colleague"));
             }
@@ -551,19 +491,15 @@ async fn create_ticket(State(state): State<AppState>, auth: AuthUser, Json(b): J
 async fn ticket_json(state: &AppState, auth: &AuthUser, t: &TicketRow) -> AppResult<Value> {
     let support = as_support(auth, t) || worker(auth);
     let rows: Vec<(Uuid, String, bool, Option<Uuid>, Option<String>, Option<String>, Option<Uuid>, String, Vec<Uuid>, i32, bool, Option<String>, DateTime<Utc>)> =
-        sqlx::query_as(
-            "SELECT m.id, m.kind, m.by_support, m.author_id, COALESCE(u.first_name || ' ' || u.last_name, m.author_name, m.author_email), m.author_email,
+        sqlx::query!(r#"SELECT m.id, m.kind, m.by_support, m.author_id, COALESCE(u.first_name || ' ' || u.last_name, m.author_name, m.author_email) AS "c4", m.author_email,
                     u.avatar_file_id, m.body, m.file_ids, m.minutes_spent, m.is_overdue, m.email_status, m.created_at
              FROM support_messages m LEFT JOIN users u ON u.id = m.author_id
-             WHERE m.ticket_id = $1 AND ($2 OR m.kind = 'message') ORDER BY m.created_at, m.id",
-        )
-        .bind(t.id)
-        .bind(support)
+             WHERE m.ticket_id = $1 AND ($2 OR m.kind = 'message') ORDER BY m.created_at, m.id"#, t.id, support).map(|r| (r.id, r.kind, r.by_support, r.author_id, r.c4, r.author_email, r.avatar_file_id, r.body, r.file_ids, r.minutes_spent, r.is_overdue, r.email_status, r.created_at))
         .fetch_all(&state.db)
         .await?;
     let mut messages = Vec::new();
     for (id, kind, by_support, author_id, name, email, avatar, body, file_ids, minutes, late, email_status, at) in rows {
-        let files: Vec<(Uuid, String, i64)> = sqlx::query_as("SELECT id, original_name, size_bytes FROM files WHERE id = ANY($1)").bind(&file_ids).fetch_all(&state.db).await?;
+        let files: Vec<(Uuid, String, i64)> = sqlx::query!(r#"SELECT id, original_name, size_bytes FROM files WHERE id = ANY($1)"#, &file_ids).map(|r| (r.id, r.original_name, r.size_bytes)).fetch_all(&state.db).await?;
         messages.push(json!({
             "id": id, "kind": kind, "by_support": by_support, "author_id": author_id, "author_name": name.unwrap_or_else(|| "System".into()),
             "author_email": if support { email } else { None }, "author_avatar_file_id": avatar, "body": body,
@@ -576,7 +512,7 @@ async fn ticket_json(state: &AppState, auth: &AuthUser, t: &TicketRow) -> AppRes
     v["as_support"] = json!(as_support(auth, t));
     v["can_rate"] = json!(t.closed_at.is_some() && t.requester_id == Some(auth.id));
     if let Some(s) = t.sla_id {
-        let name: Option<String> = sqlx::query_scalar("SELECT name FROM support_slas WHERE id = $1").bind(s).fetch_optional(&state.db).await?;
+        let name: Option<String> = sqlx::query_scalar!("SELECT name FROM support_slas WHERE id = $1", s).fetch_optional(&state.db).await?;
         v["sla_name"] = json!(name);
     }
     if !support {
@@ -653,7 +589,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn user_name(state: &AppState, id: Option<Uuid>) -> AppResult<String> {
     Ok(match id {
-        Some(u) => sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1").bind(u).fetch_optional(&state.db).await?.unwrap_or_default(),
+        Some(u) => sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, u).fetch_optional(&state.db).await?.unwrap_or_default(),
         None => "nobody".into(),
     })
 }
@@ -695,7 +631,7 @@ async fn change(state: &AppState, auth: &AuthUser, id: Uuid, b: Changes) -> AppR
     if let Some(title) = b.title {
         let title = required("title", &title, 300)?;
         if title != t.title {
-            sqlx::query("UPDATE support_tickets SET title = $2 WHERE id = $1").bind(id).bind(&title).execute(&mut *tx).await?;
+            sqlx::query!("UPDATE support_tickets SET title = $2 WHERE id = $1", id, &title).execute(&mut *tx).await?;
             history.push(format!("Title: {} → {}", t.title, title));
         }
     }
@@ -706,14 +642,14 @@ async fn change(state: &AppState, auth: &AuthUser, id: Uuid, b: Changes) -> AppR
                 && !is_worker(state, u).await? {
                     return Err(AppError::bad("tickets go to people who work on the help desk"));
                 }
-            sqlx::query("UPDATE support_tickets SET responsible_id = $2 WHERE id = $1").bind(id).bind(r).execute(&mut *tx).await?;
+            sqlx::query!("UPDATE support_tickets SET responsible_id = $2 WHERE id = $1", id, r).execute(&mut *tx).await?;
             history.push(format!("Responsible: {} → {}", user_name(state, t.responsible_id).await?, user_name(state, r).await?));
             assigned = r;
         }
     let mut new_sla = None;
     if let Some(s) = b.sla_id
         && Some(s) != t.sla_id {
-            let name: String = sqlx::query_scalar("SELECT name FROM support_slas WHERE id = $1").bind(s).fetch_optional(&state.db).await?.ok_or_else(|| AppError::bad("unknown SLA"))?;
+            let name: String = sqlx::query_scalar!("SELECT name FROM support_slas WHERE id = $1", s).fetch_optional(&state.db).await?.ok_or_else(|| AppError::bad("unknown SLA"))?;
             history.push(format!("SLA: {name}"));
             new_sla = Some(s);
         }
@@ -723,27 +659,25 @@ async fn change(state: &AppState, auth: &AuthUser, id: Uuid, b: Changes) -> AppR
         let chosen = sla::choose(state, cat, crit, t.requester_id.is_some()).await?;
         if chosen != t.sla_id {
             if let Some(s) = chosen {
-                let name: String = sqlx::query_scalar("SELECT name FROM support_slas WHERE id = $1").bind(s).fetch_one(&state.db).await?;
+                let name: String = sqlx::query_scalar!("SELECT name FROM support_slas WHERE id = $1", s).fetch_one(&state.db).await?;
                 history.push(format!("SLA: {name}"));
             }
             new_sla = chosen;
         }
     }
     if let Some(s) = new_sla {
-        sqlx::query("UPDATE support_tickets SET sla_id = $2 WHERE id = $1").bind(id).bind(s).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE support_tickets SET sla_id = $2 WHERE id = $1", id, s).execute(&mut *tx).await?;
     }
     let mut hold_changed = None;
     if let Some(h) = b.on_hold
         && h != t.on_hold {
-            sqlx::query("UPDATE support_tickets SET on_hold = $2 WHERE id = $1").bind(id).bind(h).execute(&mut *tx).await?;
+            sqlx::query!("UPDATE support_tickets SET on_hold = $2 WHERE id = $1", id, h).execute(&mut *tx).await?;
             history.push(if h { "Put on hold".into() } else { "Taken off hold".into() });
             hold_changed = Some(h);
         }
     if let Some(s) = b.is_spam
         && s != t.is_spam {
-            sqlx::query("UPDATE support_tickets SET is_spam = $2, deadline_at = CASE WHEN $2 THEN NULL ELSE deadline_at END, notice_at = CASE WHEN $2 THEN NULL ELSE notice_at END WHERE id = $1")
-                .bind(id)
-                .bind(s)
+            sqlx::query!("UPDATE support_tickets SET is_spam = $2, deadline_at = CASE WHEN $2 THEN NULL ELSE deadline_at END, notice_at = CASE WHEN $2 THEN NULL ELSE notice_at END WHERE id = $1", id, s)
                 .execute(&mut *tx)
                 .await?;
             history.push(if s { "Marked as spam".into() } else { "Not spam".into() });
@@ -756,7 +690,7 @@ async fn change(state: &AppState, auth: &AuthUser, id: Uuid, b: Changes) -> AppR
     if t.closed_at.is_none() && t.waiting_for == "support" {
         match hold_changed {
             Some(true) => {
-                sqlx::query("UPDATE support_tickets SET deadline_at = NULL, notice_at = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+                sqlx::query!("UPDATE support_tickets SET deadline_at = NULL, notice_at = NULL WHERE id = $1", id).execute(&state.db).await?;
             }
             Some(false) => start_clock(state, id, new_sla.or(t.sla_id), Utc::now()).await?,
             None => {
@@ -793,9 +727,7 @@ async fn do_close(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<()> 
     if t.closed_at.is_some() {
         return Ok(());
     }
-    sqlx::query("UPDATE support_tickets SET closed_at = now(), closed_by = $2, auto_closed = FALSE, deadline_at = NULL, notice_at = NULL, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(auth.id)
+    sqlx::query!("UPDATE support_tickets SET closed_at = now(), closed_by = $2, auto_closed = FALSE, deadline_at = NULL, notice_at = NULL, updated_at = now() WHERE id = $1", id, auth.id)
         .execute(&state.db)
         .await?;
     log(state, id, Some(auth.id), "Closed".into()).await?;
@@ -824,8 +756,7 @@ pub async fn do_reopen(state: &AppState, t: &TicketRow, by: Option<Uuid>) -> App
     if t.closed_at.is_none() {
         return Ok(());
     }
-    sqlx::query("UPDATE support_tickets SET closed_at = NULL, closed_by = NULL, auto_closed = FALSE, mark_id = NULL, updated_at = now() WHERE id = $1")
-        .bind(t.id)
+    sqlx::query!("UPDATE support_tickets SET closed_at = NULL, closed_by = NULL, auto_closed = FALSE, mark_id = NULL, updated_at = now() WHERE id = $1", t.id)
         .execute(&state.db)
         .await?;
     log(state, t.id, by, "Reopened".into()).await?;
@@ -849,7 +780,7 @@ pub async fn do_rate(state: &AppState, t: &TicketRow, mark: Uuid, by: Option<Uui
         return Err(AppError::bad("rate the answer once the request is closed"));
     }
     entry_of(state, Some(mark), "mark").await?;
-    sqlx::query("UPDATE support_tickets SET mark_id = $2 WHERE id = $1").bind(t.id).bind(mark).execute(&state.db).await?;
+    sqlx::query!("UPDATE support_tickets SET mark_id = $2 WHERE id = $1", t.id, mark).execute(&state.db).await?;
     log(state, t.id, by, format!("Rated: {}", entry_name(state, Some(mark)).await?)).await?;
     if let Some(r) = t.responsible_id {
         notify(state, &[r], NewNotification {
@@ -875,7 +806,7 @@ async fn rate(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     auth.require(perm::SUPPORT_MANAGE)?;
-    let n = sqlx::query("DELETE FROM support_tickets WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM support_tickets WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("ticket"));
     }

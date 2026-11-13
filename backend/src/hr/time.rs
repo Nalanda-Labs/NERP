@@ -32,7 +32,7 @@ pub fn router() -> Router<AppState> {
 }
 
 pub(crate) async fn tz_of(state: &AppState, user: Uuid) -> AppResult<Tz> {
-    let tz: String = sqlx::query_scalar("SELECT timezone FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await?;
+    let tz: String = sqlx::query_scalar!("SELECT timezone FROM users WHERE id = $1", user).fetch_one(&state.db).await?;
     Ok(tz.parse().unwrap_or(chrono_tz::UTC))
 }
 
@@ -62,7 +62,7 @@ fn worked(d: &Day, breaks: &[Break], now: DateTime<Utc>) -> i64 {
 }
 
 async fn breaks_of(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<Break>> {
-    Ok(sqlx::query_as("SELECT day_id, started_at, ended_at FROM hr_work_breaks WHERE day_id = ANY($1) ORDER BY started_at").bind(ids).fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(Break, r#"SELECT day_id, started_at, ended_at AS "ended_at?" FROM hr_work_breaks WHERE day_id = ANY($1) ORDER BY started_at"#, ids).fetch_all(&state.db).await?)
 }
 
 const DAY_SELECT: &str = "SELECT d.id, d.day, d.started_at, d.ended_at, d.note, d.edit_reason, trim(e.first_name || ' ' || e.last_name) AS edited_by_name
@@ -70,11 +70,11 @@ const DAY_SELECT: &str = "SELECT d.id, d.day, d.started_at, d.ended_at, d.note, 
 
 /// A day left running from an earlier date ends at midnight of that date.
 async fn close_forgotten(state: &AppState, user: Uuid, tz: Tz, today: NaiveDate) -> AppResult<()> {
-    let open: Vec<(Uuid, NaiveDate)> = sqlx::query_as("SELECT id, day FROM hr_work_days WHERE user_id = $1 AND ended_at IS NULL AND day < $2").bind(user).bind(today).fetch_all(&state.db).await?;
+    let open: Vec<(Uuid, NaiveDate)> = sqlx::query!(r#"SELECT id, day FROM hr_work_days WHERE user_id = $1 AND ended_at IS NULL AND day < $2"#, user, today).map(|r| (r.id, r.day)).fetch_all(&state.db).await?;
     for (id, day) in open {
         let midnight = tz.from_local_datetime(&(day + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap()).earliest().map(|t| t.with_timezone(&Utc)).unwrap_or_else(Utc::now);
-        sqlx::query("UPDATE hr_work_breaks SET ended_at = $2 WHERE day_id = $1 AND ended_at IS NULL").bind(id).bind(midnight).execute(&state.db).await?;
-        sqlx::query("UPDATE hr_work_days SET ended_at = $2, note = COALESCE(note || ' · ', '') || 'ended automatically at midnight' WHERE id = $1").bind(id).bind(midnight).execute(&state.db).await?;
+        sqlx::query!("UPDATE hr_work_breaks SET ended_at = $2 WHERE day_id = $1 AND ended_at IS NULL", id, midnight).execute(&state.db).await?;
+        sqlx::query!("UPDATE hr_work_days SET ended_at = $2, note = COALESCE(note || ' · ', '') || 'ended automatically at midnight' WHERE id = $1", id, midnight).execute(&state.db).await?;
     }
     Ok(())
 }
@@ -102,10 +102,7 @@ pub(crate) async fn start_if_idle(state: &AppState, user: Uuid) -> AppResult<boo
     let now = Utc::now();
     let today = now.with_timezone(&tz).date_naive();
     close_forgotten(state, user, tz, today).await?;
-    let r = sqlx::query("INSERT INTO hr_work_days (user_id, day, started_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
-        .bind(user)
-        .bind(today)
-        .bind(now)
+    let r = sqlx::query!("INSERT INTO hr_work_days (user_id, day, started_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", user, today, now)
         .execute(&state.db)
         .await?;
     Ok(r.rows_affected() > 0)
@@ -120,30 +117,30 @@ async fn act(State(state): State<AppState>, auth: AuthUser, Path(action): Path<S
     let now = Utc::now();
     let today = now.with_timezone(&tz).date_naive();
     close_forgotten(&state, auth.id, tz, today).await?;
-    let d: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query_as("SELECT id, ended_at FROM hr_work_days WHERE user_id = $1 AND day = $2").bind(auth.id).bind(today).fetch_optional(&state.db).await?;
+    let d: Option<(Uuid, Option<DateTime<Utc>>)> = sqlx::query!(r#"SELECT id, ended_at FROM hr_work_days WHERE user_id = $1 AND day = $2"#, auth.id, today).map(|r| (r.id, r.ended_at)).fetch_optional(&state.db).await?;
     let open_break: Option<Uuid> = match d {
-        Some((id, _)) => sqlx::query_scalar("SELECT id FROM hr_work_breaks WHERE day_id = $1 AND ended_at IS NULL").bind(id).fetch_optional(&state.db).await?,
+        Some((id, _)) => sqlx::query_scalar!("SELECT id FROM hr_work_breaks WHERE day_id = $1 AND ended_at IS NULL", id).fetch_optional(&state.db).await?,
         None => None,
     };
     match (action.as_str(), d) {
         ("start", None) => {
-            sqlx::query("INSERT INTO hr_work_days (user_id, day, started_at) VALUES ($1, $2, $3)").bind(auth.id).bind(today).bind(now).execute(&state.db).await?;
+            sqlx::query!("INSERT INTO hr_work_days (user_id, day, started_at) VALUES ($1, $2, $3)", auth.id, today, now).execute(&state.db).await?;
         }
         // Starting again after ending: the time in between counts as a break.
         ("start", Some((id, Some(ended)))) => {
-            sqlx::query("INSERT INTO hr_work_breaks (day_id, started_at, ended_at) VALUES ($1, $2, $3)").bind(id).bind(ended).bind(now).execute(&state.db).await?;
-            sqlx::query("UPDATE hr_work_days SET ended_at = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("INSERT INTO hr_work_breaks (day_id, started_at, ended_at) VALUES ($1, $2, $3)", id, ended, now).execute(&state.db).await?;
+            sqlx::query!("UPDATE hr_work_days SET ended_at = NULL WHERE id = $1", id).execute(&state.db).await?;
         }
         ("start", Some(_)) => return Err(AppError::bad("your day has already started")),
         ("pause", Some((id, None))) if open_break.is_none() => {
-            sqlx::query("INSERT INTO hr_work_breaks (day_id, started_at) VALUES ($1, $2)").bind(id).bind(now).execute(&state.db).await?;
+            sqlx::query!("INSERT INTO hr_work_breaks (day_id, started_at) VALUES ($1, $2)", id, now).execute(&state.db).await?;
         }
         ("resume", Some((_, None))) if open_break.is_some() => {
-            sqlx::query("UPDATE hr_work_breaks SET ended_at = $2 WHERE id = $1").bind(open_break).bind(now).execute(&state.db).await?;
+            sqlx::query!("UPDATE hr_work_breaks SET ended_at = $2 WHERE id = $1", open_break, now).execute(&state.db).await?;
         }
         ("end", Some((id, None))) => {
-            sqlx::query("UPDATE hr_work_breaks SET ended_at = $2 WHERE day_id = $1 AND ended_at IS NULL").bind(id).bind(now).execute(&state.db).await?;
-            sqlx::query("UPDATE hr_work_days SET ended_at = $2 WHERE id = $1").bind(id).bind(now).execute(&state.db).await?;
+            sqlx::query!("UPDATE hr_work_breaks SET ended_at = $2 WHERE day_id = $1 AND ended_at IS NULL", id, now).execute(&state.db).await?;
+            sqlx::query!("UPDATE hr_work_days SET ended_at = $2 WHERE id = $1", id, now).execute(&state.db).await?;
         }
         ("pause" | "resume" | "end", _) => return Err(AppError::bad(format!("you can't {action} now"))),
         _ => return Err(AppError::NotFound("action")),
@@ -169,10 +166,7 @@ async fn expected(state: &AppState, user: Uuid, from: NaiveDate, to: NaiveDate) 
     let s = settings(state).await?;
     let hol = holidays(state, from, to).await?;
     let mut days = working_days(&s, &hol, from, to);
-    let away: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as("SELECT starts_on, ends_on FROM hr_absences WHERE user_id = $1 AND status = 'approved' AND starts_on <= $3 AND ends_on >= $2")
-        .bind(user)
-        .bind(from)
-        .bind(to)
+    let away: Vec<(NaiveDate, NaiveDate)> = sqlx::query!(r#"SELECT starts_on, ends_on FROM hr_absences WHERE user_id = $1 AND status = 'approved' AND starts_on <= $3 AND ends_on >= $2"#, user, from, to).map(|r| (r.starts_on, r.ends_on))
         .fetch_all(&state.db)
         .await?;
     let mut away_days = 0;
@@ -206,7 +200,7 @@ async fn sheet(state: &AppState, user: Uuid, month: &str) -> AppResult<Value> {
         .collect();
     let total: i64 = days.iter().map(|d| worked(d, &br, now)).sum();
     let (expected, away) = expected(state, user, from, to).await?;
-    let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(user).fetch_one(&state.db).await?;
+    let name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, user).fetch_one(&state.db).await?;
     Ok(json!({ "user_id": user, "name": name, "month": month, "days": rows, "worked_minutes": total, "expected_minutes": expected, "absence_days": away }))
 }
 
@@ -233,10 +227,7 @@ async fn team(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Tea
         Some(ids) => sqlx::query_as("SELECT id, trim(first_name || ' ' || last_name) FROM users WHERE id = ANY($1) ORDER BY first_name, last_name").bind(&ids).fetch_all(&state.db).await?,
     };
     let ids: Vec<Uuid> = people.iter().map(|(id, _)| *id).collect();
-    let days: Vec<(Uuid, Uuid, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as("SELECT id, user_id, started_at, ended_at FROM hr_work_days WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3")
-        .bind(&ids)
-        .bind(from)
-        .bind(to)
+    let days: Vec<(Uuid, Uuid, DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query!(r#"SELECT id, user_id, started_at, ended_at FROM hr_work_days WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3"#, &ids, from, to).map(|r| (r.id, r.user_id, r.started_at, r.ended_at))
         .fetch_all(&state.db)
         .await?;
     let br = breaks_of(&state, &days.iter().map(|d| d.0).collect::<Vec<_>>()).await?;
@@ -283,13 +274,7 @@ async fn add_day(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Da
     check_times(b.started_at, b.ended_at)?;
     let tz = tz_of(&state, user).await?;
     let day = b.day.unwrap_or_else(|| b.started_at.with_timezone(&tz).date_naive());
-    sqlx::query("INSERT INTO hr_work_days (user_id, day, started_at, ended_at, edited_by, edit_reason) VALUES ($1, $2, $3, $4, $5, $6)")
-        .bind(user)
-        .bind(day)
-        .bind(b.started_at)
-        .bind(b.ended_at)
-        .bind(auth.id)
-        .bind(&reason)
+    sqlx::query!("INSERT INTO hr_work_days (user_id, day, started_at, ended_at, edited_by, edit_reason) VALUES ($1, $2, $3, $4, $5, $6)", user, day, b.started_at, b.ended_at, auth.id, &reason)
         .execute(&state.db)
         .await
         .map_err(|e| match e {
@@ -302,22 +287,17 @@ async fn add_day(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Da
 
 /// A manager corrects a day: its start and end (breaks stay), with a reason.
 async fn edit_day(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<DayInput>) -> AppResult<Json<Value>> {
-    let (user, day): (Uuid, NaiveDate) = sqlx::query_as("SELECT user_id, day FROM hr_work_days WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("work day"))?;
+    let (user, day): (Uuid, NaiveDate) = sqlx::query!(r#"SELECT user_id, day FROM hr_work_days WHERE id = $1"#, id).map(|r| (r.user_id, r.day)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("work day"))?;
     if !manages(&state, &auth, user).await? {
         return Err(AppError::Forbidden);
     }
     let reason = required("reason", &b.reason, 500)?;
     check_times(b.started_at, b.ended_at)?;
-    sqlx::query("UPDATE hr_work_days SET started_at = $2, ended_at = $3, edited_by = $4, edit_reason = $5 WHERE id = $1")
-        .bind(id)
-        .bind(b.started_at)
-        .bind(b.ended_at)
-        .bind(auth.id)
-        .bind(&reason)
+    sqlx::query!("UPDATE hr_work_days SET started_at = $2, ended_at = $3, edited_by = $4, edit_reason = $5 WHERE id = $1", id, b.started_at, b.ended_at, auth.id, &reason)
         .execute(&state.db)
         .await?;
     // Breaks outside the new times are dropped.
-    sqlx::query("DELETE FROM hr_work_breaks WHERE day_id = $1 AND (started_at < $2 OR ($3::timestamptz IS NOT NULL AND started_at > $3))").bind(id).bind(b.started_at).bind(b.ended_at).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM hr_work_breaks WHERE day_id = $1 AND (started_at < $2 OR ($3::timestamptz IS NOT NULL AND started_at > $3))", id, b.started_at, b.ended_at).execute(&state.db).await?;
     crate::audit::record(&state.db, Some(auth.id), "hr.workday.edit", "user", Some(user.to_string()), json!({ "day": day, "reason": reason }), None).await;
     sheet(&state, user, &day.format("%Y-%m").to_string()).await.map(Json)
 }
@@ -338,5 +318,5 @@ pub(crate) async fn worked_minutes(state: &AppState, user: Uuid, from: NaiveDate
 
 /// When someone started work on each of these days.
 pub(crate) async fn starts(state: &AppState, users: &[Uuid], from: NaiveDate, to: NaiveDate) -> AppResult<Vec<(Uuid, NaiveDate, DateTime<Utc>)>> {
-    Ok(sqlx::query_as("SELECT user_id, day, started_at FROM hr_work_days WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3").bind(users).bind(from).bind(to).fetch_all(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT user_id, day, started_at FROM hr_work_days WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3"#, users, from, to).map(|r| (r.user_id, r.day, r.started_at)).fetch_all(&state.db).await?)
 }

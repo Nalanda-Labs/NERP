@@ -76,7 +76,7 @@ pub(crate) struct Settings {
 }
 
 pub(crate) async fn settings(state: &AppState) -> AppResult<Settings> {
-    let mut s: Settings = sqlx::query_as("SELECT enabled, name, intro, currency, handlers, payment_instructions, terms, warehouse_id FROM shop_settings")
+    let mut s: Settings = sqlx::query_as!(Settings, r#"SELECT enabled, name, intro AS "intro?", currency AS "currency?", handlers, payment_instructions AS "payment_instructions?", terms AS "terms?", warehouse_id AS "warehouse_id?" FROM shop_settings"#)
         .fetch_one(&state.db)
         .await?;
     if s.currency.is_none() {
@@ -92,16 +92,10 @@ async fn get_settings(State(state): State<AppState>, auth: AuthUser) -> AppResul
 
 async fn settings_view(state: &AppState) -> AppResult<Value> {
     let s = settings(state).await?;
-    let (listed, other_currency): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE currency = $1), COUNT(*) FILTER (WHERE currency <> $1) FROM crm_products WHERE in_shop AND is_active",
-    )
-    .bind(&s.currency)
+    let (listed, other_currency): (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) FILTER (WHERE currency = $1) AS "c0!", COUNT(*) FILTER (WHERE currency <> $1) AS "c1!" FROM crm_products WHERE in_shop AND is_active"#, s.currency.as_deref()).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
-    let handlers: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT id, trim(first_name || ' ' || last_name), avatar_file_id FROM users WHERE id = ANY($1) ORDER BY array_position($1, id)",
-    )
-    .bind(&s.handlers)
+    let handlers: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!", avatar_file_id AS "avatar_file_id?" FROM users WHERE id = ANY($1) ORDER BY array_position($1, id)"#, &s.handlers).map(|r| (r.id, r.c1, r.avatar_file_id))
     .fetch_all(&state.db)
     .await?;
     Ok(json!({
@@ -156,7 +150,7 @@ async fn update_settings(State(state): State<AppState>, auth: AuthUser, Json(b):
     if let Some(h) = b.handlers {
         let mut h = h;
         h.dedup();
-        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&h).fetch_one(&state.db).await?;
+        let active: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &h).fetch_one(&state.db).await?;
         if active as usize != h.len() {
             return Err(AppError::bad("orders can only be handled by active employees"));
         }
@@ -173,7 +167,7 @@ async fn update_settings(State(state): State<AppState>, auth: AuthUser, Json(b):
     }
     if let Some(w) = b.warehouse_id {
         if let Some(id) = w {
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM inv_warehouses WHERE id = $1 AND is_active)").bind(id).fetch_one(&state.db).await?;
+            let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM inv_warehouses WHERE id = $1 AND is_active) AS "v!""#, id).fetch_one(&state.db).await?;
             if !ok {
                 return Err(AppError::bad("that warehouse does not exist or is inactive"));
             }
@@ -186,17 +180,7 @@ async fn update_settings(State(state): State<AppState>, auth: AuthUser, Json(b):
     if s.enabled && s.payment_instructions.is_none() {
         return Err(AppError::bad("add payment instructions before opening the shop: customers need to know how to pay"));
     }
-    sqlx::query(
-        "UPDATE shop_settings SET enabled = $1, name = $2, intro = $3, currency = $4, handlers = $5, payment_instructions = $6, terms = $7, warehouse_id = $8, updated_at = now()",
-    )
-    .bind(s.enabled)
-    .bind(&s.name)
-    .bind(&s.intro)
-    .bind(&s.currency)
-    .bind(&s.handlers)
-    .bind(&s.payment_instructions)
-    .bind(&s.terms)
-    .bind(s.warehouse_id)
+    sqlx::query!("UPDATE shop_settings SET enabled = $1, name = $2, intro = $3, currency = $4, handlers = $5, payment_instructions = $6, terms = $7, warehouse_id = $8, updated_at = now()", s.enabled, &s.name, s.intro.as_deref(), s.currency.as_deref(), &s.handlers, s.payment_instructions.as_deref(), s.terms.as_deref(), s.warehouse_id)
     .execute(&state.db)
     .await?;
     crate::audit::record(&state.db, Some(auth.id), "shop.settings", "shop", None, json!({ "enabled": s.enabled }), None).await;
@@ -238,9 +222,7 @@ async fn unique_category_slug(state: &AppState, name: &str, except: Option<Uuid>
     let base = crate::routes::slugify(name, "category");
     for i in 1..1000 {
         let s = if i == 1 { base.clone() } else { format!("{base}-{i}") };
-        let taken: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM shop_categories WHERE slug = $1 AND id IS DISTINCT FROM $2)")
-            .bind(&s)
-            .bind(except)
+        let taken: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM shop_categories WHERE slug = $1 AND id IS DISTINCT FROM $2) AS "v!""#, &s, except)
             .fetch_one(&state.db)
             .await?;
         if !taken {
@@ -256,9 +238,9 @@ async fn create_category(State(state): State<AppState>, auth: AuthUser, Json(b):
     let slug = unique_category_slug(&state, &name, None).await?;
     let sort = match b.sort {
         Some(s) => s,
-        None => sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) + 10 FROM shop_categories").fetch_one(&state.db).await?,
+        None => sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) + 10 AS "v!" FROM shop_categories"#).fetch_one(&state.db).await?,
     };
-    sqlx::query("INSERT INTO shop_categories (name, slug, sort) VALUES ($1, $2, $3)").bind(&name).bind(&slug).bind(sort).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO shop_categories (name, slug, sort) VALUES ($1, $2, $3)", &name, &slug, sort).execute(&state.db).await?;
     Ok(Json(json!({ "items": categories(&state).await? })))
 }
 
@@ -266,10 +248,7 @@ async fn create_category(State(state): State<AppState>, auth: AuthUser, Json(b):
 async fn update_category(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<CategoryInput>) -> AppResult<Json<Value>> {
     require_catalog(&auth)?;
     let name = b.name.as_deref().map(|n| required("name", n, 120)).transpose()?;
-    let n = sqlx::query("UPDATE shop_categories SET name = COALESCE($2, name), sort = COALESCE($3, sort) WHERE id = $1")
-        .bind(id)
-        .bind(name)
-        .bind(b.sort)
+    let n = sqlx::query!("UPDATE shop_categories SET name = COALESCE($2, name), sort = COALESCE($3, sort) WHERE id = $1", id, name, b.sort)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -282,7 +261,7 @@ async fn update_category(State(state): State<AppState>, auth: AuthUser, Path(id)
 /// Its products stay in the shop, without a category.
 async fn delete_category(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_catalog(&auth)?;
-    sqlx::query("DELETE FROM shop_categories WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM shop_categories WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "items": categories(&state).await? })))
 }
 
@@ -294,8 +273,7 @@ async fn order_details(State(state): State<AppState>, auth: AuthUser, Path(item)
     let row = crate::crm::items::load_row(&state, item, false).await?;
     crate::crm::access::require_read(&state, &auth, row.entity_type, item, row.assigned_to).await?;
     let o: Option<(String, String, String, Option<String>, String, Option<String>, bool)> =
-        sqlx::query_as("SELECT token, name, email, phone, address, note, stock_returned FROM shop_orders WHERE item_id = $1")
-            .bind(item)
+        sqlx::query!(r#"SELECT token, name, email, phone, address, note, stock_returned FROM shop_orders WHERE item_id = $1"#, item).map(|r| (r.token, r.name, r.email, r.phone, r.address, r.note, r.stock_returned))
             .fetch_optional(&state.db)
             .await?;
     let Some((token, name, email, phone, address, note, returned)) = o else { return Err(AppError::NotFound("shop order")) };
@@ -319,11 +297,8 @@ pub async fn order_stage_changed(state: &AppState, item: Uuid) {
 }
 
 async fn stage_changed(state: &AppState, item: Uuid) -> AppResult<()> {
-    let row: Option<(String, String, i64, String, String, String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT i.stage_semantics, s.name, i.number, o.token, o.email, o.name, o.warehouse_id
-         FROM crm_items i JOIN shop_orders o ON o.item_id = i.id JOIN crm_stages s ON s.id = i.stage_id WHERE i.id = $1",
-    )
-    .bind(item)
+    let row: Option<(String, String, i64, String, String, String, Option<Uuid>)> = sqlx::query!(r#"SELECT i.stage_semantics, s.name, i.number, o.token, o.email, o.name AS "c5", o.warehouse_id
+         FROM crm_items i JOIN shop_orders o ON o.item_id = i.id JOIN crm_stages s ON s.id = i.stage_id WHERE i.id = $1"#, item).map(|r| (r.stage_semantics, r.name, r.number, r.token, r.email, r.c5, r.warehouse_id))
     .fetch_optional(&state.db)
     .await?;
     let Some((semantics, stage, number, token, email, name, warehouse)) = row else { return Ok(()) };
@@ -332,9 +307,7 @@ async fn stage_changed(state: &AppState, item: Uuid) -> AppResult<()> {
     // first, so two quick moves cannot return the units twice.
     let cancelled = semantics == "failure";
     let mut tx = state.db.begin().await?;
-    let flipped = sqlx::query("UPDATE shop_orders SET stock_returned = $2 WHERE item_id = $1 AND stock_returned <> $2")
-        .bind(item)
-        .bind(cancelled)
+    let flipped = sqlx::query!("UPDATE shop_orders SET stock_returned = $2 WHERE item_id = $1 AND stock_returned <> $2", item, cancelled)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -344,11 +317,8 @@ async fn stage_changed(state: &AppState, item: Uuid) -> AppResult<()> {
             None => crate::inventory::default_warehouse(&mut *tx).await?,
         };
         // Products whose stock is counted.
-        let rows: Vec<(Uuid, Decimal)> = sqlx::query_as(
-            "SELECT r.product_id, SUM(r.quantity) FROM crm_item_products r JOIN crm_products p ON p.id = r.product_id
-             WHERE r.item_id = $1 AND p.stock IS NOT NULL GROUP BY r.product_id",
-        )
-        .bind(item)
+        let rows: Vec<(Uuid, Decimal)> = sqlx::query!(r#"SELECT r.product_id AS "product_id!", SUM(r.quantity) AS "c1!" FROM crm_item_products r JOIN crm_products p ON p.id = r.product_id
+             WHERE r.item_id = $1 AND p.stock IS NOT NULL GROUP BY r.product_id"#, item).map(|r| (r.product_id, r.c1))
         .fetch_all(&mut *tx)
         .await?;
         for (product, q) in rows {

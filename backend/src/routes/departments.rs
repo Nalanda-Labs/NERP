@@ -53,7 +53,7 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
     if auth.can(perm::DEPARTMENTS_MANAGE) || auth.can(perm::USERS_MANAGE) {
         return Ok(Json(all));
     }
-    let mine: Vec<Uuid> = sqlx::query_scalar("SELECT department_id FROM user_departments WHERE user_id = $1").bind(auth.id).fetch_all(&state.db).await?;
+    let mine: Vec<Uuid> = sqlx::query_scalar!("SELECT department_id FROM user_departments WHERE user_id = $1", auth.id).fetch_all(&state.db).await?;
     let parent = |id: Uuid| all.iter().find(|d| d.id == id).and_then(|d| d.parent_id);
     // A department is out of sight when it, or one above it, is hidden and I'm not inside it.
     let visible = |d: &Department| {
@@ -90,18 +90,16 @@ async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<V
 }
 
 async fn load_all(state: &AppState) -> AppResult<Vec<Department>> {
-    Ok(sqlx::query_as::<_, Department>(
-        "SELECT d.id, d.parent_id, d.name, d.description, d.head_user_id,
-                CASE WHEN h.id IS NULL THEN NULL ELSE h.first_name || ' ' || h.last_name END AS head_name,
-                h.avatar_file_id AS head_avatar_file_id,
-                d.deputy_user_id, (SELECT dp.first_name || ' ' || dp.last_name FROM users dp WHERE dp.id = d.deputy_user_id) AS deputy_name,
-                d.sort,
+    Ok(sqlx::query_as!(Department, r#"SELECT d.id AS "id!", d.parent_id AS "parent_id?", d.name AS "name!", d.description AS "description?", d.head_user_id AS "head_user_id?",
+                CASE WHEN h.id IS NULL THEN NULL ELSE h.first_name || ' ' || h.last_name END AS "head_name?",
+                h.avatar_file_id AS "head_avatar_file_id?",
+                d.deputy_user_id AS "deputy_user_id?", (SELECT dp.first_name || ' ' || dp.last_name FROM users dp WHERE dp.id = d.deputy_user_id) AS "deputy_name?",
+                d.sort AS "sort!",
                 (SELECT COUNT(*) FROM user_departments ud JOIN users u ON u.id = ud.user_id
-                  WHERE ud.department_id = d.id AND u.is_active) AS member_count,
-                d.created_at, d.hidden
+                  WHERE ud.department_id = d.id AND u.is_active) AS "member_count!",
+                d.created_at AS "created_at!", d.hidden AS "hidden!"
          FROM departments d LEFT JOIN users h ON h.id = d.head_user_id
-         ORDER BY d.sort, d.name",
-    )
+         ORDER BY d.sort, d.name"#)
     .fetch_all(&state.db)
     .await?)
 }
@@ -112,7 +110,7 @@ async fn fetch(state: &AppState, id: Uuid) -> AppResult<Department> {
 
 /// Fails if making `parent` the parent of `id` would create a loop.
 async fn check_no_cycle(state: &AppState, id: Uuid, parent: Uuid) -> AppResult<()> {
-    let edges: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as("SELECT id, parent_id FROM departments")
+    let edges: Vec<(Uuid, Option<Uuid>)> = sqlx::query!(r#"SELECT id, parent_id FROM departments"#).map(|r| (r.id, r.parent_id))
         .fetch_all(&state.db)
         .await?;
     let parents: HashMap<Uuid, Option<Uuid>> = edges.into_iter().collect();
@@ -130,8 +128,7 @@ async fn check_no_cycle(state: &AppState, id: Uuid, parent: Uuid) -> AppResult<(
 }
 
 async fn ensure_user_exists(state: &AppState, id: Uuid) -> AppResult<()> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)")
-        .bind(id)
+    let exists: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1) AS "v!""#, id)
         .fetch_one(&state.db)
         .await?;
     if exists { Ok(()) } else { Err(AppError::bad("selected head does not exist")) }
@@ -165,27 +162,17 @@ async fn create(
     }
 
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO departments (name, parent_id, description, head_user_id, sort, hidden)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-    )
-    .bind(&name)
-    .bind(body.parent_id)
-    .bind(clean(body.description))
-    .bind(body.head_user_id)
-    .bind(body.sort.unwrap_or(100))
-    .bind(body.hidden)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO departments (name, parent_id, description, head_user_id, sort, hidden)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", &name, body.parent_id, clean(body.description), body.head_user_id, body.sort.unwrap_or(100), body.hidden)
     .fetch_one(&mut *tx)
     .await?;
     if let Some(d) = body.deputy_user_id {
         ensure_user_exists(&state, d).await?;
-        sqlx::query("UPDATE departments SET deputy_user_id = $2 WHERE id = $1").bind(id).bind(d).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE departments SET deputy_user_id = $2 WHERE id = $1", id, d).execute(&mut *tx).await?;
     }
     // The head of a department is also a member of it.
     if let Some(h) = body.head_user_id {
-        sqlx::query("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(h)
-            .bind(id)
+        sqlx::query!("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", h, id)
             .execute(&mut *tx)
             .await?;
     }
@@ -259,9 +246,7 @@ async fn update(
     let mut tx = state.db.begin().await?;
     qb.build().execute(&mut *tx).await?;
     if let Some(Some(h)) = body.head_user_id {
-        sqlx::query("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-            .bind(h)
-            .bind(id)
+        sqlx::query!("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", h, id)
             .execute(&mut *tx)
             .await?;
     }
@@ -283,15 +268,13 @@ async fn remove(
     auth.require(perm::DEPARTMENTS_MANAGE)?;
     let dept = fetch(&state, id).await?;
     let has_children: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM departments WHERE parent_id = $1)")
-            .bind(id)
+        sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM departments WHERE parent_id = $1) AS "v!""#, id)
             .fetch_one(&state.db)
             .await?;
     if has_children {
         return Err(AppError::bad("move or delete the sub-departments first"));
     }
-    sqlx::query("DELETE FROM departments WHERE id = $1")
-        .bind(id)
+    sqlx::query!("DELETE FROM departments WHERE id = $1", id)
         .execute(&state.db)
         .await
         .map_err(|e| {
@@ -318,9 +301,7 @@ async fn add_member(
 ) -> AppResult<Json<serde_json::Value>> {
     auth.require(perm::DEPARTMENTS_MANAGE)?;
     let dept = fetch(&state, id).await?;
-    let added = sqlx::query("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
-        .bind(body.user_id)
-        .bind(id)
+    let added = sqlx::query!("INSERT INTO user_departments (user_id, department_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", body.user_id, id)
         .execute(&state.db)
         .await
         .map_err(|e| if is_fk_violation(&e) { AppError::NotFound("user") } else { e.into() })?
@@ -349,9 +330,7 @@ async fn remove_member(
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<Json<serde_json::Value>> {
     auth.require(perm::DEPARTMENTS_MANAGE)?;
-    sqlx::query("DELETE FROM user_departments WHERE user_id = $1 AND department_id = $2")
-        .bind(user_id)
-        .bind(id)
+    sqlx::query!("DELETE FROM user_departments WHERE user_id = $1 AND department_id = $2", user_id, id)
         .execute(&state.db)
         .await?;
     let _ = crate::im::sync_audiences(&state, Some(user_id)).await;

@@ -98,7 +98,7 @@ async fn session_response(
 }
 
 pub async fn company_name(state: &AppState) -> String {
-    sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = 'company_name'")
+    sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'")
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -140,10 +140,7 @@ async fn login(
 
     let db = &state.db;
     let find = |email: String| async move {
-        sqlx::query_as::<_, (Uuid, String, bool, bool, bool, String)>(
-            "SELECT id, password_hash, is_active, invite_pending, totp_secret IS NOT NULL, auth_source FROM users WHERE email = $1",
-        )
-        .bind(email)
+        sqlx::query!(r#"SELECT id, password_hash, is_active, invite_pending, totp_secret IS NOT NULL AS "c4!", auth_source FROM users WHERE email = $1"#, email).map(|r| (r.id, r.password_hash, r.is_active, r.invite_pending, r.c4, r.auth_source))
         .fetch_optional(db)
         .await
     };
@@ -236,8 +233,7 @@ pub struct EnrollStart {
 /// The secret to add to the authenticator app (as a QR code), and the mobile number on file.
 async fn enroll_start(State(state): State<AppState>, Json(b): Json<EnrollStart>) -> AppResult<Json<Value>> {
     let user = enroll_user(&state, &b.challenge).await?;
-    let (email, mobile): (String, Option<String>) = sqlx::query_as("SELECT email, mobile FROM users WHERE id = $1 AND is_active")
-        .bind(user)
+    let (email, mobile): (String, Option<String>) = sqlx::query!(r#"SELECT email, mobile FROM users WHERE id = $1 AND is_active"#, user).map(|r| (r.email, r.mobile))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::Unauthorized)?;
@@ -280,7 +276,7 @@ pub struct EnrollFinish {
 async fn enroll_finish(State(state): State<AppState>, meta: ClientMeta, Json(b): Json<EnrollFinish>) -> AppResult<Response> {
     let user_id = enroll_user(&state, &b.challenge).await?;
     // Deactivated since the password: no way in.
-    let active: bool = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1").bind(user_id).fetch_optional(&state.db).await?.unwrap_or(false);
+    let active: bool = sqlx::query_scalar!("SELECT is_active FROM users WHERE id = $1", user_id).fetch_optional(&state.db).await?.unwrap_or(false);
     if !active {
         return Err(AppError::InvalidCredentials("this account has been deactivated".into()));
     }
@@ -301,10 +297,7 @@ async fn enroll_finish(State(state): State<AppState>, meta: ClientMeta, Json(b):
         return Err(AppError::bad("that code is not valid; check the time on your phone and try again"));
     }
     let _: () = redis.del(&[&key, &secret_key, &attempts_key]).await?;
-    sqlx::query("UPDATE users SET totp_secret = $1, totp_enabled_at = now(), mobile = $2, updated_at = now() WHERE id = $3")
-        .bind(&secret)
-        .bind(&mobile)
-        .bind(user_id)
+    sqlx::query!("UPDATE users SET totp_secret = $1, totp_enabled_at = now(), mobile = $2, updated_at = now() WHERE id = $3", &secret, &mobile, user_id)
         .execute(&state.db)
         .await?;
     let codes = two_factor::regenerate_recovery_codes(&state.db, user_id).await?;
@@ -327,8 +320,7 @@ async fn enroll_finish(State(state): State<AppState>, meta: ClientMeta, Json(b):
 }
 
 async fn complete_login(state: &AppState, user_id: Uuid, meta: &ClientMeta, method: &str) -> AppResult<Response> {
-    sqlx::query("UPDATE users SET last_login_at = now() WHERE id = $1")
-        .bind(user_id)
+    sqlx::query!("UPDATE users SET last_login_at = now() WHERE id = $1", user_id)
         .execute(&state.db)
         .await?;
     audit::record(
@@ -364,8 +356,7 @@ async fn login_two_factor(
         return Err(AppError::InvalidCredentials("this sign-in attempt has expired; start again".into()));
     };
 
-    let secret: Option<String> = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = $1 AND is_active")
-        .bind(user_id)
+    let secret: Option<String> = sqlx::query_scalar!("SELECT totp_secret FROM users WHERE id = $1 AND is_active", user_id)
         .fetch_optional(&state.db)
         .await?
         .flatten();
@@ -433,8 +424,7 @@ async fn refresh(State(state): State<AppState>, meta: ClientMeta, headers: Heade
     let (user_id, sid, new_token) = tokens::rotate_refresh_token(&state, &token, &meta)
         .await?
         .ok_or(AppError::Unauthorized)?;
-    let active: Option<bool> = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1")
-        .bind(user_id)
+    let active: Option<bool> = sqlx::query_scalar!("SELECT is_active FROM users WHERE id = $1", user_id)
         .fetch_optional(&state.db)
         .await?;
     if active != Some(true) {
@@ -495,8 +485,7 @@ async fn change_password(
 }
 
 pub async fn verify_user_password(state: &AppState, user: Uuid, password_plain: String) -> AppResult<bool> {
-    let (hash, source, email): (String, String, String) = sqlx::query_as("SELECT password_hash, auth_source, email FROM users WHERE id = $1")
-        .bind(user)
+    let (hash, source, email): (String, String, String) = sqlx::query!(r#"SELECT password_hash, auth_source, email FROM users WHERE id = $1"#, user).map(|r| (r.password_hash, r.auth_source, r.email))
         .fetch_one(&state.db)
         .await?;
     if source == "ldap" {
@@ -508,12 +497,8 @@ pub async fn verify_user_password(state: &AppState, user: Uuid, password_plain: 
 /// Stores a new password and invalidates the user's cached authorization.
 pub async fn set_password(state: &AppState, user: Uuid, new_password: String) -> AppResult<()> {
     let hash = password::hash_password(new_password).await?;
-    sqlx::query(
-        "UPDATE users SET password_hash = $1, password_changed_at = date_trunc('second', now()),
-             updated_at = now() WHERE id = $2",
-    )
-    .bind(hash)
-    .bind(user)
+    sqlx::query!("UPDATE users SET password_hash = $1, password_changed_at = date_trunc('second', now()),
+             updated_at = now() WHERE id = $2", hash, user)
     .execute(&state.db)
     .await?;
     invalidate_authz(state, &[user]).await
@@ -547,10 +532,7 @@ async fn forgot_password(
         return Ok(done);
     }
 
-    let user: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, first_name FROM users WHERE email = $1 AND is_active AND NOT invite_pending AND auth_source = 'local'",
-    )
-    .bind(&email)
+    let user: Option<(Uuid, String)> = sqlx::query!(r#"SELECT id, first_name FROM users WHERE email = $1 AND is_active AND NOT invite_pending AND auth_source = 'local'"#, &email).map(|r| (r.id, r.first_name))
     .fetch_optional(&state.db)
     .await?;
     let Some((user_id, first_name)) = user else {
@@ -608,13 +590,11 @@ async fn reset_password(
 /// Creates (or replaces) the invitation link for a pending user and emails it.
 pub async fn send_invitation(state: &AppState, user_id: Uuid, inviter: Uuid) -> AppResult<()> {
     let (email, first_name): (String, String) =
-        sqlx::query_as("SELECT email, first_name FROM users WHERE id = $1 AND invite_pending")
-            .bind(user_id)
+        sqlx::query!(r#"SELECT email, first_name FROM users WHERE id = $1 AND invite_pending"#, user_id).map(|r| (r.email, r.first_name))
             .fetch_optional(&state.db)
             .await?
             .ok_or_else(|| AppError::bad("this employee has already accepted their invitation"))?;
-    let inviter_name: String = sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1")
-        .bind(inviter)
+    let inviter_name: String = sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, inviter)
         .fetch_one(&state.db)
         .await?;
     let token = tokens::issue_link_token(
@@ -625,7 +605,7 @@ pub async fn send_invitation(state: &AppState, user_id: Uuid, inviter: Uuid) -> 
         INVITE_TTL_SECS,
     )
     .await?;
-    sqlx::query("UPDATE users SET invited_at = now() WHERE id = $1").bind(user_id).execute(&state.db).await?;
+    sqlx::query!("UPDATE users SET invited_at = now() WHERE id = $1", user_id).execute(&state.db).await?;
     let link = format!("{}/accept-invite?token={token}", state.config.public_url);
     let company = company_name(state).await;
     jobs::send_email(state, mail::invitation(&email, &first_name, &company, &inviter_name, &link)).await?;
@@ -637,10 +617,7 @@ async fn invite_info(State(state): State<AppState>, Path(token): Path<String>) -
         .await?
         .ok_or_else(|| AppError::bad("this invitation is invalid or has expired; ask for a new one"))?;
     let user_id: Uuid = serde_json::from_value(data["user_id"].clone()).map_err(|e| anyhow::anyhow!(e))?;
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT email, first_name, last_name FROM users WHERE id = $1 AND invite_pending AND is_active",
-    )
-    .bind(user_id)
+    let row: Option<(String, String, String)> = sqlx::query!(r#"SELECT email, first_name, last_name FROM users WHERE id = $1 AND invite_pending AND is_active"#, user_id).map(|r| (r.email, r.first_name, r.last_name))
     .fetch_optional(&state.db)
     .await?;
     let (email, first_name, last_name) = row.ok_or_else(|| AppError::bad("this invitation is no longer valid"))?;
@@ -672,13 +649,9 @@ async fn accept_invite(
     tokens::revoke_link_tokens(&state, INVITE_SCOPE, user_id).await?;
 
     let hash = password::hash_password(body.password).await?;
-    let updated = sqlx::query(
-        "UPDATE users SET password_hash = $1, invite_pending = FALSE, password_changed_at = date_trunc('second', now()),
+    let updated = sqlx::query!("UPDATE users SET password_hash = $1, invite_pending = FALSE, password_changed_at = date_trunc('second', now()),
              last_login_at = now(), updated_at = now()
-         WHERE id = $2 AND invite_pending AND is_active",
-    )
-    .bind(hash)
-    .bind(user_id)
+         WHERE id = $2 AND invite_pending AND is_active", hash, user_id)
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -689,8 +662,7 @@ async fn accept_invite(
     audit::record(&state.db, Some(user_id), "auth.invite_accepted", "user", Some(user_id.to_string()), json!({}), meta.ip.as_deref()).await;
 
     if let Some(inviter) = invited_by {
-        let name: String = sqlx::query_scalar("SELECT first_name || ' ' || last_name FROM users WHERE id = $1")
-            .bind(user_id)
+        let name: String = sqlx::query_scalar!(r#"SELECT first_name || ' ' || last_name AS "v!" FROM users WHERE id = $1"#, user_id)
             .fetch_one(&state.db)
             .await?;
         notify(

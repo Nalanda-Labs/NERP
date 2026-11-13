@@ -136,28 +136,24 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     if from > to || (to - from).num_days() > 3660 {
         return Err(AppError::bad("a period of at most ten years, from before to"));
     }
-    let (default_hourly, financing): (Decimal, Decimal) = sqlx::query_as("SELECT default_hourly, financing_rate FROM profit_settings WHERE id = 1").fetch_one(&state.db).await?;
+    let (default_hourly, financing): (Decimal, Decimal) = sqlx::query!(r#"SELECT default_hourly, financing_rate FROM profit_settings WHERE id = 1"#).map(|r| (r.default_hourly, r.financing_rate)).fetch_one(&state.db).await?;
     let base: String = super::money::base_currency(&state).await?;
 
     // The period's invoices (lost or deleted ones left out), with what the books know.
-    let invoices: Vec<Invoice> = sqlx::query_as(
-        "SELECT i.id, i.opportunity, i.company_id,
-                (SELECT contact_id FROM crm_item_contacts c WHERE c.item_id = i.id ORDER BY c.is_primary DESC, c.sort LIMIT 1) AS contact_id,
-                i.assigned_to, i.source_item_id,
-                COALESCE(a.fx_rate, (SELECT rate FROM crm_currencies c WHERE c.code = i.currency), 1) AS rate,
-                a.due_date, a.total * a.fx_rate AS total_base,
+    let invoices: Vec<Invoice> = sqlx::query_as!(Invoice, r#"SELECT i.id AS "id!", i.opportunity AS "opportunity!", i.company_id AS "company_id?",
+                (SELECT contact_id FROM crm_item_contacts c WHERE c.item_id = i.id ORDER BY c.is_primary DESC, c.sort LIMIT 1) AS "contact_id?",
+                i.assigned_to AS "assigned_to?", i.source_item_id AS "source_item_id?",
+                COALESCE(a.fx_rate, (SELECT rate FROM crm_currencies c WHERE c.code = i.currency), 1) AS "rate!",
+                a.due_date AS "due_date?", a.total * a.fx_rate AS "total_base?",
                 (SELECT MAX(p.date) FROM acc_allocations al JOIN acc_payments p ON p.id = al.payment_id
-                  WHERE al.doc_kind = 'invoice' AND al.doc_id = i.id AND p.status = 'posted') AS paid_on,
-                COALESCE(a.status = 'open', FALSE) AS open,
-                a.credited / NULLIF(a.total, 0) AS credited_share
+                  WHERE al.doc_kind = 'invoice' AND al.doc_id = i.id AND p.status = 'posted') AS "paid_on?",
+                COALESCE(a.status = 'open', FALSE) AS "open!",
+                a.credited / NULLIF(a.total, 0) AS "credited_share?"
          FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type
          LEFT JOIN crm_stages s ON s.id = i.stage_id
          LEFT JOIN acc_invoices a ON a.item_id = i.id AND a.status <> 'void'
          WHERE t.kind = 'invoice' AND i.deleted_at IS NULL AND COALESCE(s.semantics, 'process') <> 'failure'
-           AND COALESCE(a.date, i.created_at::date) BETWEEN $1 AND $2",
-    )
-    .bind(from)
-    .bind(to)
+           AND COALESCE(a.date, i.created_at::date) BETWEEN $1 AND $2"#, from, to)
     .fetch_all(&state.db)
     .await?;
 
@@ -216,7 +212,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     }
 
     // Time spent on each client in the period, at each person's hourly cost.
-    let costs: HashMap<Uuid, Decimal> = sqlx::query_as::<_, (Uuid, Decimal)>("SELECT user_id, hourly FROM user_costs").fetch_all(&state.db).await?.into_iter().collect();
+    let costs: HashMap<Uuid, Decimal> = sqlx::query!(r#"SELECT user_id, hourly FROM user_costs"#).map(|r| (r.user_id, r.hourly)).fetch_all(&state.db).await?.into_iter().collect();
     let hourly = |u: Option<Uuid>| u.and_then(|u| costs.get(&u).copied()).unwrap_or(default_hourly);
     let clients: Vec<Uuid> = {
         let mut c: Vec<Uuid> = per.values().filter_map(|i| i.client).collect();
@@ -228,37 +224,27 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     let mut task_time: HashMap<Uuid, Decimal> = HashMap::new();
     if !clients.is_empty() {
         // A client is a company (its contacts count too) or a contact.
-        let rows: Vec<(Uuid, Option<Uuid>, i64)> = sqlx::query_as(
-            "SELECT cl.id, m.author_id, SUM(m.minutes_spent)::bigint
+        let rows: Vec<(Uuid, Option<Uuid>, i64)> = sqlx::query!(r#"SELECT cl.id AS "id!", m.author_id AS "author_id?", SUM(m.minutes_spent)::bigint AS "c2!"
              FROM unnest($1::uuid[]) AS cl(id)
              JOIN crm_items who ON who.id = cl.id OR (who.company_id = cl.id AND who.entity_type = 3)
              JOIN support_tickets t ON t.contact_id = who.id
              JOIN support_messages m ON m.ticket_id = t.id
              WHERE m.minutes_spent > 0 AND m.created_at::date BETWEEN $2 AND $3
-             GROUP BY 1, 2",
-        )
-        .bind(&clients)
-        .bind(from)
-        .bind(to)
+             GROUP BY 1, 2"#, &clients, from, to).map(|r| (r.id, r.author_id, r.c2))
         .fetch_all(&state.db)
         .await?;
         for (client, who, minutes) in rows {
             *support.entry(client).or_default() += Decimal::from(minutes) / Decimal::from(60) * hourly(who);
         }
         // Tasks linked to the client, its contacts, or any of their deals and invoices.
-        let rows: Vec<(Uuid, Uuid, i64)> = sqlx::query_as(
-            "SELECT cl.id, e.user_id, SUM(EXTRACT(EPOCH FROM (COALESCE(e.stopped_at, now()) - e.started_at)))::bigint
+        let rows: Vec<(Uuid, Uuid, i64)> = sqlx::query!(r#"SELECT cl.id AS "id!", e.user_id AS "user_id!", SUM(EXTRACT(EPOCH FROM (COALESCE(e.stopped_at, now()) - e.started_at)))::bigint AS "c2!"
              FROM unnest($1::uuid[]) AS cl(id)
              JOIN crm_items rec ON rec.id = cl.id OR rec.company_id = cl.id
                 OR rec.id IN (SELECT ic.item_id FROM crm_item_contacts ic WHERE ic.contact_id = cl.id)
              JOIN task_crm_links l ON l.item_id = rec.id
              JOIN task_time_entries e ON e.task_id = l.task_id
              WHERE e.started_at::date BETWEEN $2 AND $3
-             GROUP BY 1, 2",
-        )
-        .bind(&clients)
-        .bind(from)
-        .bind(to)
+             GROUP BY 1, 2"#, &clients, from, to).map(|r| (r.id, r.user_id, r.c2))
         .fetch_all(&state.db)
         .await?;
         for (client, who, secs) in rows {
@@ -316,8 +302,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
         for (k, v) in groups.drain() {
             let target = match k {
                 Some(src) => {
-                    let (kind, up): (Option<String>, Option<Uuid>) = sqlx::query_as("SELECT t.kind, i.source_item_id FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1")
-                        .bind(src)
+                    let (kind, up): (Option<String>, Option<Uuid>) = sqlx::query!(r#"SELECT t.kind, i.source_item_id FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = $1"#, src).map(|r| (r.kind, r.source_item_id))
                         .fetch_optional(&state.db)
                         .await?
                         .unwrap_or((None, None));
@@ -331,15 +316,14 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
         keys = groups.keys().flatten().copied().collect();
     }
     let names: HashMap<Uuid, String> = if by == "person" {
-        sqlx::query_as::<_, (Uuid, String)>("SELECT id, trim(first_name || ' ' || last_name) FROM users WHERE id = ANY($1)").bind(&keys).fetch_all(&state.db).await?.into_iter().collect()
+        sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!" FROM users WHERE id = ANY($1)"#, &keys).map(|r| (r.id, r.c1)).fetch_all(&state.db).await?.into_iter().collect()
     } else if by == "product" {
-        sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM crm_products WHERE id = ANY($1)").bind(&keys).fetch_all(&state.db).await?.into_iter().collect()
+        sqlx::query!(r#"SELECT id, name FROM crm_products WHERE id = ANY($1)"#, &keys).map(|r| (r.id, r.name)).fetch_all(&state.db).await?.into_iter().collect()
     } else {
-        sqlx::query_as::<_, (Uuid, String)>("SELECT id, title FROM crm_items WHERE id = ANY($1)").bind(&keys).fetch_all(&state.db).await?.into_iter().collect()
+        sqlx::query!(r#"SELECT id, title FROM crm_items WHERE id = ANY($1)"#, &keys).map(|r| (r.id, r.title)).fetch_all(&state.db).await?.into_iter().collect()
     };
     let links: HashMap<Uuid, String> = if by == "client" || by == "deal" {
-        sqlx::query_as::<_, (Uuid, String)>("SELECT i.id, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = ANY($1)")
-            .bind(&keys)
+        sqlx::query!(r#"SELECT i.id, t.code FROM crm_items i JOIN crm_entity_types t ON t.id = i.entity_type WHERE i.id = ANY($1)"#, &keys).map(|r| (r.id, r.code))
             .fetch_all(&state.db)
             .await?
             .into_iter()
@@ -378,11 +362,9 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
 
 async fn get_settings(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     may_see(&auth)?;
-    let (default_hourly, financing): (Decimal, Decimal) = sqlx::query_as("SELECT default_hourly, financing_rate FROM profit_settings WHERE id = 1").fetch_one(&state.db).await?;
-    let people: Vec<(Uuid, String, Option<Decimal>)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), c.hourly FROM users u LEFT JOIN user_costs c ON c.user_id = u.id
-         WHERE u.is_active AND NOT u.is_guest ORDER BY u.first_name, u.last_name",
-    )
+    let (default_hourly, financing): (Decimal, Decimal) = sqlx::query!(r#"SELECT default_hourly, financing_rate FROM profit_settings WHERE id = 1"#).map(|r| (r.default_hourly, r.financing_rate)).fetch_one(&state.db).await?;
+    let people: Vec<(Uuid, String, Option<Decimal>)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", c.hourly AS "hourly?" FROM users u LEFT JOIN user_costs c ON c.user_id = u.id
+         WHERE u.is_active AND NOT u.is_guest ORDER BY u.first_name, u.last_name"#).map(|r| (r.id, r.c1, r.hourly))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -415,9 +397,7 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     if hourly.is_some_and(|h| h.is_sign_negative()) || rate.is_some_and(|r| r.is_sign_negative() || r > Decimal::ONE_HUNDRED) {
         return Err(AppError::bad("an hourly cost of 0 or more, a rate of 0 to 100 percent"));
     }
-    sqlx::query("UPDATE profit_settings SET default_hourly = COALESCE($1, default_hourly), financing_rate = COALESCE($2, financing_rate) WHERE id = 1")
-        .bind(hourly.map(|d| d.round_dp(2)))
-        .bind(rate.map(|d| d.round_dp(2)))
+    sqlx::query!("UPDATE profit_settings SET default_hourly = COALESCE($1, default_hourly), financing_rate = COALESCE($2, financing_rate) WHERE id = 1", hourly.map(|d| d.round_dp(2)), rate.map(|d| d.round_dp(2)))
         .execute(&state.db)
         .await?;
     crate::audit::record(&state.db, Some(auth.id), "profit.settings", "settings", None, json!({}), None).await;
@@ -443,15 +423,13 @@ async fn put_costs(State(state): State<AppState>, auth: AuthUser, Json(b): Json<
         let c = CostRef { user_id: *user_id, hourly: *hourly };
         match c.hourly {
             Some(h) => {
-                sqlx::query("INSERT INTO user_costs (user_id, hourly) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET hourly = $2, updated_at = now()")
-                    .bind(c.user_id)
-                    .bind(h.round_dp(2))
+                sqlx::query!("INSERT INTO user_costs (user_id, hourly) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET hourly = $2, updated_at = now()", c.user_id, h.round_dp(2))
                     .execute(&mut *tx)
                     .await
                     .map_err(|_| AppError::bad("one of them isn't an employee"))?;
             }
             None => {
-                sqlx::query("DELETE FROM user_costs WHERE user_id = $1").bind(c.user_id).execute(&mut *tx).await?;
+                sqlx::query!("DELETE FROM user_costs WHERE user_id = $1", c.user_id).execute(&mut *tx).await?;
             }
         }
     }

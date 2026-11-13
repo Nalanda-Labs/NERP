@@ -158,27 +158,13 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Inp
     // Meetings default their deadline to the start; logged calls/emails are done already.
     let deadline = b.deadline.or(b.starts_at);
     let done_now = (kind == "call" || kind == "email") && deadline.is_none();
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_activities (item_id, kind, subject, description, direction, starts_at, ends_at, deadline,
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_activities (item_id, kind, subject, description, direction, starts_at, ends_at, deadline,
              responsible_id, created_by, remind_before_minutes, is_completed, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $12 THEN now() END) RETURNING id",
-    )
-    .bind(item)
-    .bind(&kind)
-    .bind(&subject)
-    .bind(clean(b.description))
-    .bind(b.direction)
-    .bind(b.starts_at)
-    .bind(b.ends_at)
-    .bind(deadline)
-    .bind(responsible)
-    .bind(auth.id)
-    .bind(b.remind_before_minutes)
-    .bind(done_now)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $12 THEN now() END) RETURNING id", item, &kind, &subject, clean(b.description), b.direction, b.starts_at, b.ends_at, deadline, responsible, auth.id, b.remind_before_minutes, done_now)
     .fetch_one(&state.db)
     .await?;
     timeline(&state.db, item, "activity", Some(auth.id), Some(subject.clone()), json!({ "activity_id": id, "kind": kind, "event": "created" })).await?;
-    sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(item).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", item).execute(&state.db).await?;
     if responsible != auth.id {
         let t = entity_type_by_id(&state, r.entity_type).await?;
         notify(
@@ -213,24 +199,13 @@ async fn editable(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<Acti
 async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<Input>) -> AppResult<Json<Activity>> {
     validate(&b)?;
     let a = editable(&state, &auth, id).await?;
-    sqlx::query(
-        "UPDATE crm_activities SET subject = $1, description = $2, direction = $3, starts_at = $4, ends_at = $5,
+    sqlx::query!("UPDATE crm_activities SET subject = $1, description = $2, direction = $3, starts_at = $4, ends_at = $5,
              deadline = $6, responsible_id = $7, remind_before_minutes = $8,
              reminded_at = CASE WHEN $6 IS DISTINCT FROM deadline THEN NULL ELSE reminded_at END, updated_at = now()
-         WHERE id = $9",
-    )
-    .bind(match &b.subject {
+         WHERE id = $9", match &b.subject {
         Some(s) => required("subject", s, 500)?,
         None => a.subject.clone(),
-    })
-    .bind(b.description.or(a.description))
-    .bind(b.direction.or(a.direction))
-    .bind(b.starts_at.or(a.starts_at))
-    .bind(b.ends_at.or(a.ends_at))
-    .bind(b.deadline.or(a.deadline))
-    .bind(b.responsible_id.unwrap_or(a.responsible_id))
-    .bind(b.remind_before_minutes.or(a.remind_before_minutes))
-    .bind(id)
+    }, b.description.or(a.description), b.direction.or(a.direction), b.starts_at.or(a.starts_at), b.ends_at.or(a.ends_at), b.deadline.or(a.deadline), b.responsible_id.unwrap_or(a.responsible_id), b.remind_before_minutes.or(a.remind_before_minutes), id)
     .execute(&state.db)
     .await?;
     broadcast(&state, a.item_type, a.item_id, false).await;
@@ -247,15 +222,12 @@ struct Complete {
 
 async fn complete(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<Complete>) -> AppResult<Json<Activity>> {
     let a = editable(&state, &auth, id).await?;
-    sqlx::query("UPDATE crm_activities SET is_completed = $1, completed_at = CASE WHEN $1 THEN now() END, result = COALESCE($2, result), updated_at = now() WHERE id = $3")
-        .bind(!b.reopen)
-        .bind(clean(b.result.clone()))
-        .bind(id)
+    sqlx::query!("UPDATE crm_activities SET is_completed = $1, completed_at = CASE WHEN $1 THEN now() END, result = COALESCE($2, result), updated_at = now() WHERE id = $3", !b.reopen, clean(b.result.clone()), id)
         .execute(&state.db)
         .await?;
     if !b.reopen {
         timeline(&state.db, a.item_id, "activity", Some(auth.id), Some(a.subject.clone()), json!({ "activity_id": id, "kind": a.kind, "event": "completed", "result": b.result })).await?;
-        sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(a.item_id).execute(&state.db).await?;
+        sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", a.item_id).execute(&state.db).await?;
     }
     broadcast(&state, a.item_type, a.item_id, false).await;
     if !b.reopen {
@@ -269,7 +241,7 @@ async fn complete(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let a = editable(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM crm_activities WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM crm_activities WHERE id = $1", id).execute(&state.db).await?;
     broadcast(&state, a.item_type, a.item_id, false).await;
     Ok(Json(json!({ "ok": true })))
 }
@@ -277,24 +249,18 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 /// Per record type: my records needing attention (overdue activity, activity due today,
 /// open records with no planned activity), plus my overdue/today activity totals.
 async fn counters(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
-    let rows: Vec<(i16, i64, i64, i64)> = sqlx::query_as(
-        "SELECT i.entity_type,
-            COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM crm_activities a WHERE a.item_id = i.id AND NOT a.is_completed AND a.deadline < now())),
-            COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM crm_activities a WHERE a.item_id = i.id AND NOT a.is_completed AND a.deadline::date = CURRENT_DATE)),
+    let rows: Vec<(i16, i64, i64, i64)> = sqlx::query!(r#"SELECT i.entity_type AS "entity_type!",
+            COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM crm_activities a WHERE a.item_id = i.id AND NOT a.is_completed AND a.deadline < now())) AS "c1!",
+            COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM crm_activities a WHERE a.item_id = i.id AND NOT a.is_completed AND a.deadline::date = CURRENT_DATE)) AS "c2!",
             COUNT(*) FILTER (WHERE i.entity_type IN (SELECT id FROM crm_entity_types WHERE has_stages) AND NOT i.is_closed
-                             AND NOT EXISTS (SELECT 1 FROM crm_activities a WHERE a.item_id = i.id AND NOT a.is_completed))
+                             AND NOT EXISTS (SELECT 1 FROM crm_activities a WHERE a.item_id = i.id AND NOT a.is_completed)) AS "c3!"
          FROM crm_items i WHERE i.assigned_to = $1 AND i.deleted_at IS NULL AND NOT i.is_closed
-         GROUP BY i.entity_type",
-    )
-    .bind(auth.id)
+         GROUP BY i.entity_type"#, auth.id).map(|r| (r.entity_type, r.c1, r.c2, r.c3))
     .fetch_all(&state.db)
     .await?;
-    let (overdue, today): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE a.deadline < now()), COUNT(*) FILTER (WHERE a.deadline::date = CURRENT_DATE)
+    let (overdue, today): (i64, i64) = sqlx::query!(r#"SELECT COUNT(*) FILTER (WHERE a.deadline < now()) AS "c0!", COUNT(*) FILTER (WHERE a.deadline::date = CURRENT_DATE) AS "c1!"
          FROM crm_activities a JOIN crm_items i ON i.id = a.item_id
-         WHERE a.responsible_id = $1 AND NOT a.is_completed AND i.deleted_at IS NULL",
-    )
-    .bind(auth.id)
+         WHERE a.responsible_id = $1 AND NOT a.is_completed AND i.deleted_at IS NULL"#, auth.id).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
     let mut per = serde_json::Map::new();
@@ -306,14 +272,12 @@ async fn counters(State(state): State<AppState>, auth: AuthUser) -> AppResult<Js
 
 /// Background job: reminders before an activity's deadline.
 pub async fn run_reminders(state: &AppState) -> Result<()> {
-    let due: Vec<(Uuid, Uuid, String, String, Uuid, i16, String)> = sqlx::query_as(
-        "UPDATE crm_activities a SET reminded_at = now()
+    let due: Vec<(Uuid, Uuid, String, String, Uuid, i16, String)> = sqlx::query!(r#"UPDATE crm_activities a SET reminded_at = now()
          FROM crm_items i
          WHERE i.id = a.item_id AND NOT a.is_completed AND a.reminded_at IS NULL AND a.deadline IS NOT NULL
            AND a.deadline - make_interval(mins => COALESCE(a.remind_before_minutes, 15)) <= now()
            AND a.deadline > now() - interval '1 hour' AND i.deleted_at IS NULL
-         RETURNING a.id, a.responsible_id, a.subject, a.kind, a.item_id, i.entity_type, i.title",
-    )
+         RETURNING a.id, a.responsible_id, a.subject, a.kind, a.item_id, i.entity_type, i.title"#).map(|r| (r.id, r.responsible_id, r.subject, r.kind, r.item_id, r.entity_type, r.title))
     .fetch_all(&state.db)
     .await?;
     for (_, user, subject, kind, item, t, title) in due {

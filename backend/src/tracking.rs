@@ -57,8 +57,8 @@ pub const CLEANUP_JOB: &str = "tracking.cleanup";
 /// Keeps tracking data bounded: page lists after 400 days, and visitors who never became a
 /// CRM record and weren't seen for 400 days (with their visits). Journeys of records stay.
 pub async fn cleanup(state: &AppState) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM track_pages WHERE at < now() - interval '400 days'").execute(&state.db).await?;
-    sqlx::query("DELETE FROM track_visitors WHERE item_id IS NULL AND last_seen < now() - interval '400 days'").execute(&state.db).await?;
+    sqlx::query!("DELETE FROM track_pages WHERE at < now() - interval '400 days'").execute(&state.db).await?;
+    sqlx::query!("DELETE FROM track_visitors WHERE item_id IS NULL AND last_seen < now() - interval '400 days'").execute(&state.db).await?;
     Ok(())
 }
 
@@ -196,7 +196,7 @@ async fn record_hit(state: &AppState, ip: Option<String>, key: &str, body: &[u8]
     if !["http", "https"].contains(&page.scheme()) {
         return Err(AppError::bad("bad page"));
     }
-    let site: Option<(Uuid, Vec<String>)> = sqlx::query_as("SELECT id, domains FROM track_sites WHERE key = $1 AND is_active").bind(key).fetch_optional(&state.db).await?;
+    let site: Option<(Uuid, Vec<String>)> = sqlx::query!(r#"SELECT id, domains FROM track_sites WHERE key = $1 AND is_active"#, key).map(|r| (r.id, r.domains)).fetch_optional(&state.db).await?;
     let Some((site, domains)) = site else { return Err(AppError::NotFound("site")) };
     let host = bare_host(&page);
     if !domains.is_empty() && !domains.iter().any(|d| host == *d || host.ends_with(&format!(".{d}"))) {
@@ -209,21 +209,21 @@ async fn record_hit(state: &AppState, ip: Option<String>, key: &str, body: &[u8]
     let referrer = h.r.as_deref().filter(|r| !r.is_empty()).and_then(|r| Url::parse(&r.chars().take(2000).collect::<String>()).ok()).filter(|r| ["http", "https"].contains(&r.scheme()));
     let title = h.t.map(|t| t.trim().chars().take(300).collect::<String>()).filter(|t| !t.is_empty());
 
-    sqlx::query("INSERT INTO track_visitors (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET last_seen = now()").bind(vid).execute(&state.db).await?;
-    let sources: Vec<(String, Vec<String>)> = sqlx::query_as("SELECT code, utm FROM crm_traffic_sources").fetch_all(&state.db).await?;
+    sqlx::query!("INSERT INTO track_visitors (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET last_seen = now()", vid).execute(&state.db).await?;
+    let sources: Vec<(String, Vec<String>)> = sqlx::query!(r#"SELECT code, utm FROM crm_traffic_sources"#).map(|r| (r.code, r.utm)).fetch_all(&state.db).await?;
     let touch = classify(&page, referrer.as_ref(), &sources);
     let last: Option<(Uuid, DateTime<Utc>, String, String, i32)> =
-        sqlx::query_as("SELECT id, last_at, channel, source, pages FROM track_visits WHERE visitor_id = $1 ORDER BY started_at DESC LIMIT 1").bind(vid).fetch_optional(&state.db).await?;
+        sqlx::query!(r#"SELECT id, last_at, channel, source, pages FROM track_visits WHERE visitor_id = $1 ORDER BY started_at DESC LIMIT 1"#, vid).map(|r| (r.id, r.last_at, r.channel, r.source, r.pages)).fetch_optional(&state.db).await?;
     // A new visit after half an hour, or when the page was reached from somewhere else.
     let tagged = !touch.utm.is_empty() || touch.link.is_some() || page.query_pairs().any(|(k, _)| CLICK_IDS.contains(&k.as_ref()));
     let from_elsewhere = referrer.as_ref().is_some_and(|r| bare_host(r) != host);
     let visit = match last {
         Some((id, at, ch, src, pages)) if at > Utc::now() - Duration::minutes(30) && !(tagged || from_elsewhere) || last_same(&touch, &ch, &src, at) => {
             if pages >= 200 {
-                sqlx::query("UPDATE track_visits SET last_at = now() WHERE id = $1").bind(id).execute(&state.db).await?;
+                sqlx::query!("UPDATE track_visits SET last_at = now() WHERE id = $1", id).execute(&state.db).await?;
                 return Ok(());
             }
-            sqlx::query("UPDATE track_visits SET last_at = now(), pages = pages + 1 WHERE id = $1").bind(id).execute(&state.db).await?;
+            sqlx::query!("UPDATE track_visits SET last_at = now(), pages = pages + 1 WHERE id = $1", id).execute(&state.db).await?;
             id
         }
         _ => {
@@ -235,23 +235,13 @@ async fn record_hit(state: &AppState, ip: Option<String>, key: &str, body: &[u8]
                 Some((_, src)) => (if touch.channel == "direct" || touch.channel == "campaign" { "offline" } else { touch.channel }, src.clone()),
                 None => (touch.channel, touch.source.clone()),
             };
-            sqlx::query_scalar(
-                "INSERT INTO track_visits (visitor_id, site_id, channel, source, utm, referrer, landing, pages, link_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8) RETURNING id",
-            )
-            .bind(vid)
-            .bind(site)
-            .bind(channel)
-            .bind(source.chars().take(200).collect::<String>())
-            .bind(Value::Object(touch.utm.clone()))
-            .bind(referrer.as_ref().map(|r| r.as_str().to_string()))
-            .bind(page.as_str())
-            .bind(link.map(|l| l.0))
+            sqlx::query_scalar!("INSERT INTO track_visits (visitor_id, site_id, channel, source, utm, referrer, landing, pages, link_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8) RETURNING id", vid, site, channel, source.chars().take(200).collect::<String>(), Value::Object(touch.utm.clone()), referrer.as_ref().map(|r| r.as_str().to_string()), page.as_str(), link.map(|l| l.0))
             .fetch_one(&state.db)
             .await?
         }
     };
-    sqlx::query("INSERT INTO track_pages (visit_id, url, title) VALUES ($1, $2, $3)").bind(visit).bind(page.as_str()).bind(title).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO track_pages (visit_id, url, title) VALUES ($1, $2, $3)", visit, page.as_str(), title).execute(&state.db).await?;
     Ok(())
 }
 
@@ -264,7 +254,7 @@ fn last_same(t: &Touch, channel: &str, source: &str, at: DateTime<Utc>) -> bool 
 /// already linked keeps its first record.
 pub async fn link_visitor(state: &AppState, visitor: Option<&str>, item: Uuid) {
     let Some(v) = visitor.and_then(|v| Uuid::parse_str(v.trim()).ok()) else { return };
-    if let Err(e) = sqlx::query("UPDATE track_visitors SET item_id = COALESCE(item_id, $2) WHERE id = $1").bind(v).bind(item).execute(&state.db).await {
+    if let Err(e) = sqlx::query!("UPDATE track_visitors SET item_id = COALESCE(item_id, $2) WHERE id = $1", v, item).execute(&state.db).await {
         tracing::warn!(error = ?e, "could not link the visitor");
     }
 }
@@ -293,8 +283,8 @@ fn site_json(state: &AppState, s: &Site) -> Value {
 
 async fn list_sites(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     require_manage(&auth)?;
-    let sites: Vec<Site> = sqlx::query_as("SELECT id, name, domains, key, is_active, created_at FROM track_sites ORDER BY created_at").fetch_all(&state.db).await?;
-    let stats: Vec<(Uuid, i64)> = sqlx::query_as("SELECT site_id, COUNT(*) FROM track_visits WHERE started_at > now() - interval '30 days' GROUP BY site_id").fetch_all(&state.db).await?;
+    let sites: Vec<Site> = sqlx::query_as!(Site, "SELECT id, name, domains, key, is_active, created_at FROM track_sites ORDER BY created_at").fetch_all(&state.db).await?;
+    let stats: Vec<(Uuid, i64)> = sqlx::query!(r#"SELECT site_id AS "site_id!", COUNT(*) AS "c1!" FROM track_visits WHERE started_at > now() - interval '30 days' GROUP BY site_id"#).map(|r| (r.site_id, r.c1)).fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": sites.iter().map(|s| {
         let mut v = site_json(&state, s);
         v["visits_30d"] = json!(stats.iter().find(|x| x.0 == s.id).map(|x| x.1).unwrap_or(0));
@@ -334,11 +324,7 @@ async fn create_site(State(state): State<AppState>, auth: AuthUser, Json(b): Jso
     require_manage(&auth)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 200)?;
     let domains = clean_domains(&b.domains.unwrap_or_default())?;
-    let s: Site = sqlx::query_as("INSERT INTO track_sites (name, domains, key, created_by) VALUES ($1, $2, $3, $4) RETURNING id, name, domains, key, is_active, created_at")
-        .bind(name)
-        .bind(&domains)
-        .bind(random_token(12))
-        .bind(auth.id)
+    let s: Site = sqlx::query_as!(Site, "INSERT INTO track_sites (name, domains, key, created_by) VALUES ($1, $2, $3, $4) RETURNING id, name, domains, key, is_active, created_at", name, &domains, random_token(12), auth.id)
         .fetch_one(&state.db)
         .await?;
     Ok(Json(site_json(&state, &s)))
@@ -354,14 +340,8 @@ async fn update_site(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         Some(d) => Some(clean_domains(d)?),
         None => None,
     };
-    let s: Site = sqlx::query_as(
-        "UPDATE track_sites SET name = COALESCE($2, name), domains = COALESCE($3, domains), is_active = COALESCE($4, is_active) WHERE id = $1
-         RETURNING id, name, domains, key, is_active, created_at",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(domains)
-    .bind(b.is_active)
+    let s: Site = sqlx::query_as!(Site, "UPDATE track_sites SET name = COALESCE($2, name), domains = COALESCE($3, domains), is_active = COALESCE($4, is_active) WHERE id = $1
+         RETURNING id, name, domains, key, is_active, created_at", id, name, domains.as_deref(), b.is_active)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("site"))?;
@@ -370,7 +350,7 @@ async fn update_site(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 async fn delete_site(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manage(&auth)?;
-    let n = sqlx::query("DELETE FROM track_sites WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM track_sites WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("site"));
     }
@@ -398,11 +378,8 @@ struct Link {
 const LINK_COLS: &str = "id, code, name, target_url, source, kind, utm, clicks, is_active, created_at";
 
 async fn link_json(state: &AppState, l: &Link) -> AppResult<Value> {
-    let (visits, visitors, records): (i64, i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COUNT(DISTINCT v.visitor_id), COUNT(DISTINCT tv.item_id)
-         FROM track_visits v JOIN track_visitors tv ON tv.id = v.visitor_id WHERE v.link_id = $1",
-    )
-    .bind(l.id)
+    let (visits, visitors, records): (i64, i64, i64) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", COUNT(DISTINCT v.visitor_id) AS "c1!", COUNT(DISTINCT tv.item_id) AS "c2!"
+         FROM track_visits v JOIN track_visitors tv ON tv.id = v.visitor_id WHERE v.link_id = $1"#, l.id).map(|r| (r.c0, r.c1, r.c2))
     .fetch_one(&state.db)
     .await?;
     let mut v = serde_json::to_value(l).unwrap_or_default();
@@ -493,7 +470,7 @@ async fn update_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 async fn delete_link(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require_manage(&auth)?;
-    let n = sqlx::query("DELETE FROM track_links WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM track_links WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("link"));
     }
@@ -503,7 +480,7 @@ async fn delete_link(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 /// The short link as a QR code, for print.
 async fn link_qr(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Response> {
     require_manage(&auth)?;
-    let code: String = sqlx::query_scalar("SELECT code FROM track_links WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("link"))?;
+    let code: String = sqlx::query_scalar!("SELECT code FROM track_links WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("link"))?;
     let url = format!("{}/go/{code}", state.config.public_url);
     let qr = qrcodegen::QrCode::encode_text(&url, qrcodegen::QrCodeEcc::Medium).map_err(|_| AppError::bad("the link is too long for a QR code"))?;
     let border = 4;
@@ -528,8 +505,7 @@ async fn link_qr(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
 /// `/go/{code}`: an ad's short link. Counts the click (once an hour per address) and sends
 /// the person on to the page with UTM tags and the ad's code.
 pub async fn go(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(code): Path<String>) -> Response {
-    let link: Option<(Uuid, String, String, String, Value)> = sqlx::query_as("SELECT id, target_url, source, kind, utm FROM track_links WHERE code = $1 AND is_active")
-        .bind(code.to_lowercase())
+    let link: Option<(Uuid, String, String, String, Value)> = sqlx::query!(r#"SELECT id, target_url, source, kind, utm FROM track_links WHERE code = $1 AND is_active"#, code.to_lowercase()).map(|r| (r.id, r.target_url, r.source, r.kind, r.utm))
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -549,7 +525,7 @@ pub async fn go(State(state): State<AppState>, ClientIp(ip): ClientIp, Path(code
         .map(|v: Option<String>| v.is_some())
         .unwrap_or(false);
     if once {
-        let _ = sqlx::query("UPDATE track_links SET clicks = clicks + 1 WHERE id = $1").bind(id).execute(&state.db).await;
+        let _ = sqlx::query!("UPDATE track_links SET clicks = clicks + 1 WHERE id = $1", id).execute(&state.db).await;
     }
     let mut url = match Url::parse(&target) {
         Ok(u) => u,
@@ -586,10 +562,7 @@ struct SpendQuery {
 async fn list_spend(State(state): State<AppState>, auth: AuthUser, Query(q): Query<SpendQuery>) -> AppResult<Json<Value>> {
     require_manage(&auth)?;
     let year = q.year.unwrap_or_else(|| Utc::now().year());
-    let rows: Vec<(String, NaiveDate, Decimal, String, Decimal, Option<String>)> = sqlx::query_as(
-        "SELECT source, month, amount, currency, amount_base, note FROM track_spend WHERE extract(year FROM month) = $1 ORDER BY source, month",
-    )
-    .bind(year as f64)
+    let rows: Vec<(String, NaiveDate, Decimal, String, Decimal, Option<String>)> = sqlx::query!(r#"SELECT source, month, amount, currency, amount_base, note FROM track_spend WHERE extract(year FROM month) = $1 ORDER BY source, month"#, year as f64).map(|r| (r.source, r.month, r.amount, r.currency, r.amount_base, r.note))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -623,24 +596,15 @@ async fn put_spend(State(state): State<AppState>, auth: AuthUser, Json(b): Json<
         return Err(AppError::bad("amount cannot be negative"));
     }
     if amount.is_zero() {
-        sqlx::query("DELETE FROM track_spend WHERE source = $1 AND month = $2").bind(&source).bind(month).execute(&state.db).await?;
+        sqlx::query!("DELETE FROM track_spend WHERE source = $1 AND month = $2", &source, month).execute(&state.db).await?;
         return Ok(Json(json!({ "ok": true, "removed": true })));
     }
     let base = crate::crm::money::base_currency(&state).await?;
     let currency = clean(b.currency).map(|c| c.to_uppercase()).unwrap_or(base);
     let rate = crate::crm::money::rate_of(&state, &currency).await?.ok_or_else(|| AppError::bad(format!("currency {currency} is not enabled")))?;
-    sqlx::query(
-        "INSERT INTO track_spend (source, month, amount, currency, amount_base, note, updated_by) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    sqlx::query!("INSERT INTO track_spend (source, month, amount, currency, amount_base, note, updated_by) VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (source, month) DO UPDATE SET amount = EXCLUDED.amount, currency = EXCLUDED.currency, amount_base = EXCLUDED.amount_base,
-             note = EXCLUDED.note, updated_by = EXCLUDED.updated_by, updated_at = now()",
-    )
-    .bind(&source)
-    .bind(month)
-    .bind(amount)
-    .bind(&currency)
-    .bind((amount * rate).round_dp(4))
-    .bind(clean(b.note).map(|n| n.chars().take(500).collect::<String>()))
-    .bind(auth.id)
+             note = EXCLUDED.note, updated_by = EXCLUDED.updated_by, updated_at = now()", &source, month, amount, &currency, (amount * rate).round_dp(4), clean(b.note).map(|n| n.chars().take(500).collect::<String>()), auth.id)
     .execute(&state.db)
     .await?;
     Ok(Json(json!({ "ok": true })))
@@ -731,9 +695,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     .fetch_all(&state.db)
     .await?;
 
-    let spend: Vec<(String, Decimal)> = sqlx::query_as("SELECT source, SUM(amount_base) FROM track_spend WHERE month >= date_trunc('month', $1::date) AND month <= $2 GROUP BY source")
-        .bind(from)
-        .bind(to)
+    let spend: Vec<(String, Decimal)> = sqlx::query!(r#"SELECT source AS "source!", SUM(amount_base) AS "c1!" FROM track_spend WHERE month >= date_trunc('month', $1::date) AND month <= $2 GROUP BY source"#, from, to).map(|r| (r.source, r.c1))
         .fetch_all(&state.db)
         .await?;
 
@@ -762,14 +724,9 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
     let mut list: Vec<Row> = rows.into_values().collect();
     list.sort_by(|a, b| b.visits.cmp(&a.visits).then(b.revenue.cmp(&a.revenue)));
     // A visitor can come several ways: the totals count each once.
-    let (all_visitors, all_new): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(DISTINCT v.visitor_id), COUNT(DISTINCT v.visitor_id) FILTER (WHERE tv.first_seen >= $1)
+    let (all_visitors, all_new): (i64, i64) = sqlx::query!(r#"SELECT COUNT(DISTINCT v.visitor_id) AS "c0!", COUNT(DISTINCT v.visitor_id) FILTER (WHERE tv.first_seen >= $1) AS "c1!"
          FROM track_visits v JOIN track_visitors tv ON tv.id = v.visitor_id
-         WHERE v.started_at >= $1 AND v.started_at < $2 AND ($3::uuid IS NULL OR v.site_id = $3)",
-    )
-    .bind(start)
-    .bind(end)
-    .bind(q.site_id)
+         WHERE v.started_at >= $1 AND v.started_at < $2 AND ($3::uuid IS NULL OR v.site_id = $3)"#, start, end, q.site_id).map(|r| (r.c0, r.c1))
     .fetch_one(&state.db)
     .await?;
     let mut total = Row { key: "total".into(), visitors: all_visitors, new_visitors: all_new, ..Default::default() };
@@ -793,12 +750,7 @@ async fn report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<R
         })
     };
     // Visits per day, for the chart.
-    let daily: Vec<(NaiveDate, i64)> = sqlx::query_as(
-        "SELECT started_at::date, COUNT(*) FROM track_visits WHERE started_at >= $1 AND started_at < $2 AND ($3::uuid IS NULL OR site_id = $3) GROUP BY 1 ORDER BY 1",
-    )
-    .bind(start)
-    .bind(end)
-    .bind(q.site_id)
+    let daily: Vec<(NaiveDate, i64)> = sqlx::query!(r#"SELECT started_at::date AS "c0!", COUNT(*) AS "c1!" FROM track_visits WHERE started_at >= $1 AND started_at < $2 AND ($3::uuid IS NULL OR site_id = $3) GROUP BY 1 ORDER BY 1"#, start, end, q.site_id).map(|r| (r.c0, r.c1))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -824,19 +776,16 @@ async fn journey(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
     if let Some(c) = row.company_id {
         people.push(c);
     }
-    let contacts: Vec<Uuid> = sqlx::query_scalar("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1").bind(id).fetch_all(&state.db).await?;
+    let contacts: Vec<Uuid> = sqlx::query_scalar!("SELECT contact_id FROM crm_item_contacts WHERE item_id = $1", id).fetch_all(&state.db).await?;
     people.extend(contacts);
-    let visits: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>, String, String, Value, Option<String>, String, i32, Option<String>)> = sqlx::query_as(
-        "SELECT v.id, v.started_at, v.last_at, v.channel, v.source, v.utm, v.referrer, v.landing, v.pages, l.name
+    let visits: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>, String, String, Value, Option<String>, String, i32, Option<String>)> = sqlx::query!(r#"SELECT v.id AS "id!", v.started_at AS "started_at!", v.last_at AS "last_at!", v.channel AS "channel!", v.source AS "source!", v.utm AS "utm!", v.referrer AS "referrer?", v.landing AS "landing!", v.pages AS "pages!", l.name AS "name?"
          FROM track_visits v JOIN track_visitors tv ON tv.id = v.visitor_id LEFT JOIN track_links l ON l.id = v.link_id
-         WHERE tv.item_id = ANY($1) ORDER BY v.started_at LIMIT 500",
-    )
-    .bind(&people)
+         WHERE tv.item_id = ANY($1) ORDER BY v.started_at LIMIT 500"#, &people).map(|r| (r.id, r.started_at, r.last_at, r.channel, r.source, r.utm, r.referrer, r.landing, r.pages, r.name))
     .fetch_all(&state.db)
     .await?;
     let ids: Vec<Uuid> = visits.iter().map(|v| v.0).collect();
     let pages: Vec<(Uuid, DateTime<Utc>, String, Option<String>)> =
-        sqlx::query_as("SELECT visit_id, at, url, title FROM track_pages WHERE visit_id = ANY($1) ORDER BY at").bind(&ids).fetch_all(&state.db).await?;
+        sqlx::query!(r#"SELECT visit_id, at, url, title FROM track_pages WHERE visit_id = ANY($1) ORDER BY at"#, &ids).map(|r| (r.visit_id, r.at, r.url, r.title)).fetch_all(&state.db).await?;
     let mut by_visit: HashMap<Uuid, Vec<Value>> = HashMap::new();
     for (v, at, url, title) in pages {
         by_visit.entry(v).or_default().push(json!({ "at": at, "url": url, "title": title }));

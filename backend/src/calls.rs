@@ -52,7 +52,7 @@ const MAX_LIVEKIT: usize = 50;
 const SILENT_SECS: i64 = 45;
 
 async fn invited(state: &AppState, call: Uuid) -> AppResult<Vec<Uuid>> {
-    Ok(sqlx::query_scalar("SELECT user_id FROM call_invites WHERE call_id = $1").bind(call).fetch_all(&state.db).await?)
+    Ok(sqlx::query_scalar!("SELECT user_id FROM call_invites WHERE call_id = $1", call).fetch_all(&state.db).await?)
 }
 
 async fn check(state: &AppState, auth: &AuthUser, call: Uuid) -> AppResult<Vec<Uuid>> {
@@ -69,11 +69,8 @@ async fn name(state: &AppState, user: Uuid) -> String {
 
 /// Peers in the call now: (peer, user, name).
 async fn peers(state: &AppState, call: Uuid) -> AppResult<Vec<(Uuid, Uuid, String)>> {
-    Ok(sqlx::query_as(
-        "SELECT p.peer_id, p.user_id, trim(u.first_name || ' ' || u.last_name) FROM call_peers p JOIN users u ON u.id = p.user_id
-         WHERE p.call_id = $1 AND p.left_at IS NULL ORDER BY p.joined_at",
-    )
-    .bind(call)
+    Ok(sqlx::query!(r#"SELECT p.peer_id AS "peer_id!", p.user_id AS "user_id!", trim(u.first_name || ' ' || u.last_name) AS "c2!" FROM call_peers p JOIN users u ON u.id = p.user_id
+         WHERE p.call_id = $1 AND p.left_at IS NULL ORDER BY p.joined_at"#, call).map(|r| (r.peer_id, r.user_id, r.c2))
     .fetch_all(&state.db)
     .await?)
 }
@@ -96,20 +93,17 @@ struct StartBody {
 async fn start(State(state): State<AppState>, auth: AuthUser, Json(b): Json<StartBody>) -> AppResult<Json<Value>> {
     let mut who: Vec<Uuid> = match b.chat_id {
         Some(chat) => {
-            let m: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM im_members WHERE chat_id = $1").bind(chat).fetch_all(&state.db).await?;
+            let m: Vec<Uuid> = sqlx::query_scalar!("SELECT user_id FROM im_members WHERE chat_id = $1", chat).fetch_all(&state.db).await?;
             if !m.contains(&auth.id) {
                 return Err(AppError::NotFound("chat"));
             }
             // A call already going on in this chat: join that one.
-            let going: Option<Uuid> = sqlx::query_scalar(
-                "SELECT c.id FROM calls c WHERE c.chat_id = $1 AND c.ended_at IS NULL AND EXISTS (SELECT 1 FROM call_peers p WHERE p.call_id = c.id AND p.left_at IS NULL)
-                 ORDER BY c.started_at DESC LIMIT 1",
-            )
-            .bind(chat)
+            let going: Option<Uuid> = sqlx::query_scalar!("SELECT c.id FROM calls c WHERE c.chat_id = $1 AND c.ended_at IS NULL AND EXISTS (SELECT 1 FROM call_peers p WHERE p.call_id = c.id AND p.left_at IS NULL)
+                 ORDER BY c.started_at DESC LIMIT 1", chat)
             .fetch_optional(&state.db)
             .await?;
             if let Some(id) = going {
-                sqlx::query("INSERT INTO call_invites (call_id, user_id) SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING").bind(id).bind(&m).execute(&state.db).await?;
+                sqlx::query!("INSERT INTO call_invites (call_id, user_id) SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING", id, &m).execute(&state.db).await?;
                 return get_call(State(state), auth, Path(id)).await;
             }
             m
@@ -118,7 +112,7 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Star
             if auth.is_guest() {
                 return Err(AppError::bad("start the call from one of your chats"));
             }
-            let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&b.users).fetch_one(&state.db).await?;
+            let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &b.users).fetch_one(&state.db).await?;
             if n as usize != b.users.len() || b.users.is_empty() {
                 return Err(AppError::bad("call one or more active colleagues"));
             }
@@ -139,14 +133,11 @@ async fn start(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Star
         return Err(AppError::bad(format!("calls are for up to {max} people")));
     }
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO calls (chat_id, started_by, media) VALUES ($1, $2, $3) RETURNING id")
-        .bind(b.chat_id)
-        .bind(auth.id)
-        .bind(media)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO calls (chat_id, started_by, media) VALUES ($1, $2, $3) RETURNING id", b.chat_id, auth.id, media)
         .fetch_one(&mut *tx)
         .await?;
     for u in &who {
-        sqlx::query("INSERT INTO call_invites (call_id, user_id) VALUES ($1, $2)").bind(id).bind(u).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO call_invites (call_id, user_id) VALUES ($1, $2)", id, u).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     let me = name(&state, auth.id).await;
@@ -161,11 +152,8 @@ async fn get_call(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
     check(&state, &auth, id).await?;
     #[allow(clippy::type_complexity)]
     let (chat, started_at, ended_at, media, host, allow_audio, allow_video, allow_screen): (Option<Uuid>, DateTime<Utc>, Option<DateTime<Utc>>, String, Option<Uuid>, bool, bool, bool) =
-        sqlx::query_as("SELECT chat_id, started_at, ended_at, media, started_by, allow_audio, allow_video, allow_screen FROM calls WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    let people: Vec<(Uuid, String, Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id, i.declined FROM call_invites i JOIN users u ON u.id = i.user_id WHERE i.call_id = $1 ORDER BY u.first_name",
-    )
-    .bind(id)
+        sqlx::query!(r#"SELECT chat_id, started_at, ended_at, media, started_by, allow_audio, allow_video, allow_screen FROM calls WHERE id = $1"#, id).map(|r| (r.chat_id, r.started_at, r.ended_at, r.media, r.started_by, r.allow_audio, r.allow_video, r.allow_screen)).fetch_one(&state.db).await?;
+    let people: Vec<(Uuid, String, Option<Uuid>, bool)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.avatar_file_id AS "avatar_file_id?", i.declined AS "declined!" FROM call_invites i JOIN users u ON u.id = i.user_id WHERE i.call_id = $1 ORDER BY u.first_name"#, id).map(|r| (r.id, r.c1, r.avatar_file_id, r.declined))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -193,20 +181,14 @@ struct Controls {
 /// The host decides what the others may use, and can mute everyone.
 async fn controls(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<Controls>) -> AppResult<Json<Value>> {
     check(&state, &auth, id).await?;
-    let host: Option<Uuid> = sqlx::query_scalar("SELECT started_by FROM calls WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let host: Option<Uuid> = sqlx::query_scalar!(r#"SELECT started_by AS "started_by?" FROM calls WHERE id = $1"#, id).fetch_one(&state.db).await?;
     if host != Some(auth.id) {
         return Err(AppError::bad("only whoever started the call controls it"));
     }
-    sqlx::query(
-        "UPDATE calls SET allow_audio = COALESCE($2, allow_audio), allow_video = COALESCE($3, allow_video), allow_screen = COALESCE($4, allow_screen) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(b.allow_audio)
-    .bind(b.allow_video)
-    .bind(b.allow_screen)
+    sqlx::query!("UPDATE calls SET allow_audio = COALESCE($2, allow_audio), allow_video = COALESCE($3, allow_video), allow_screen = COALESCE($4, allow_screen) WHERE id = $1", id, b.allow_audio, b.allow_video, b.allow_screen)
     .execute(&state.db)
     .await?;
-    let (a, v, sc): (bool, bool, bool) = sqlx::query_as("SELECT allow_audio, allow_video, allow_screen FROM calls WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let (a, v, sc): (bool, bool, bool) = sqlx::query!(r#"SELECT allow_audio, allow_video, allow_screen FROM calls WHERE id = $1"#, id).map(|r| (r.allow_audio, r.allow_video, r.allow_screen)).fetch_one(&state.db).await?;
     let people: Vec<Uuid> = peers(&state, id).await?.into_iter().map(|(_, u, _)| u).filter(|u| *u != auth.id).collect();
     crate::realtime::publish(&state, Some(people), "call.controls", json!({
         "call_id": id, "allow": { "audio": a, "video": v, "screen": sc }, "mute_all": b.mute_all || !a,
@@ -227,24 +209,18 @@ struct HistoryQuery {
 async fn history(State(state): State<AppState>, auth: AuthUser, axum::extract::Query(q): axum::extract::Query<HistoryQuery>) -> AppResult<Json<Value>> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(Uuid, Option<Uuid>, Option<String>, Option<Uuid>, Option<String>, DateTime<Utc>, Option<DateTime<Utc>>, bool, Vec<String>, bool)> = sqlx::query_as(
-        "SELECT c.id, c.chat_id,
-            (SELECT CASE WHEN ch.kind = 'direct' THEN NULL ELSE ch.title END FROM im_chats ch WHERE ch.id = c.chat_id),
-            c.started_by, (SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = c.started_by),
-            c.started_at, c.ended_at,
-            EXISTS (SELECT 1 FROM call_peers p WHERE p.call_id = c.id AND p.user_id = $1),
+    let rows: Vec<(Uuid, Option<Uuid>, Option<String>, Option<Uuid>, Option<String>, DateTime<Utc>, Option<DateTime<Utc>>, bool, Vec<String>, bool)> = sqlx::query!(r#"SELECT c.id AS "id!", c.chat_id AS "chat_id?",
+            (SELECT CASE WHEN ch.kind = 'direct' THEN NULL ELSE ch.title END FROM im_chats ch WHERE ch.id = c.chat_id) AS "c2?",
+            c.started_by AS "started_by?", (SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = c.started_by) AS "c4?",
+            c.started_at AS "started_at!", c.ended_at AS "ended_at?",
+            EXISTS (SELECT 1 FROM call_peers p WHERE p.call_id = c.id AND p.user_id = $1) AS "c7!",
             ARRAY(SELECT trim(u.first_name || ' ' || u.last_name) FROM call_invites i2 JOIN users u ON u.id = i2.user_id
-                  WHERE i2.call_id = c.id AND i2.user_id <> $1 ORDER BY u.first_name),
-            EXISTS (SELECT 1 FROM call_recordings r WHERE r.call_id = c.id)
+                  WHERE i2.call_id = c.id AND i2.user_id <> $1 ORDER BY u.first_name) AS "c8!",
+            EXISTS (SELECT 1 FROM call_recordings r WHERE r.call_id = c.id) AS "c9!"
          FROM calls c JOIN call_invites i ON i.call_id = c.id AND i.user_id = $1
          WHERE ($2::timestamptz IS NULL OR c.started_at < $2)
            AND (NOT $4 OR (c.started_by IS DISTINCT FROM $1 AND NOT EXISTS (SELECT 1 FROM call_peers p WHERE p.call_id = c.id AND p.user_id = $1)))
-         ORDER BY c.started_at DESC LIMIT $3",
-    )
-    .bind(auth.id)
-    .bind(q.before)
-    .bind(limit)
-    .bind(q.missed.as_deref() == Some("true"))
+         ORDER BY c.started_at DESC LIMIT $3"#, auth.id, q.before, limit, q.missed.as_deref() == Some("true")).map(|r| (r.id, r.chat_id, r.c2, r.started_by, r.c4, r.started_at, r.ended_at, r.c7, r.c8, r.c9))
     .fetch_all(&state.db)
     .await?;
     let items: Vec<Value> = rows
@@ -266,20 +242,20 @@ async fn history(State(state): State<AppState>, auth: AuthUser, axum::extract::Q
 async fn join(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     check(&state, &auth, id).await?;
     drop_silent(&state, id).await?;
-    let ended: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT ended_at FROM calls WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let ended: Option<DateTime<Utc>> = sqlx::query_scalar!(r#"SELECT ended_at AS "ended_at?" FROM calls WHERE id = $1"#, id).fetch_one(&state.db).await?;
     if ended.is_some() {
         return Err(AppError::bad("this call has ended"));
     }
     if peers(&state, id).await?.len() >= 8 {
         return Err(AppError::bad("the call is full"));
     }
-    let peer: Uuid = sqlx::query_scalar("INSERT INTO call_peers (call_id, user_id) VALUES ($1, $2) RETURNING peer_id").bind(id).bind(auth.id).fetch_one(&state.db).await?;
-    sqlx::query("UPDATE call_invites SET declined = FALSE WHERE call_id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&state.db).await?;
+    let peer: Uuid = sqlx::query_scalar!("INSERT INTO call_peers (call_id, user_id) VALUES ($1, $2) RETURNING peer_id", id, auth.id).fetch_one(&state.db).await?;
+    sqlx::query!("UPDATE call_invites SET declined = FALSE WHERE call_id = $1 AND user_id = $2", id, auth.id).execute(&state.db).await?;
     let all = peers(&state, id).await?;
     let me = name(&state, auth.id).await;
     let others: Vec<Uuid> = all.iter().filter(|(p, ..)| *p != peer).map(|(_, u, _)| *u).collect();
     crate::realtime::publish(&state, Some(others), "call.peer", json!({ "call_id": id, "event": "joined", "peer_id": peer, "user_id": auth.id, "name": me })).await;
-    let media: String = sqlx::query_scalar("SELECT media FROM calls WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let media: String = sqlx::query_scalar!("SELECT media FROM calls WHERE id = $1", id).fetch_one(&state.db).await?;
     if media == "livekit" {
         let cfg = state.config.livekit.as_ref().ok_or_else(|| AppError::bad("this call needs the video server, which is no longer configured"))?;
         // The browser's identity in the room is its peer id; who it is travels as metadata.
@@ -326,10 +302,7 @@ struct PeerBody {
 }
 
 async fn heartbeat(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PeerBody>) -> AppResult<Json<Value>> {
-    let n = sqlx::query("UPDATE call_peers SET seen_at = now() WHERE peer_id = $1 AND call_id = $2 AND user_id = $3 AND left_at IS NULL")
-        .bind(b.peer_id)
-        .bind(id)
-        .bind(auth.id)
+    let n = sqlx::query!("UPDATE call_peers SET seen_at = now() WHERE peer_id = $1 AND call_id = $2 AND user_id = $3 AND left_at IS NULL", b.peer_id, id, auth.id)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -342,11 +315,7 @@ async fn heartbeat(State(state): State<AppState>, auth: AuthUser, Path(id): Path
 
 /// Takes out browsers that stopped sending heartbeats (closed tab, lost connection).
 async fn drop_silent(state: &AppState, call: Uuid) -> AppResult<()> {
-    let gone: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "UPDATE call_peers SET left_at = now() WHERE call_id = $1 AND left_at IS NULL AND seen_at < now() - make_interval(secs => $2) RETURNING peer_id, user_id",
-    )
-    .bind(call)
-    .bind(SILENT_SECS as f64)
+    let gone: Vec<(Uuid, Uuid)> = sqlx::query!(r#"UPDATE call_peers SET left_at = now() WHERE call_id = $1 AND left_at IS NULL AND seen_at < now() - make_interval(secs => $2) RETURNING peer_id, user_id"#, call, SILENT_SECS as f64).map(|r| (r.peer_id, r.user_id))
     .fetch_all(&state.db)
     .await?;
     for (peer, user) in gone {
@@ -359,8 +328,7 @@ async fn left(state: &AppState, call: Uuid, peer: Uuid, user: Uuid) -> AppResult
     let rest = peers(state, call).await?;
     crate::realtime::publish(state, Some(rest.iter().map(|(_, u, _)| *u).collect()), "call.peer", json!({ "call_id": call, "event": "left", "peer_id": peer, "user_id": user })).await;
     if rest.is_empty() {
-        let row: Option<(Option<Uuid>, DateTime<Utc>)> = sqlx::query_as("UPDATE calls SET ended_at = now() WHERE id = $1 AND ended_at IS NULL RETURNING chat_id, started_at")
-            .bind(call)
+        let row: Option<(Option<Uuid>, DateTime<Utc>)> = sqlx::query!(r#"UPDATE calls SET ended_at = now() WHERE id = $1 AND ended_at IS NULL RETURNING chat_id, started_at"#, call).map(|r| (r.chat_id, r.started_at))
             .fetch_optional(&state.db)
             .await?;
         if let Some((chat, started)) = row {
@@ -382,11 +350,8 @@ pub const RECORDINGS_JOB: &str = "calls.recordings";
 
 /// The recording going on now, if any.
 async fn recording_now(state: &AppState, call: Uuid) -> AppResult<Option<Value>> {
-    let row: Option<(Uuid, Option<Uuid>, DateTime<Utc>, Option<String>)> = sqlx::query_as(
-        "SELECT r.id, r.started_by, r.started_at, trim(u.first_name || ' ' || u.last_name) FROM call_recordings r LEFT JOIN users u ON u.id = r.started_by
-         WHERE r.call_id = $1 AND r.status = 'recording' ORDER BY r.started_at DESC LIMIT 1",
-    )
-    .bind(call)
+    let row: Option<(Uuid, Option<Uuid>, DateTime<Utc>, Option<String>)> = sqlx::query!(r#"SELECT r.id, r.started_by, r.started_at, trim(u.first_name || ' ' || u.last_name) AS "c3" FROM call_recordings r LEFT JOIN users u ON u.id = r.started_by
+         WHERE r.call_id = $1 AND r.status = 'recording' ORDER BY r.started_at DESC LIMIT 1"#, call).map(|r| (r.id, r.started_by, r.started_at, r.c3))
     .fetch_optional(&state.db)
     .await?;
     Ok(row.map(|(id, by, at, n)| json!({ "id": id, "started_by": by, "started_by_name": n, "started_at": at })))
@@ -396,7 +361,7 @@ async fn recording_now(state: &AppState, call: Uuid) -> AppResult<Option<Value>>
 async fn start_recording(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let who = check(&state, &auth, id).await?;
     let (media, ended, chat): (String, Option<DateTime<Utc>>, Option<Uuid>) =
-        sqlx::query_as("SELECT media, ended_at, chat_id FROM calls WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT media, ended_at, chat_id FROM calls WHERE id = $1"#, id).map(|r| (r.media, r.ended_at, r.chat_id)).fetch_one(&state.db).await?;
     if ended.is_some() {
         return Err(AppError::bad("this call has ended"));
     }
@@ -409,22 +374,18 @@ async fn start_recording(State(state): State<AppState>, auth: AuthUser, Path(id)
     // Claim the call's one recording first, so presses at the same moment start only one.
     let rec = Uuid::new_v4();
     let file_name = format!("nerp-call-{id}-{rec}.mp4");
-    sqlx::query("INSERT INTO call_recordings (id, call_id, file_name, started_by) VALUES ($1, $2, $3, $4)")
-        .bind(rec)
-        .bind(id)
-        .bind(&file_name)
-        .bind(auth.id)
+    sqlx::query!("INSERT INTO call_recordings (id, call_id, file_name, started_by) VALUES ($1, $2, $3, $4)", rec, id, &file_name, auth.id)
         .execute(&state.db)
         .await
         .map_err(|e| if crate::error::is_unique_violation(&e) { AppError::Conflict("this call is already being recorded".into()) } else { e.into() })?;
     let egress = match crate::livekit::start_recording(&state, &crate::livekit::room_name(id), &file_name).await {
         Ok(e) => e,
         Err(e) => {
-            sqlx::query("DELETE FROM call_recordings WHERE id = $1").bind(rec).execute(&state.db).await?;
+            sqlx::query!("DELETE FROM call_recordings WHERE id = $1", rec).execute(&state.db).await?;
             return Err(AppError::BadRequest(e));
         }
     };
-    sqlx::query("UPDATE call_recordings SET egress_id = $2 WHERE id = $1").bind(rec).bind(&egress).execute(&state.db).await?;
+    sqlx::query!("UPDATE call_recordings SET egress_id = $2 WHERE id = $1", rec, &egress).execute(&state.db).await?;
     let me = name(&state, auth.id).await;
     chat_note(&state, chat, format!("{me} started recording the call")).await;
     let now = recording_now(&state, id).await?;
@@ -446,10 +407,7 @@ async fn stop_recording(State(state): State<AppState>, auth: AuthUser, Path(id):
 
 /// Stops the call's recording; Egress then finishes the file and the job collects it.
 async fn finish_recording(state: &AppState, call: Uuid, by: Option<Uuid>) {
-    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-        "UPDATE call_recordings SET status = 'processing', stopped_at = now() WHERE call_id = $1 AND status = 'recording' RETURNING id, egress_id",
-    )
-    .bind(call)
+    let rows: Vec<(Uuid, Option<String>)> = sqlx::query!(r#"UPDATE call_recordings SET status = 'processing', stopped_at = now() WHERE call_id = $1 AND status = 'recording' RETURNING id, egress_id"#, call).map(|r| (r.id, r.egress_id))
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
@@ -463,7 +421,7 @@ async fn finish_recording(state: &AppState, call: Uuid, by: Option<Uuid>) {
             }
         }
     }
-    let chat: Option<Uuid> = sqlx::query_scalar("SELECT chat_id FROM calls WHERE id = $1").bind(call).fetch_optional(&state.db).await.ok().flatten().flatten();
+    let chat: Option<Uuid> = sqlx::query_scalar!("SELECT chat_id FROM calls WHERE id = $1", call).fetch_optional(&state.db).await.ok().flatten().flatten();
     let who = match by {
         Some(u) => name(state, u).await,
         None => String::new(),
@@ -529,13 +487,10 @@ fn recording_file(state: &AppState, file_name: &str) -> Option<std::path::PathBu
 
 async fn collect(state: &AppState, rec: Uuid, call: Uuid, file_name: &str, by: Option<Uuid>, duration: Option<i32>) -> AppResult<()> {
     let path = recording_file(state, file_name).ok_or_else(|| AppError::bad("the recording file is not in the recordings folder"))?;
-    let started: DateTime<Utc> = sqlx::query_scalar("SELECT started_at FROM call_recordings WHERE id = $1").bind(rec).fetch_one(&state.db).await?;
+    let started: DateTime<Utc> = sqlx::query_scalar!("SELECT started_at FROM call_recordings WHERE id = $1", rec).fetch_one(&state.db).await?;
     let title = format!("Call recording {}.mp4", started.format("%Y-%m-%d %H-%M"));
     let file = crate::routes::files::store_path(state, by, &title, "video/mp4", &path).await?;
-    let n = sqlx::query("UPDATE call_recordings SET status = 'ready', file_id = $2, duration_secs = $3 WHERE id = $1 AND status <> 'ready'")
-        .bind(rec)
-        .bind(file)
-        .bind(duration)
+    let n = sqlx::query!("UPDATE call_recordings SET status = 'ready', file_id = $2, duration_secs = $3 WHERE id = $1 AND status <> 'ready'", rec, file, duration)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -545,7 +500,7 @@ async fn collect(state: &AppState, rec: Uuid, call: Uuid, file_name: &str, by: O
     }
     let _ = tokio::fs::remove_file(&path).await;
     // Posted in the call's chat by whoever recorded it, so its members can watch it.
-    let chat: Option<Uuid> = sqlx::query_scalar("SELECT chat_id FROM calls WHERE id = $1").bind(call).fetch_one(&state.db).await?;
+    let chat: Option<Uuid> = sqlx::query_scalar!(r#"SELECT chat_id AS "chat_id?" FROM calls WHERE id = $1"#, call).fetch_one(&state.db).await?;
     let length = duration.map(|d| format!(" ({} min {} s)", d / 60, d % 60)).unwrap_or_default();
     if let Some(c) = chat {
         crate::im::post_message(state, c, by, &format!("Recording of the call{length}"), &[file]).await?;
@@ -567,15 +522,13 @@ async fn collect(state: &AppState, rec: Uuid, call: Uuid, file_name: &str, by: O
 }
 
 async fn fail(state: &AppState, rec: Uuid, call: Uuid, error: &str) {
-    let n = sqlx::query("UPDATE call_recordings SET status = 'failed', error = $2, stopped_at = COALESCE(stopped_at, now()) WHERE id = $1 AND status IN ('recording', 'processing')")
-        .bind(rec)
-        .bind(error)
+    let n = sqlx::query!("UPDATE call_recordings SET status = 'failed', error = $2, stopped_at = COALESCE(stopped_at, now()) WHERE id = $1 AND status IN ('recording', 'processing')", rec, error)
         .execute(&state.db)
         .await
         .map(|r| r.rows_affected())
         .unwrap_or(0);
     if n == 1 {
-        let chat: Option<Uuid> = sqlx::query_scalar("SELECT chat_id FROM calls WHERE id = $1").bind(call).fetch_optional(&state.db).await.ok().flatten().flatten();
+        let chat: Option<Uuid> = sqlx::query_scalar!("SELECT chat_id FROM calls WHERE id = $1", call).fetch_optional(&state.db).await.ok().flatten().flatten();
         chat_note(state, chat, format!("The recording failed: {error}")).await;
         if let Ok(people) = invited(state, call).await {
             crate::realtime::publish(state, Some(people), "call.recording", json!({ "call_id": call, "recording": null })).await;
@@ -585,10 +538,7 @@ async fn fail(state: &AppState, rec: Uuid, call: Uuid, error: &str) {
 
 async fn leave(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<PeerBody>) -> AppResult<Json<Value>> {
     check(&state, &auth, id).await?;
-    let n = sqlx::query("UPDATE call_peers SET left_at = now() WHERE peer_id = $1 AND call_id = $2 AND user_id = $3 AND left_at IS NULL")
-        .bind(b.peer_id)
-        .bind(id)
-        .bind(auth.id)
+    let n = sqlx::query!("UPDATE call_peers SET left_at = now() WHERE peer_id = $1 AND call_id = $2 AND user_id = $3 AND left_at IS NULL", b.peer_id, id, auth.id)
         .execute(&state.db)
         .await?
         .rows_affected();
@@ -601,7 +551,7 @@ async fn leave(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
 /// "Not now": the others see it; a call nobody joined ends when everyone has declined.
 async fn decline(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let who = check(&state, &auth, id).await?;
-    sqlx::query("UPDATE call_invites SET declined = TRUE WHERE call_id = $1 AND user_id = $2").bind(id).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("UPDATE call_invites SET declined = TRUE WHERE call_id = $1 AND user_id = $2", id, auth.id).execute(&state.db).await?;
     let me = name(&state, auth.id).await;
     crate::realtime::publish(&state, Some(who.into_iter().filter(|u| *u != auth.id).collect()), "call.declined", json!({ "call_id": id, "user_id": auth.id, "name": me })).await;
     Ok(Json(json!({ "ok": true })))
@@ -609,13 +559,12 @@ async fn decline(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
 
 /// Every minute: ends calls whose browsers all fell silent.
 pub async fn run_cleanup(state: &AppState) -> Result<()> {
-    let open: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM calls WHERE ended_at IS NULL").fetch_all(&state.db).await?;
+    let open: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM calls WHERE ended_at IS NULL").fetch_all(&state.db).await?;
     for id in open {
         drop_silent(state, id).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
         // Rang but nobody ever joined, an hour on.
-        sqlx::query("UPDATE calls SET ended_at = now() WHERE id = $1 AND ended_at IS NULL AND started_at < now() - interval '1 hour'
-                     AND NOT EXISTS (SELECT 1 FROM call_peers WHERE call_id = $1 AND left_at IS NULL)")
-            .bind(id)
+        sqlx::query!("UPDATE calls SET ended_at = now() WHERE id = $1 AND ended_at IS NULL AND started_at < now() - interval '1 hour'
+                     AND NOT EXISTS (SELECT 1 FROM call_peers WHERE call_id = $1 AND left_at IS NULL)", id)
             .execute(&state.db)
             .await?;
     }

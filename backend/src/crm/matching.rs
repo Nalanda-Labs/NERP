@@ -140,15 +140,11 @@ async fn history(state: &AppState, emails: &[String]) -> AppResult<(Value, Value
     if emails.is_empty() {
         return Ok((json!({ "count": 0 }), json!({ "count": 0 })));
     }
-    let (n, last_at, last_subject): (i64, Option<DateTime<Utc>>, Option<String>) = sqlx::query_as(
-        "SELECT COUNT(*), MAX(e.sent_at), (array_agg(e.subject ORDER BY e.sent_at DESC))[1] FROM crm_emails e
-         WHERE e.direction = 'in' AND lower(e.from_addr) = ANY($1) AND NOT EXISTS (SELECT 1 FROM crm_email_links l WHERE l.email_id = e.id)",
-    )
-    .bind(emails)
+    let (n, last_at, last_subject): (i64, Option<DateTime<Utc>>, Option<String>) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", MAX(e.sent_at) AS "c1?", (array_agg(e.subject ORDER BY e.sent_at DESC))[1] AS "c2?" FROM crm_emails e
+         WHERE e.direction = 'in' AND lower(e.from_addr) = ANY($1) AND NOT EXISTS (SELECT 1 FROM crm_email_links l WHERE l.email_id = e.id)"#, emails).map(|r| (r.c0, r.c1, r.c2))
     .fetch_one(&state.db)
     .await?;
-    let (c, chat_at): (i64, Option<DateTime<Utc>>) = sqlx::query_as("SELECT COUNT(*), MAX(started_at) FROM chat_sessions WHERE item_id IS NULL AND lower(visitor_email) = ANY($1)")
-        .bind(emails)
+    let (c, chat_at): (i64, Option<DateTime<Utc>>) = sqlx::query!(r#"SELECT COUNT(*) AS "c0!", MAX(started_at) AS "c1?" FROM chat_sessions WHERE item_id IS NULL AND lower(visitor_email) = ANY($1)"#, emails).map(|r| (r.c0, r.c1))
         .fetch_one(&state.db)
         .await?;
     Ok((json!({ "count": n, "last_at": last_at, "last_subject": last_subject }), json!({ "count": c, "last_at": chat_at })))
@@ -157,32 +153,25 @@ async fn history(state: &AppState, emails: &[String]) -> AppResult<(Value, Value
 /// Attaches the earlier emails (to or from the record's addresses, not linked to any record)
 /// and live chats (by the visitor's email, not linked) to a new record. Returns (emails, chats).
 pub async fn adopt_history(state: &AppState, item: Uuid) -> AppResult<(u64, u64)> {
-    let emails: Vec<String> = sqlx::query_scalar("SELECT normalized FROM crm_multifields WHERE item_id = $1 AND kind = 'email'").bind(item).fetch_all(&state.db).await?;
+    let emails: Vec<String> = sqlx::query_scalar!("SELECT normalized FROM crm_multifields WHERE item_id = $1 AND kind = 'email'", item).fetch_all(&state.db).await?;
     if emails.is_empty() {
         return Ok((0, 0));
     }
-    let e = sqlx::query(
-        "INSERT INTO crm_email_links (email_id, item_id)
+    let e = sqlx::query!("INSERT INTO crm_email_links (email_id, item_id)
          SELECT e.id, $2 FROM crm_emails e
          WHERE NOT EXISTS (SELECT 1 FROM crm_email_links l WHERE l.email_id = e.id)
            AND (lower(e.from_addr) = ANY($1)
                 OR EXISTS (SELECT 1 FROM jsonb_array_elements(e.to_addrs || e.cc_addrs) x WHERE lower(COALESCE(x->>'email', x #>> '{}')) = ANY($1)))
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(&emails)
-    .bind(item)
+         ON CONFLICT DO NOTHING", &emails, item)
     .execute(&state.db)
     .await?
     .rows_affected();
-    let c = sqlx::query("UPDATE chat_sessions SET item_id = $2 WHERE item_id IS NULL AND lower(visitor_email) = ANY($1)")
-        .bind(&emails)
-        .bind(item)
+    let c = sqlx::query!("UPDATE chat_sessions SET item_id = $2 WHERE item_id IS NULL AND lower(visitor_email) = ANY($1)", &emails, item)
         .execute(&state.db)
         .await?
         .rows_affected();
     if e + c > 0 {
-        sqlx::query("UPDATE crm_items SET last_activity_at = GREATEST(last_activity_at, (SELECT MAX(sent_at) FROM crm_emails e JOIN crm_email_links l ON l.email_id = e.id WHERE l.item_id = $1)) WHERE id = $1")
-            .bind(item)
+        sqlx::query!("UPDATE crm_items SET last_activity_at = GREATEST(last_activity_at, (SELECT MAX(sent_at) FROM crm_emails e JOIN crm_email_links l ON l.email_id = e.id WHERE l.item_id = $1)) WHERE id = $1", item)
             .execute(&state.db)
             .await?;
     }

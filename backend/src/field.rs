@@ -134,7 +134,7 @@ impl Default for FieldSettings {
 }
 
 async fn settings(state: &AppState) -> FieldSettings {
-    sqlx::query_scalar::<_, Value>("SELECT value FROM settings WHERE key = 'field_visits'")
+    sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'field_visits'")
         .fetch_optional(&state.db)
         .await
         .ok()
@@ -157,8 +157,7 @@ async fn put_settings(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     if b.start_lat.is_some_and(|l| !(-90.0..=90.0).contains(&l)) || b.start_lng.is_some_and(|l| !(-180.0..=180.0).contains(&l)) {
         return Err(AppError::bad("the start point's coordinates are out of range"));
     }
-    sqlx::query("INSERT INTO settings (key, value) VALUES ('field_visits', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()")
-        .bind(json!(b))
+    sqlx::query!("INSERT INTO settings (key, value) VALUES ('field_visits', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", json!(b))
         .execute(&state.db)
         .await?;
     Ok(Json(json!({ "settings": b })))
@@ -179,7 +178,7 @@ async fn geocode(state: &AppState, address: &Value) -> Option<(f64, f64)> {
     if q.len() < 3 {
         return None;
     }
-    let cached: Option<(Option<f64>, Option<f64>)> = sqlx::query_as("SELECT lat, lng FROM geo_cache WHERE query = $1").bind(&q).fetch_optional(&state.db).await.ok().flatten();
+    let cached: Option<(Option<f64>, Option<f64>)> = sqlx::query!(r#"SELECT lat, lng FROM geo_cache WHERE query = $1"#, &q).map(|r| (r.lat, r.lng)).fetch_optional(&state.db).await.ok().flatten();
     if let Some((lat, lng)) = cached {
         return lat.zip(lng);
     }
@@ -195,10 +194,7 @@ async fn geocode(state: &AppState, address: &Value) -> Option<(f64, f64)> {
         Some((p("lat")?, p("lon")?))
     }
     .await;
-    let _ = sqlx::query("INSERT INTO geo_cache (query, lat, lng) VALUES ($1, $2, $3) ON CONFLICT (query) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng, created_at = now()")
-        .bind(&q)
-        .bind(found.map(|f| f.0))
-        .bind(found.map(|f| f.1))
+    let _ = sqlx::query!("INSERT INTO geo_cache (query, lat, lng) VALUES ($1, $2, $3) ON CONFLICT (query) DO UPDATE SET lat = EXCLUDED.lat, lng = EXCLUDED.lng, created_at = now()", &q, found.map(|f| f.0), found.map(|f| f.1))
         .execute(&state.db)
         .await;
     found
@@ -207,7 +203,7 @@ async fn geocode(state: &AppState, address: &Value) -> Option<(f64, f64)> {
 // ---- visits ----
 
 async fn company_tz(state: &AppState) -> chrono_tz::Tz {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'default_timezone'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'default_timezone'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(chrono_tz::UTC)
 }
 
@@ -235,12 +231,9 @@ fn thirty() -> i32 {
 
 /// The record's address, else its company's, else its first contact's.
 async fn address_of(state: &AppState, item: Uuid) -> AppResult<Option<Value>> {
-    Ok(sqlx::query_scalar(
-        "SELECT COALESCE(NULLIF(i.address, 'null'::jsonb), co.address,
+    Ok(sqlx::query_scalar!("SELECT COALESCE(NULLIF(i.address, 'null'::jsonb), co.address,
                 (SELECT c.address FROM crm_item_contacts ic JOIN crm_items c ON c.id = ic.contact_id WHERE ic.item_id = i.id AND c.address IS NOT NULL ORDER BY ic.is_primary DESC, ic.sort LIMIT 1))
-         FROM crm_items i LEFT JOIN crm_items co ON co.id = i.company_id WHERE i.id = $1",
-    )
-    .bind(item)
+         FROM crm_items i LEFT JOIN crm_items co ON co.id = i.company_id WHERE i.id = $1", item)
     .fetch_optional(&state.db)
     .await?
     .flatten())
@@ -277,24 +270,10 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<New
     let subject = b.subject.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Visit: {}", r.title));
     let who = b.responsible_id.unwrap_or(auth.id);
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_activities (item_id, kind, subject, starts_at, ends_at, deadline, responsible_id, created_by) VALUES ($1, 'visit', $2, $3, $4, $3, $5, $6) RETURNING id",
-    )
-    .bind(b.item_id)
-    .bind(&subject)
-    .bind(start)
-    .bind(end)
-    .bind(who)
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO crm_activities (item_id, kind, subject, starts_at, ends_at, deadline, responsible_id, created_by) VALUES ($1, 'visit', $2, $3, $4, $3, $5, $6) RETURNING id", b.item_id, &subject, start, end, who, auth.id)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO field_visits (activity_id, address, lat, lng, duration_minutes, fixed_time) VALUES ($1, $2, $3, $4, $5, $6)")
-        .bind(id)
-        .bind(&address)
-        .bind(coords.map(|c| c.0))
-        .bind(coords.map(|c| c.1))
-        .bind(b.duration_minutes)
-        .bind(fixed.is_some())
+    sqlx::query!("INSERT INTO field_visits (activity_id, address, lat, lng, duration_minutes, fixed_time) VALUES ($1, $2, $3, $4, $5, $6)", id, address.clone(), coords.map(|c| c.0), coords.map(|c| c.1), b.duration_minutes, fixed.is_some())
         .execute(&mut *tx)
         .await?;
     timeline(&mut *tx, b.item_id, "activity", Some(auth.id), Some(subject.clone()), json!({ "activity_id": id, "kind": "visit", "event": "created" })).await?;
@@ -420,7 +399,7 @@ async fn plan(State(state): State<AppState>, auth: AuthUser, Json(b): Json<PlanI
             if let Some((la, lo)) = geocode(&state, a).await {
                 v.lat = Some(la);
                 v.lng = Some(lo);
-                sqlx::query("UPDATE field_visits SET lat = $2, lng = $3 WHERE activity_id = $1").bind(v.id).bind(la).bind(lo).execute(&state.db).await?;
+                sqlx::query!("UPDATE field_visits SET lat = $2, lng = $3 WHERE activity_id = $1", v.id, la, lo).execute(&state.db).await?;
             }
         }
     }
@@ -470,13 +449,13 @@ async fn plan(State(state): State<AppState>, auth: AuthUser, Json(b): Json<PlanI
     }
     let mut tx = state.db.begin().await?;
     for (id, (st, en)) in &planned {
-        sqlx::query("UPDATE crm_activities SET starts_at = $2, ends_at = $3, deadline = $2, updated_at = now() WHERE id = $1").bind(id).bind(st).bind(en).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE crm_activities SET starts_at = $2, ends_at = $3, deadline = $2, updated_at = now() WHERE id = $1", id, st, en).execute(&mut *tx).await?;
     }
     // The order of the whole day, by time.
     let mut all: Vec<(Uuid, DateTime<Utc>)> = vs.iter().map(|v| (v.id, planned.get(&v.id).map(|p| p.0).or(v.starts_at).unwrap_or(cursor))).collect();
     all.sort_by_key(|a| a.1);
     for (i, (id, _)) in all.iter().enumerate() {
-        sqlx::query("UPDATE field_visits SET route_order = $2 WHERE activity_id = $1").bind(id).bind(i as i32 + 1).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE field_visits SET route_order = $2 WHERE activity_id = $1", id, i as i32 + 1).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     let vs = visits_of(&state, user, b.date).await?;
@@ -492,10 +471,7 @@ struct Where {
 }
 
 async fn own_visit(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(Uuid, Option<f64>, Option<f64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String)> {
-    let row: Option<(Uuid, Uuid, Option<f64>, Option<f64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String)> = sqlx::query_as(
-        "SELECT a.item_id, a.responsible_id, v.lat, v.lng, v.checked_in_at, v.checked_out_at, a.subject FROM crm_activities a JOIN field_visits v ON v.activity_id = a.id WHERE a.id = $1",
-    )
-    .bind(id)
+    let row: Option<(Uuid, Uuid, Option<f64>, Option<f64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>, String)> = sqlx::query!(r#"SELECT a.item_id, a.responsible_id, v.lat, v.lng, v.checked_in_at, v.checked_out_at, a.subject FROM crm_activities a JOIN field_visits v ON v.activity_id = a.id WHERE a.id = $1"#, id).map(|r| (r.item_id, r.responsible_id, r.lat, r.lng, r.checked_in_at, r.checked_out_at, r.subject))
     .fetch_optional(&state.db)
     .await?;
     let (item, who, lat, lng, cin, cout, subject) = row.ok_or(AppError::NotFound("visit"))?;
@@ -524,12 +500,7 @@ async fn check_in(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         (Some(p), Some(v)) => Some((km(p, v) * 1000.0).round() as i32),
         _ => None,
     };
-    sqlx::query("UPDATE field_visits SET checked_in_at = now(), in_lat = $2, in_lng = $3, in_accuracy_m = $4, in_distance_m = $5 WHERE activity_id = $1")
-        .bind(id)
-        .bind(p.map(|x| x.0))
-        .bind(p.map(|x| x.1))
-        .bind(w.accuracy_m)
-        .bind(dist)
+    sqlx::query!("UPDATE field_visits SET checked_in_at = now(), in_lat = $2, in_lng = $3, in_accuracy_m = $4, in_distance_m = $5 WHERE activity_id = $1", id, p.map(|x| x.0), p.map(|x| x.1), w.accuracy_m, dist)
         .execute(&state.db)
         .await?;
     timeline(&state.db, item, "activity", Some(auth.id), Some(subject), json!({ "activity_id": id, "kind": "visit", "event": "checked_in", "distance_m": dist })).await?;
@@ -546,18 +517,14 @@ async fn check_out(State(state): State<AppState>, auth: AuthUser, Path(id): Path
     let p = check_point(&w)?;
     let notes = w.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(|n| n.chars().take(5000).collect::<String>());
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE field_visits SET checked_out_at = now(), out_lat = $2, out_lng = $3, notes = $4 WHERE activity_id = $1")
-        .bind(id)
-        .bind(p.map(|x| x.0))
-        .bind(p.map(|x| x.1))
-        .bind(&notes)
+    sqlx::query!("UPDATE field_visits SET checked_out_at = now(), out_lat = $2, out_lng = $3, notes = $4 WHERE activity_id = $1", id, p.map(|x| x.0), p.map(|x| x.1), notes.as_deref())
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE crm_activities SET is_completed = TRUE, completed_at = now(), result = $2, updated_at = now() WHERE id = $1").bind(id).bind(&notes).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE crm_activities SET is_completed = TRUE, completed_at = now(), result = $2, updated_at = now() WHERE id = $1", id, notes.as_deref()).execute(&mut *tx).await?;
     let minutes = (Utc::now() - cin).num_minutes();
     timeline(&mut *tx, item, "activity", Some(auth.id), Some(format!("{subject}: {minutes} min on site{}", notes.as_deref().map(|n| format!(". {n}")).unwrap_or_default())),
         json!({ "activity_id": id, "kind": "visit", "event": "completed", "minutes": minutes })).await?;
-    sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(item).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", item).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(json!({ "done": true, "minutes": minutes })))
 }

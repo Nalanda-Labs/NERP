@@ -94,13 +94,13 @@ fn validate(key: &str, value: &Value) -> AppResult<()> {
 
 /// Whether the company requires two-step sign-in for everyone.
 pub async fn two_factor_required(state: &AppState) -> AppResult<bool> {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'require_two_factor'").fetch_optional(&state.db).await?;
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'require_two_factor'").fetch_optional(&state.db).await?;
     Ok(v.and_then(|v| v.as_bool()).unwrap_or(false))
 }
 
 pub(crate) async fn load(state: &AppState) -> AppResult<Map<String, Value>> {
     let mut out = defaults();
-    let rows: Vec<(String, Value)> = sqlx::query_as("SELECT key, value FROM settings")
+    let rows: Vec<(String, Value)> = sqlx::query!(r#"SELECT key, value FROM settings"#).map(|r| (r.key, r.value))
         .fetch_all(&state.db)
         .await?;
     for (k, v) in rows {
@@ -123,7 +123,7 @@ async fn get_settings(State(state): State<AppState>, auth: AuthUser) -> AppResul
 
 /// Whether links anyone can open are allowed.
 pub async fn public_links_allowed(state: &AppState) -> AppResult<bool> {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'public_links'").fetch_optional(&state.db).await?;
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'public_links'").fetch_optional(&state.db).await?;
     Ok(v.and_then(|v| v.as_bool()).unwrap_or(true))
 }
 
@@ -157,12 +157,8 @@ async fn put_settings(
             Value::String(s) => Value::String(s.trim().to_string()),
             other => other.clone(),
         };
-        sqlx::query(
-            "INSERT INTO settings (key, value) VALUES ($1, $2)
-             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
-        )
-        .bind(k)
-        .bind(v)
+        sqlx::query!("INSERT INTO settings (key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", k, v)
         .execute(&mut *tx)
         .await?;
     }

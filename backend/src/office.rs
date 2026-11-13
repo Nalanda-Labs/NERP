@@ -58,7 +58,7 @@ fn ext_of(name: &str) -> String {
 
 /// The PDF made from an office file (made the first time it's asked for).
 pub async fn preview_pdf(state: &AppState, file: Uuid) -> AppResult<Uuid> {
-    if let Some(pdf) = sqlx::query_scalar::<_, Uuid>("SELECT pdf_id FROM file_previews WHERE file_id = $1").bind(file).fetch_optional(&state.db).await? {
+    if let Some(pdf) = sqlx::query_scalar!("SELECT pdf_id FROM file_previews WHERE file_id = $1", file).fetch_optional(&state.db).await? {
         return Ok(pdf);
     }
     let (name, _mime, _, bytes) = crate::routes::files::read_bytes(state, file).await?;
@@ -70,9 +70,9 @@ pub async fn preview_pdf(state: &AppState, file: Uuid) -> AppResult<Uuid> {
     let pdf = crate::crm::docs::office::convert(&c.soffice_bin, &bytes, &ext, "pdf", c.timeout_secs).await.map_err(|e| AppError::bad(format!("the preview could not be made: {e}")))?;
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(&name);
     let id = crate::routes::files::store_bytes(state, None, &format!("{stem}.pdf"), "application/pdf", &pdf).await?;
-    sqlx::query("INSERT INTO file_previews (file_id, pdf_id) VALUES ($1, $2) ON CONFLICT (file_id) DO NOTHING").bind(file).bind(id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO file_previews (file_id, pdf_id) VALUES ($1, $2) ON CONFLICT (file_id) DO NOTHING", file, id).execute(&state.db).await?;
     // Two at once: keep the one stored first.
-    Ok(sqlx::query_scalar("SELECT pdf_id FROM file_previews WHERE file_id = $1").bind(file).fetch_one(&state.db).await?)
+    Ok(sqlx::query_scalar!("SELECT pdf_id FROM file_previews WHERE file_id = $1", file).fetch_one(&state.db).await?)
 }
 
 /// A PDF preview of a file the person may read.
@@ -221,8 +221,7 @@ async fn verify(state: &AppState, t: &str, node: Uuid) -> AppResult<Token> {
         if n != node || !crate::routes::settings::public_links_allowed(state).await? {
             return Err(AppError::Unauthorized);
         }
-        let row: Option<(Uuid, bool, Option<Uuid>)> = sqlx::query_as("SELECT node_id, can_edit, created_by FROM drive_links WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())")
-            .bind(link)
+        let row: Option<(Uuid, bool, Option<Uuid>)> = sqlx::query!(r#"SELECT node_id, can_edit, created_by FROM drive_links WHERE id = $1 AND (expires_at IS NULL OR expires_at > now())"#, link).map(|r| (r.node_id, r.can_edit, r.created_by))
             .fetch_optional(&state.db)
             .await?;
         return match row {
@@ -342,7 +341,7 @@ impl TokenQuery {
 /// What a WOPI id is: a drive item, else an attachment (a stored file on a task, message or
 /// post). Returns the file as the editor sees it and whether it is an attachment.
 async fn target(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(crate::drive::OfficeFile, bool)> {
-    let is_node: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM drive_nodes WHERE id = $1)").bind(id).fetch_one(&state.db).await?;
+    let is_node: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM drive_nodes WHERE id = $1) AS "v!""#, id).fetch_one(&state.db).await?;
     if is_node {
         Ok((crate::drive::office_file(state, auth, id).await?, false))
     } else {
@@ -352,7 +351,7 @@ async fn target(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<(crate
 
 /// The person a token stands for, with their permissions now (so revoked access counts).
 async fn person(state: &AppState, t: &Token) -> AppResult<(AuthUser, String)> {
-    let row: Option<(String, bool)> = sqlx::query_as("SELECT trim(first_name || ' ' || last_name), is_active FROM users WHERE id = $1").bind(t.user).fetch_optional(&state.db).await?;
+    let row: Option<(String, bool)> = sqlx::query!(r#"SELECT trim(first_name || ' ' || last_name) AS "c0!", is_active AS "is_active!" FROM users WHERE id = $1"#, t.user).map(|r| (r.c0, r.is_active)).fetch_optional(&state.db).await?;
     let Some((name, true)) = row else { return Err(AppError::Unauthorized) };
     let perms = crate::auth::load_permissions(state, t.user).await?;
     Ok((AuthUser { id: t.user, session_id: Uuid::nil(), permissions: perms.into_iter().collect() }, name))

@@ -7,6 +7,10 @@ edition = "2024"
 name = "nerp"
 path = "src/main.rs"
 
+[[bin]]
+name = "nerp-migrate"
+path = "src/bin/nerp-migrate.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 argon2 = "0.6.0"

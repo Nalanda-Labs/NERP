@@ -79,19 +79,15 @@ async fn can_manage(state: &AppState, auth: &AuthUser, f: &FlowRow) -> AppResult
 /// Numbers for a flow over the last 30 days.
 async fn stats(state: &AppState, f: &FlowRow) -> AppResult<Value> {
     #[allow(clippy::type_complexity)]
-    let (waiting, at_work, done, done_in_time, avg_wait, avg_done): (i64, i64, i64, i64, Option<f64>, Option<f64>) = sqlx::query_as(
-        "SELECT
-            COUNT(*) FILTER (WHERE status IN ('new','deferred','review') OR flow_waiting) AS waiting,
-            COUNT(*) FILTER (WHERE status = 'in_progress' AND NOT flow_waiting) AS at_work,
-            COUNT(*) FILTER (WHERE status = 'done' AND completed_at > now() - interval '30 days') AS done,
+    let (waiting, at_work, done, done_in_time, avg_wait, avg_done): (i64, i64, i64, i64, Option<f64>, Option<f64>) = sqlx::query!(r#"SELECT
+            COUNT(*) FILTER (WHERE status IN ('new','deferred','review') OR flow_waiting) AS "waiting!",
+            COUNT(*) FILTER (WHERE status = 'in_progress' AND NOT flow_waiting) AS "at_work!",
+            COUNT(*) FILTER (WHERE status = 'done' AND completed_at > now() - interval '30 days') AS "done!",
             COUNT(*) FILTER (WHERE status = 'done' AND completed_at > now() - interval '30 days'
-                             AND ($2::int IS NULL OR completed_at - created_at <= make_interval(secs => $2))) AS done_in_time,
-            (AVG(EXTRACT(EPOCH FROM (started_at - created_at)) / 3600) FILTER (WHERE started_at IS NOT NULL AND created_at > now() - interval '30 days'))::float8 AS avg_wait,
-            (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) / 3600) FILTER (WHERE status = 'done' AND completed_at > now() - interval '30 days'))::float8 AS avg_done
-         FROM tasks WHERE flow_id = $1",
-    )
-    .bind(f.id)
-    .bind(f.planned_secs)
+                             AND ($2::int IS NULL OR completed_at - created_at <= make_interval(secs => $2))) AS "done_in_time!",
+            (AVG(EXTRACT(EPOCH FROM (started_at - created_at)) / 3600) FILTER (WHERE started_at IS NOT NULL AND created_at > now() - interval '30 days'))::float8 AS "avg_wait?",
+            (AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) / 3600) FILTER (WHERE status = 'done' AND completed_at > now() - interval '30 days'))::float8 AS "avg_done?"
+         FROM tasks WHERE flow_id = $1"#, f.id, f.planned_secs).map(|r| (r.waiting, r.at_work, r.done, r.done_in_time, r.avg_wait, r.avg_done))
     .fetch_one(&state.db)
     .await?;
     let round = |x: f64| (x * 10.0).round() / 10.0;
@@ -112,13 +108,9 @@ async fn view(state: &AppState, auth: &AuthUser, f: FlowRow, full: bool) -> AppR
     });
     if full {
         // The team, with each person's open tasks in the flow.
-        let team: Vec<(Uuid, String, Option<Uuid>, i64)> = sqlx::query_as(
-            "SELECT u.id, trim(u.first_name || ' ' || u.last_name), u.avatar_file_id,
-                    (SELECT COUNT(*) FROM tasks t WHERE t.flow_id = $2 AND t.responsible_id = u.id AND NOT t.flow_waiting AND t.status IN ('new','in_progress','review'))
-             FROM users u WHERE u.id = ANY($1) ORDER BY u.first_name",
-        )
-        .bind(&f.team)
-        .bind(f.id)
+        let team: Vec<(Uuid, String, Option<Uuid>, i64)> = sqlx::query!(r#"SELECT u.id AS "id!", trim(u.first_name || ' ' || u.last_name) AS "c1!", u.avatar_file_id AS "avatar_file_id?",
+                    (SELECT COUNT(*) FROM tasks t WHERE t.flow_id = $2 AND t.responsible_id = u.id AND NOT t.flow_waiting AND t.status IN ('new','in_progress','review')) AS "c3!"
+             FROM users u WHERE u.id = ANY($1) ORDER BY u.first_name"#, &f.team, f.id).map(|r| (r.id, r.c1, r.avatar_file_id, r.c3))
         .fetch_all(&state.db)
         .await?;
         v["members"] = json!(team.into_iter().map(|(id, n, a, open)| json!({ "id": id, "full_name": n, "avatar_file_id": a, "open": open })).collect::<Vec<_>>());
@@ -164,7 +156,7 @@ struct FlowInput {
 }
 
 async fn check_people(state: &AppState, ids: &[Uuid]) -> AppResult<()> {
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(ids).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, ids).fetch_one(&state.db).await?;
     if n as usize != ids.len() {
         return Err(AppError::bad("the team must be active employees"));
     }
@@ -198,17 +190,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Flo
     }
     let owner = b.owner_id.unwrap_or(auth.id);
     check_people(&state, &[owner]).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO task_flows (project_id, name, description, owner_id, distribution, team, planned_secs, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-    )
-    .bind(project)
-    .bind(name)
-    .bind(clean(b.description.flatten()))
-    .bind(owner)
-    .bind(&distribution)
-    .bind(&team)
-    .bind(planned(b.planned_hours.flatten())?)
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO task_flows (project_id, name, description, owner_id, distribution, team, planned_secs, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id", project, name, clean(b.description.flatten()), owner, &distribution, &team, planned(b.planned_hours.flatten())?, auth.id)
     .fetch_one(&state.db)
     .await?;
     detail(State(state), auth, Path(id)).await
@@ -220,32 +202,32 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         return Err(AppError::Forbidden);
     }
     if let Some(n) = &b.name {
-        sqlx::query("UPDATE task_flows SET name = $2 WHERE id = $1").bind(id).bind(required("name", n, 200)?).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_flows SET name = $2 WHERE id = $1", id, required("name", n, 200)?).execute(&state.db).await?;
     }
     if let Some(d) = b.description {
-        sqlx::query("UPDATE task_flows SET description = $2 WHERE id = $1").bind(id).bind(clean(d)).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_flows SET description = $2 WHERE id = $1", id, clean(d)).execute(&state.db).await?;
     }
     if let Some(o) = b.owner_id {
         check_people(&state, &[o]).await?;
-        sqlx::query("UPDATE task_flows SET owner_id = $2 WHERE id = $1").bind(id).bind(o).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_flows SET owner_id = $2 WHERE id = $1", id, o).execute(&state.db).await?;
     }
     if let Some(d) = &b.distribution {
         if !["manual", "queue", "self"].contains(&d.as_str()) {
             return Err(AppError::bad("distribution must be manual, queue or self"));
         }
-        sqlx::query("UPDATE task_flows SET distribution = $2 WHERE id = $1").bind(id).bind(d).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_flows SET distribution = $2 WHERE id = $1", id, d).execute(&state.db).await?;
     }
     if let Some(mut t) = b.team {
         t.sort();
         t.dedup();
         check_people(&state, &t).await?;
-        sqlx::query("UPDATE task_flows SET team = $2 WHERE id = $1").bind(id).bind(&t).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_flows SET team = $2 WHERE id = $1", id, &t).execute(&state.db).await?;
     }
     if let Some(h) = b.planned_hours {
-        sqlx::query("UPDATE task_flows SET planned_secs = $2 WHERE id = $1").bind(id).bind(planned(h)?).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_flows SET planned_secs = $2 WHERE id = $1", id, planned(h)?).execute(&state.db).await?;
     }
     if let Some(a) = b.is_active {
-        sqlx::query("UPDATE task_flows SET is_active = $2 WHERE id = $1").bind(id).bind(a).execute(&state.db).await?;
+        sqlx::query!("UPDATE task_flows SET is_active = $2 WHERE id = $1", id, a).execute(&state.db).await?;
     }
     detail(State(state), auth, Path(id)).await
 }
@@ -256,7 +238,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         return Err(AppError::Forbidden);
     }
     // Its tasks stay, out of the flow.
-    sqlx::query("DELETE FROM task_flows WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_flows WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -280,7 +262,7 @@ async fn tasks(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uui
         _ => qb.push(" ORDER BY t.created_at DESC LIMIT 300"),
     };
     let items: Vec<TaskSummary> = qb.build_query_as().fetch_all(&state.db).await?;
-    let waiting: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM tasks WHERE flow_id = $1 AND flow_waiting").bind(id).fetch_all(&state.db).await?;
+    let waiting: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM tasks WHERE flow_id = $1 AND flow_waiting", id).fetch_all(&state.db).await?;
     let items: Vec<Value> = items
         .into_iter()
         .map(|t| {
@@ -307,14 +289,10 @@ struct NewFlowTask {
 async fn assignee(state: &AppState, f: &FlowRow) -> AppResult<(Uuid, bool)> {
     match f.distribution.as_str() {
         "queue" if !f.team.is_empty() => {
-            let next: Uuid = sqlx::query_scalar(
-                "SELECT u FROM unnest($1::uuid[]) u JOIN users x ON x.id = u AND x.is_active
+            let next: Uuid = sqlx::query_scalar!(r#"SELECT u AS "u!" FROM unnest($1::uuid[]) u JOIN users x ON x.id = u AND x.is_active
                  ORDER BY (SELECT COUNT(*) FROM tasks t WHERE t.flow_id = $2 AND t.responsible_id = u AND t.status IN ('new','in_progress','review')),
                           (SELECT MAX(t.created_at) FROM tasks t WHERE t.flow_id = $2 AND t.responsible_id = u) ASC NULLS FIRST
-                 LIMIT 1",
-            )
-            .bind(&f.team)
-            .bind(f.id)
+                 LIMIT 1"#, &f.team, f.id)
             .fetch_optional(&state.db)
             .await?
             .unwrap_or(f.owner_id);
@@ -343,20 +321,14 @@ async fn add_task(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
         ..Default::default()
     })
     .await?;
-    sqlx::query(
-        "UPDATE tasks SET project_id = $2, flow_id = $3, flow_waiting = $4,
+    sqlx::query!("UPDATE tasks SET project_id = $2, flow_id = $3, flow_waiting = $4,
            stage_id = (SELECT id FROM project_stages WHERE project_id = $2 ORDER BY (status IS NOT DISTINCT FROM 'new') DESC, sort LIMIT 1)
-         WHERE id = $1",
-    )
-    .bind(task)
-    .bind(f.project_id)
-    .bind(f.id)
-    .bind(waiting)
+         WHERE id = $1", task, f.project_id, f.id, waiting)
     .execute(&state.db)
     .await?;
     record_history(&state.db, task, auth.id, "flow", None, Some(f.name.clone())).await?;
     if waiting && f.distribution == "self" {
-        let title: String = sqlx::query_scalar("SELECT title FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+        let title: String = sqlx::query_scalar!("SELECT title FROM tasks WHERE id = $1", task).fetch_one(&state.db).await?;
         notify_task(&state, &f.team, "flow.waiting", format!("A task is waiting in {}: {title}", f.name), None, task, auth.id).await;
     }
     broadcast_changed(&state, task, Some(f.project_id), false).await;
@@ -365,7 +337,7 @@ async fn add_task(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 
 /// Someone in the team takes a waiting task (self-service flows), or the administrator does.
 async fn take(State(state): State<AppState>, auth: AuthUser, Path(task): Path<Uuid>) -> AppResult<Json<TaskDetail>> {
-    let row: Option<(Option<Uuid>, bool)> = sqlx::query_as("SELECT flow_id, flow_waiting FROM tasks WHERE id = $1").bind(task).fetch_optional(&state.db).await?;
+    let row: Option<(Option<Uuid>, bool)> = sqlx::query!(r#"SELECT flow_id, flow_waiting FROM tasks WHERE id = $1"#, task).map(|r| (r.flow_id, r.flow_waiting)).fetch_optional(&state.db).await?;
     let Some((Some(flow), waiting)) = row else { return Err(AppError::NotFound("task")) };
     let f = load(&state, flow).await?;
     if !f.team.contains(&auth.id) && f.owner_id != auth.id {
@@ -374,16 +346,14 @@ async fn take(State(state): State<AppState>, auth: AuthUser, Path(task): Path<Uu
     if !waiting {
         return Err(AppError::bad("someone already has this task"));
     }
-    let taken = sqlx::query("UPDATE tasks SET responsible_id = $2, flow_waiting = FALSE, updated_at = now() WHERE id = $1 AND flow_waiting")
-        .bind(task)
-        .bind(auth.id)
+    let taken = sqlx::query!("UPDATE tasks SET responsible_id = $2, flow_waiting = FALSE, updated_at = now() WHERE id = $1 AND flow_waiting", task, auth.id)
         .execute(&state.db)
         .await?
         .rows_affected();
     if taken == 0 {
         return Err(AppError::bad("someone already has this task"));
     }
-    sqlx::query("DELETE FROM task_members WHERE task_id = $1 AND user_id = $2").bind(task).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM task_members WHERE task_id = $1 AND user_id = $2", task, auth.id).execute(&state.db).await?;
     record_history(&state.db, task, auth.id, "responsible", Some(user_name(&state, f.owner_id).await), Some(user_name(&state, auth.id).await)).await?;
     broadcast_changed(&state, task, Some(f.project_id), false).await;
     load_task(&state, &auth, task).await?;

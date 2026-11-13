@@ -227,12 +227,8 @@ const SOURCES: &[Source] = &[
 ];
 
 async fn matched_items(state: &AppState, email: &str, phone: &str) -> AppResult<Vec<Uuid>> {
-    Ok(sqlx::query_scalar(
-        "SELECT DISTINCT m.item_id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
-         WHERE (m.kind = 'email' AND m.normalized = $1) OR (m.kind = 'phone' AND $2 <> '' AND m.normalized = $2)",
-    )
-    .bind(email)
-    .bind(phone)
+    Ok(sqlx::query_scalar!("SELECT DISTINCT m.item_id FROM crm_multifields m JOIN crm_items i ON i.id = m.item_id
+         WHERE (m.kind = 'email' AND m.normalized = $1) OR (m.kind = 'phone' AND $2 <> '' AND m.normalized = $2)", email, phone)
     .fetch_all(&state.db)
     .await?)
 }
@@ -296,17 +292,8 @@ fn check_new(b: &NewRequest) -> AppResult<String> {
 async fn create(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): ClientIp, Json(b): Json<NewRequest>) -> AppResult<Json<Request>> {
     auth.require(PERM)?;
     let email = check_new(&b)?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO privacy_requests (kind, email, phone, name, message, source, status, verified_at, due_at, created_by)
-         VALUES ($1, $2, NULLIF(trim($3), ''), NULLIF(trim($4), ''), NULLIF(trim($5), ''), 'staff', 'open', now(), now() + make_interval(days => $6::int), $7) RETURNING id",
-    )
-    .bind(&b.kind)
-    .bind(&email)
-    .bind(&b.phone)
-    .bind(&b.name)
-    .bind(&b.message)
-    .bind(DUE_DAYS as i32)
-    .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO privacy_requests (kind, email, phone, name, message, source, status, verified_at, due_at, created_by)
+         VALUES ($1, $2, NULLIF(trim($3), ''), NULLIF(trim($4), ''), NULLIF(trim($5), ''), 'staff', 'open', now(), now() + make_interval(days => $6::int), $7) RETURNING id", &b.kind, &email, b.phone.as_deref(), b.name.as_deref(), b.message.as_deref(), DUE_DAYS as i32, auth.id)
     .fetch_one(&state.db)
     .await?;
     audit::record(&state.db, Some(auth.id), "privacy.request", "privacy_request", Some(id.to_string()), json!({ "kind": b.kind }), ip.as_deref()).await;
@@ -376,15 +363,9 @@ async fn update(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Cli
             return Err(AppError::bad("the person hasn't confirmed the request yet"));
         }
     }
-    sqlx::query(
-        "UPDATE privacy_requests SET status = COALESCE($2, status), note = COALESCE($3, note),
+    sqlx::query!("UPDATE privacy_requests SET status = COALESCE($2, status), note = COALESCE($3, note),
                 decided_by = CASE WHEN $2 IN ('done', 'rejected') THEN $4 ELSE decided_by END,
-                decided_at = CASE WHEN $2 IN ('done', 'rejected') THEN now() ELSE decided_at END WHERE id = $1",
-    )
-    .bind(id)
-    .bind(&b.status)
-    .bind(b.note.as_deref().map(str::trim))
-    .bind(auth.id)
+                decided_at = CASE WHEN $2 IN ('done', 'rejected') THEN now() ELSE decided_at END WHERE id = $1", id, b.status.as_deref(), b.note.as_deref().map(str::trim), auth.id)
     .execute(&state.db)
     .await?;
     if let Some(st) = &b.status {
@@ -526,17 +507,11 @@ async fn erase(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clie
     done("books", Action::Keep, 0);
     done("staff", Action::Keep, 0);
     // Not to be emailed again.
-    sqlx::query("INSERT INTO mkt_optouts (email, source, created_by) SELECT $1, 'erasure', $2 WHERE NOT EXISTS (SELECT 1 FROM mkt_optouts WHERE lower(email) = $1)")
-        .bind(&email)
-        .bind(auth.id)
+    sqlx::query!("INSERT INTO mkt_optouts (email, source, created_by) SELECT $1, 'erasure', $2 WHERE NOT EXISTS (SELECT 1 FROM mkt_optouts WHERE lower(email) = $1)", &email, auth.id)
         .execute(&mut *tx)
         .await?;
     done("optout", Action::Keep, 1);
-    sqlx::query("UPDATE privacy_requests SET status = 'done', outcome = $2, decided_by = $3, decided_at = now(), note = COALESCE(NULLIF(trim($4), ''), note) WHERE id = $1")
-        .bind(id)
-        .bind(Value::Object(outcome.clone()))
-        .bind(auth.id)
-        .bind(&b.note)
+    sqlx::query!("UPDATE privacy_requests SET status = 'done', outcome = $2, decided_by = $3, decided_at = now(), note = COALESCE(NULLIF(trim($4), ''), note) WHERE id = $1", id, Value::Object(outcome.clone()), auth.id, b.note.as_deref())
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -553,10 +528,7 @@ async fn erase(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clie
 /// (deals and invoices keep pointing at them). Returns how many and the files to discard
 /// once committed (their rows are already gone).
 pub async fn anonymise_crm(tx: &mut sqlx::PgConnection, items: &[Uuid]) -> sqlx::Result<(u64, Vec<(Uuid, String)>)> {
-    let files: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT f.id, f.storage_path FROM files f WHERE f.id IN (SELECT unnest(file_ids) FROM crm_timeline WHERE item_id = ANY($1) AND kind = 'comment' AND file_ids IS NOT NULL)",
-    )
-    .bind(items)
+    let files: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT f.id, f.storage_path FROM files f WHERE f.id IN (SELECT unnest(file_ids) FROM crm_timeline WHERE item_id = ANY($1) AND kind = 'comment' AND file_ids IS NOT NULL)"#, items).map(|r| (r.id, r.storage_path))
     .fetch_all(&mut *tx)
     .await?;
     for q in [
@@ -567,19 +539,16 @@ pub async fn anonymise_crm(tx: &mut sqlx::PgConnection, items: &[Uuid]) -> sqlx:
     ] {
         sqlx::query(q).bind(items).execute(&mut *tx).await?;
     }
-    let n = sqlx::query(
-        "UPDATE crm_items SET honorific = NULL, first_name = CASE WHEN entity_type = 3 OR first_name IS NOT NULL THEN 'Erased' END, middle_name = NULL, last_name = NULL,
+    let n = sqlx::query!("UPDATE crm_items SET honorific = NULL, first_name = CASE WHEN entity_type = 3 OR first_name IS NOT NULL THEN 'Erased' END, middle_name = NULL, last_name = NULL,
                 company_name = CASE WHEN company_name IS NOT NULL THEN 'Erased' END, title = CASE WHEN entity_type IN (1, 3, 4) THEN 'Erased' ELSE title END,
                 job_title = NULL, birthdate = NULL, address = NULL, comments = NULL, uf = '{}'::jsonb, source_details = NULL, utm = NULL, search_text = '',
                 deleted_at = COALESCE(deleted_at, now()), updated_at = now()
-         WHERE id = ANY($1)",
-    )
-    .bind(items)
+         WHERE id = ANY($1)", items)
     .execute(&mut *tx)
     .await?
     .rows_affected();
     let ids: Vec<Uuid> = files.iter().map(|f| f.0).collect();
-    sqlx::query("DELETE FROM files WHERE id = ANY($1)").bind(&ids).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM files WHERE id = ANY($1)", &ids).execute(&mut *tx).await?;
     Ok((n, files))
 }
 
@@ -611,14 +580,7 @@ async fn public_request(State(state): State<AppState>, ClientIp(ip): ClientIp, J
     }
     let token = crate::auth::tokens::random_token(32);
     let hash = hex::encode(Sha256::digest(token.as_bytes()));
-    sqlx::query(
-        "INSERT INTO privacy_requests (kind, email, name, message, source, status, verify_hash) VALUES ($1, $2, NULLIF(trim($3), ''), NULLIF(trim($4), ''), 'public', 'unverified', $5)",
-    )
-    .bind(&b.kind)
-    .bind(&email)
-    .bind(&b.name)
-    .bind(&b.message)
-    .bind(&hash)
+    sqlx::query!("INSERT INTO privacy_requests (kind, email, name, message, source, status, verify_hash) VALUES ($1, $2, NULLIF(trim($3), ''), NULLIF(trim($4), ''), 'public', 'unverified', $5)", &b.kind, &email, b.name.as_deref(), b.message.as_deref(), &hash)
     .execute(&state.db)
     .await?;
     let company = crate::routes::auth::company_name(&state).await;
@@ -644,21 +606,14 @@ struct VerifyInput {
 
 async fn public_verify(State(state): State<AppState>, Json(b): Json<VerifyInput>) -> AppResult<Json<Value>> {
     let hash = hex::encode(Sha256::digest(b.token.trim().as_bytes()));
-    let row: Option<(Uuid, String)> = sqlx::query_as(
-        "UPDATE privacy_requests SET status = 'open', verified_at = now(), due_at = now() + make_interval(days => $2::int), verify_hash = NULL
-         WHERE verify_hash = $1 AND status = 'unverified' AND created_at > now() - interval '7 days' RETURNING id, kind",
-    )
-    .bind(&hash)
-    .bind(DUE_DAYS as i32)
+    let row: Option<(Uuid, String)> = sqlx::query!(r#"UPDATE privacy_requests SET status = 'open', verified_at = now(), due_at = now() + make_interval(days => $2::int), verify_hash = NULL
+         WHERE verify_hash = $1 AND status = 'unverified' AND created_at > now() - interval '7 days' RETURNING id, kind"#, &hash, DUE_DAYS as i32).map(|r| (r.id, r.kind))
     .fetch_optional(&state.db)
     .await?;
     let Some((id, kind)) = row else { return Err(AppError::NotFound("request")) };
     // Tell those who handle requests.
-    let people: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id JOIN users u ON u.id = ur.user_id
-         WHERE rp.permission IN ('*', $1) AND u.is_active AND NOT u.is_guest",
-    )
-    .bind(PERM)
+    let people: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT ur.user_id FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id JOIN users u ON u.id = ur.user_id
+         WHERE rp.permission IN ('*', $1) AND u.is_active AND NOT u.is_guest", PERM)
     .fetch_all(&state.db)
     .await?;
     crate::notify::notify(

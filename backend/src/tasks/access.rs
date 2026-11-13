@@ -168,12 +168,8 @@ pub struct ProjectAccess {
 }
 
 pub async fn project_access(state: &AppState, auth: &AuthUser, project: Uuid) -> AppResult<ProjectAccess> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT p.visibility, (SELECT role FROM project_members WHERE project_id = p.id AND user_id = $2)
-         FROM projects p WHERE p.id = $1",
-    )
-    .bind(project)
-    .bind(auth.id)
+    let row: Option<(String, Option<String>)> = sqlx::query!(r#"SELECT p.visibility, (SELECT role FROM project_members WHERE project_id = p.id AND user_id = $2) AS "c1"
+         FROM projects p WHERE p.id = $1"#, project, auth.id).map(|r| (r.visibility, r.c1))
     .fetch_optional(&state.db)
     .await?;
     let Some((visibility, role)) = row else {
@@ -202,8 +198,7 @@ pub async fn project_access(state: &AppState, auth: &AuthUser, project: Uuid) ->
 /// Appends `AND <project p is visible to user>`.
 /// Whether the user may read a file because it is attached to a task they can see.
 pub async fn can_view_task_file(state: &AppState, auth: &AuthUser, file: Uuid) -> AppResult<bool> {
-    let tasks: Vec<Uuid> = sqlx::query_scalar("SELECT task_id FROM task_files WHERE file_id = $1")
-        .bind(file)
+    let tasks: Vec<Uuid> = sqlx::query_scalar!("SELECT task_id FROM task_files WHERE file_id = $1", file)
         .fetch_all(&state.db)
         .await?;
     for t in tasks {

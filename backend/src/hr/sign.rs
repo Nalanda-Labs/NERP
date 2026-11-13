@@ -60,7 +60,7 @@ fn need_hr(auth: &AuthUser) -> AppResult<()> {
 
 async fn list_templates(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     need_hr(&auth)?;
-    let rows: Vec<(Uuid, String, String, Value, DateTime<Utc>)> = sqlx::query_as("SELECT id, name, body, after_signing, updated_at FROM hr_doc_templates ORDER BY name").fetch_all(&state.db).await?;
+    let rows: Vec<(Uuid, String, String, Value, DateTime<Utc>)> = sqlx::query!(r#"SELECT id, name, body, after_signing, updated_at FROM hr_doc_templates ORDER BY name"#).map(|r| (r.id, r.name, r.body, r.after_signing, r.updated_at)).fetch_all(&state.db).await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(id, n, b, a, u)| json!({ "id": id, "name": n, "body": b, "after_signing": a, "updated_at": u })).collect::<Vec<_>>() })))
 }
 
@@ -79,7 +79,7 @@ async fn check_after(state: &AppState, auth: &AuthUser, v: &Value) -> AppResult<
     let mut out = serde_json::Map::new();
     if let Some(n) = o.get("notify").and_then(Value::as_array).filter(|a| !a.is_empty()) {
         let ids: Vec<Uuid> = n.iter().filter_map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok())).collect();
-        let found: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest").bind(&ids).fetch_one(&state.db).await?;
+        let found: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest"#, &ids).fetch_one(&state.db).await?;
         if ids.len() != n.len() || found as usize != ids.len() || ids.len() > 50 {
             return Err(AppError::bad("tell up to 50 active employees"));
         }
@@ -90,7 +90,7 @@ async fn check_after(state: &AppState, auth: &AuthUser, v: &Value) -> AppResult<
         let resp = t.get("responsible").and_then(Value::as_str).unwrap_or("hr");
         if !["hr", "employee"].contains(&resp) {
             let u = Uuid::parse_str(resp).map_err(|_| AppError::bad("the task goes to HR, the employee, or a chosen employee"))?;
-            let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active AND NOT is_guest)").bind(u).fetch_one(&state.db).await?;
+            let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active AND NOT is_guest) AS "v!""#, u).fetch_one(&state.db).await?;
             if !ok {
                 return Err(AppError::bad("the task's employee isn't active"));
             }
@@ -112,7 +112,7 @@ async fn create_template(State(state): State<AppState>, auth: AuthUser, Json(b):
     let name = required("name", b.name.as_deref().unwrap_or(""), 200)?;
     let body = required("text", b.body.as_deref().unwrap_or(""), 100_000)?;
     let after = check_after(&state, &auth, b.after_signing.as_ref().unwrap_or(&Value::Null)).await?;
-    sqlx::query("INSERT INTO hr_doc_templates (name, body, after_signing, created_by) VALUES ($1, $2, $3, $4)").bind(name).bind(body).bind(after).bind(auth.id).execute(&state.db).await?;
+    sqlx::query!("INSERT INTO hr_doc_templates (name, body, after_signing, created_by) VALUES ($1, $2, $3, $4)", name, body, after, auth.id).execute(&state.db).await?;
     list_templates(State(state), auth).await
 }
 
@@ -124,13 +124,13 @@ async fn update_template(State(state): State<AppState>, auth: AuthUser, Path(id)
         Some(v) => Some(check_after(&state, &auth, v).await?),
         None => None,
     };
-    sqlx::query("UPDATE hr_doc_templates SET name = COALESCE($2, name), body = COALESCE($3, body), after_signing = COALESCE($4, after_signing), updated_at = now() WHERE id = $1").bind(id).bind(name).bind(body).bind(after).execute(&state.db).await?;
+    sqlx::query!("UPDATE hr_doc_templates SET name = COALESCE($2, name), body = COALESCE($3, body), after_signing = COALESCE($4, after_signing), updated_at = now() WHERE id = $1", id, name, body, after).execute(&state.db).await?;
     list_templates(State(state), auth).await
 }
 
 async fn delete_template(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     need_hr(&auth)?;
-    sqlx::query("DELETE FROM hr_doc_templates WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM hr_doc_templates WHERE id = $1", id).execute(&state.db).await?;
     list_templates(State(state), auth).await
 }
 
@@ -151,8 +151,8 @@ const PAGE: &str = r##"#set page(paper: "a4", margin: 2.2cm)
 /// The template's text with an employee's details, as a PDF.
 async fn render(state: &AppState, title: &str, body: &str, employee: Uuid) -> AppResult<Vec<u8>> {
     let (first, last, email, position): (String, String, String, Option<String>) =
-        sqlx::query_as("SELECT first_name, last_name, email, position FROM users WHERE id = $1").bind(employee).fetch_one(&state.db).await?;
-    let dept: Option<String> = sqlx::query_scalar("SELECT d.name FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = $1 ORDER BY d.name LIMIT 1").bind(employee).fetch_optional(&state.db).await?;
+        sqlx::query!(r#"SELECT first_name, last_name, email, position FROM users WHERE id = $1"#, employee).map(|r| (r.first_name, r.last_name, r.email, r.position)).fetch_one(&state.db).await?;
+    let dept: Option<String> = sqlx::query_scalar!("SELECT d.name FROM user_departments ud JOIN departments d ON d.id = ud.department_id WHERE ud.user_id = $1 ORDER BY d.name LIMIT 1", employee).fetch_optional(&state.db).await?;
     let tz = tz_of(state, employee).await?;
     let date = Utc::now().with_timezone(&tz).format("%-d %B %Y").to_string();
     let company = company(state).await;
@@ -213,7 +213,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<New
     let mut people: Vec<Uuid> = b.employee_ids.clone();
     people.extend(&b.approver_ids);
     people.extend(b.company_signer_id);
-    let active: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT id) FROM users WHERE id = ANY($1) AND is_active").bind(&people).fetch_one(&state.db).await?;
+    let active: i64 = sqlx::query_scalar!(r#"SELECT COUNT(DISTINCT id) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &people).fetch_one(&state.db).await?;
     let mut uniq = people.clone();
     uniq.sort();
     uniq.dedup();
@@ -222,7 +222,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<New
     }
     // The source: a template, or a file made into a PDF once.
     let (body, file_pdf): (Option<String>, Option<Vec<u8>>) = match (b.template_id, b.file_id) {
-        (Some(t), _) => (Some(sqlx::query_scalar("SELECT body FROM hr_doc_templates WHERE id = $1").bind(t).fetch_optional(&state.db).await?.ok_or_else(|| AppError::bad("no such template"))?), None),
+        (Some(t), _) => (Some(sqlx::query_scalar!("SELECT body FROM hr_doc_templates WHERE id = $1", t).fetch_optional(&state.db).await?.ok_or_else(|| AppError::bad("no such template"))?), None),
         (None, Some(f)) => {
             let (name, mime, owner, bytes) = read_bytes(&state, f).await?;
             if owner != Some(auth.id) {
@@ -252,34 +252,23 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<New
             (_, Some(p)) => p.clone(),
             _ => unreachable!(),
         };
-        let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(emp).fetch_one(&state.db).await?;
+        let name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, emp).fetch_one(&state.db).await?;
         let fid = store_bytes(&state, None, &format!("{title} — {name}.pdf"), "application/pdf", &pdf).await?;
         let mut tx = state.db.begin().await?;
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO hr_docs (title, template_id, batch_id, employee_id, status, file_id, sha256, due_on, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-        )
-        .bind(&title)
-        .bind(b.template_id)
-        .bind(batch)
-        .bind(emp)
-        .bind(if b.approver_ids.is_empty() { "signing" } else { "approval" })
-        .bind(fid)
-        .bind(sha256_hex(&pdf))
-        .bind(b.due_on)
-        .bind(auth.id)
+        let id: Uuid = sqlx::query_scalar!("INSERT INTO hr_docs (title, template_id, batch_id, employee_id, status, file_id, sha256, due_on, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id", &title, b.template_id, batch, emp, if b.approver_ids.is_empty() { "signing" } else { "approval" }, fid, sha256_hex(&pdf), b.due_on, auth.id)
         .fetch_one(&mut *tx)
         .await?;
         let mut pos = 0;
         for a in &b.approver_ids {
-            sqlx::query("INSERT INTO hr_doc_steps (doc_id, position, user_id, role) VALUES ($1, $2, $3, 'approver')").bind(id).bind(pos).bind(a).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO hr_doc_steps (doc_id, position, user_id, role) VALUES ($1, $2, $3, 'approver')", id, pos, a).execute(&mut *tx).await?;
             pos += 1;
         }
         if let Some(c) = b.company_signer_id.filter(|c| c != emp) {
-            sqlx::query("INSERT INTO hr_doc_steps (doc_id, position, user_id, role) VALUES ($1, $2, $3, 'company')").bind(id).bind(pos).bind(c).execute(&mut *tx).await?;
+            sqlx::query!("INSERT INTO hr_doc_steps (doc_id, position, user_id, role) VALUES ($1, $2, $3, 'company')", id, pos, c).execute(&mut *tx).await?;
             pos += 1;
         }
-        sqlx::query("INSERT INTO hr_doc_steps (doc_id, position, user_id, role) VALUES ($1, $2, $3, 'employee')").bind(id).bind(pos).bind(emp).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO hr_doc_steps (doc_id, position, user_id, role) VALUES ($1, $2, $3, 'employee')", id, pos, emp).execute(&mut *tx).await?;
         tx.commit().await?;
         advance(&state, id).await?;
         made.push(id);
@@ -289,13 +278,13 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<New
 
 /// Gives the next step to its person (and tells them); completes the document when none is left.
 async fn advance(state: &AppState, id: Uuid) -> AppResult<()> {
-    let next: Option<(i32, Uuid, String)> = sqlx::query_as("SELECT position, user_id, role FROM hr_doc_steps WHERE doc_id = $1 AND status <> 'done' ORDER BY position LIMIT 1").bind(id).fetch_optional(&state.db).await?;
-    let (title, emp_name): (String, String) = sqlx::query_as("SELECT d.title, trim(u.first_name || ' ' || u.last_name) FROM hr_docs d JOIN users u ON u.id = d.employee_id WHERE d.id = $1").bind(id).fetch_one(&state.db).await?;
+    let next: Option<(i32, Uuid, String)> = sqlx::query!(r#"SELECT position, user_id, role FROM hr_doc_steps WHERE doc_id = $1 AND status <> 'done' ORDER BY position LIMIT 1"#, id).map(|r| (r.position, r.user_id, r.role)).fetch_optional(&state.db).await?;
+    let (title, emp_name): (String, String) = sqlx::query!(r#"SELECT d.title AS "title!", trim(u.first_name || ' ' || u.last_name) AS "c1!" FROM hr_docs d JOIN users u ON u.id = d.employee_id WHERE d.id = $1"#, id).map(|r| (r.title, r.c1)).fetch_one(&state.db).await?;
     match next {
         Some((pos, user, role)) => {
-            let n = sqlx::query("UPDATE hr_doc_steps SET status = 'pending' WHERE doc_id = $1 AND position = $2 AND status = 'waiting'").bind(id).bind(pos).execute(&state.db).await?.rows_affected();
+            let n = sqlx::query!("UPDATE hr_doc_steps SET status = 'pending' WHERE doc_id = $1 AND position = $2 AND status = 'waiting'", id, pos).execute(&state.db).await?.rows_affected();
             if role != "approver" {
-                sqlx::query("UPDATE hr_docs SET status = 'signing' WHERE id = $1 AND status = 'approval'").bind(id).execute(&state.db).await?;
+                sqlx::query!("UPDATE hr_docs SET status = 'signing' WHERE id = $1 AND status = 'approval'", id).execute(&state.db).await?;
             }
             if n == 1 {
                 let what = match role.as_str() {
@@ -312,17 +301,14 @@ async fn advance(state: &AppState, id: Uuid) -> AppResult<()> {
 }
 
 async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
-    let claimed = sqlx::query("UPDATE hr_docs SET status = 'signed', completed_at = now() WHERE id = $1 AND status = 'signing'").bind(id).execute(&state.db).await?.rows_affected();
+    let claimed = sqlx::query!("UPDATE hr_docs SET status = 'signed', completed_at = now() WHERE id = $1 AND status = 'signing'", id).execute(&state.db).await?.rows_affected();
     if claimed == 0 {
         return Ok(());
     }
     let (title, file, sha, created, completed, employee, by): (String, Uuid, String, DateTime<Utc>, DateTime<Utc>, Uuid, Option<Uuid>) =
-        sqlx::query_as("SELECT title, file_id, sha256, created_at, completed_at, employee_id, created_by FROM hr_docs WHERE id = $1").bind(id).fetch_one(&state.db).await?;
-    let rows: Vec<(String, String, Option<String>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT trim(u.first_name || ' ' || u.last_name), u.email, s.signed_name, s.acted_at, s.ip, s.user_agent, s.signature_file_id
-         FROM hr_doc_steps s JOIN users u ON u.id = s.user_id WHERE s.doc_id = $1 AND s.role <> 'approver' ORDER BY s.position",
-    )
-    .bind(id)
+        sqlx::query!(r#"SELECT title AS "title!", file_id AS "file_id!", sha256 AS "sha256!", created_at AS "created_at!", completed_at AS "completed_at!", employee_id AS "employee_id!", created_by AS "created_by?" FROM hr_docs WHERE id = $1"#, id).map(|r| (r.title, r.file_id, r.sha256, r.created_at, r.completed_at, r.employee_id, r.created_by)).fetch_one(&state.db).await?;
+    let rows: Vec<(String, String, Option<String>, Option<DateTime<Utc>>, Option<String>, Option<String>, Option<Uuid>)> = sqlx::query!(r#"SELECT trim(u.first_name || ' ' || u.last_name) AS "c0!", u.email AS "email!", s.signed_name AS "signed_name?", s.acted_at AS "acted_at?", s.ip AS "ip?", s.user_agent AS "user_agent?", s.signature_file_id AS "signature_file_id?"
+         FROM hr_doc_steps s JOIN users u ON u.id = s.user_id WHERE s.doc_id = $1 AND s.role <> 'approver' ORDER BY s.position"#, id).map(|r| (r.c0, r.email, r.signed_name, r.acted_at, r.ip, r.user_agent, r.signature_file_id))
     .fetch_all(&state.db)
     .await?;
     let list: Vec<CertSigner> = rows
@@ -331,9 +317,9 @@ async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
         .collect();
     let original = read_bytes(state, file).await?.3;
     let signed = signed_copy(state, &title, &id.to_string(), &sha, created, completed, &list, &original).await?;
-    let emp_name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(employee).fetch_one(&state.db).await?;
+    let emp_name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, employee).fetch_one(&state.db).await?;
     let sf = store_bytes(state, None, &format!("{title} — {emp_name} (signed).pdf"), "application/pdf", &signed).await?;
-    sqlx::query("UPDATE hr_docs SET signed_file_id = $2, signed_sha256 = $3 WHERE id = $1").bind(id).bind(sf).bind(sha256_hex(&signed)).execute(&state.db).await?;
+    sqlx::query!("UPDATE hr_docs SET signed_file_id = $2, signed_sha256 = $3 WHERE id = $1", id, sf, sha256_hex(&signed)).execute(&state.db).await?;
     let mut tell = vec![employee];
     tell.extend(by);
     notify(state, &tell, NewNotification { kind: "hr.document", title: format!("“{title}” for {emp_name} is signed"), body: None, link: Some(format!("/hr/documents/{id}")), actor: None }).await;
@@ -347,7 +333,7 @@ async fn finish(state: &AppState, id: Uuid) -> AppResult<()> {
 /// The template's after-signing steps: tell people, make a task, add a list item (whose
 /// processes then start). Acts as whoever sent the document.
 async fn after_signing(state: &AppState, id: Uuid, title: &str, employee: Uuid, emp_name: &str, by: Option<Uuid>) -> AppResult<()> {
-    let rules: Option<Value> = sqlx::query_scalar("SELECT t.after_signing FROM hr_docs d JOIN hr_doc_templates t ON t.id = d.template_id WHERE d.id = $1").bind(id).fetch_optional(&state.db).await?;
+    let rules: Option<Value> = sqlx::query_scalar!("SELECT t.after_signing FROM hr_docs d JOIN hr_doc_templates t ON t.id = d.template_id WHERE d.id = $1", id).fetch_optional(&state.db).await?;
     let Some(rules) = rules.filter(|r| r.as_object().is_some_and(|o| !o.is_empty())) else { return Ok(()) };
     let link = format!("/hr/documents/{id}");
     if let Some(ids) = rules.get("notify").and_then(Value::as_array) {
@@ -417,7 +403,7 @@ async fn may_see(state: &AppState, auth: &AuthUser, d: &Doc) -> AppResult<bool> 
     if hr_manager(auth) || d.employee_id == auth.id {
         return Ok(true);
     }
-    Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM hr_doc_steps WHERE doc_id = $1 AND user_id = $2)").bind(d.id).bind(auth.id).fetch_one(&state.db).await?)
+    Ok(sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM hr_doc_steps WHERE doc_id = $1 AND user_id = $2) AS "v!""#, d.id, auth.id).fetch_one(&state.db).await?)
 }
 
 fn overdue(d: &Doc) -> bool {
@@ -425,11 +411,8 @@ fn overdue(d: &Doc) -> bool {
 }
 
 async fn doc_json(state: &AppState, d: &Doc, me: Uuid) -> AppResult<Value> {
-    let steps: Vec<(i32, Uuid, String, String, String, Option<DateTime<Utc>>, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT s.position, s.user_id, trim(u.first_name || ' ' || u.last_name), s.role, s.status, s.acted_at, s.comment, s.signed_name
-         FROM hr_doc_steps s JOIN users u ON u.id = s.user_id WHERE s.doc_id = $1 ORDER BY s.position",
-    )
-    .bind(d.id)
+    let steps: Vec<(i32, Uuid, String, String, String, Option<DateTime<Utc>>, Option<String>, Option<String>)> = sqlx::query!(r#"SELECT s.position AS "position!", s.user_id AS "user_id!", trim(u.first_name || ' ' || u.last_name) AS "c2!", s.role AS "role!", s.status AS "status!", s.acted_at AS "acted_at?", s.comment AS "comment?", s.signed_name AS "signed_name?"
+         FROM hr_doc_steps s JOIN users u ON u.id = s.user_id WHERE s.doc_id = $1 ORDER BY s.position"#, d.id).map(|r| (r.position, r.user_id, r.c2, r.role, r.status, r.acted_at, r.comment, r.signed_name))
     .fetch_all(&state.db)
     .await?;
     let my_turn = steps.iter().find(|s| s.4 == "pending").filter(|s| s.1 == me).map(|s| s.3.clone());
@@ -496,7 +479,7 @@ async fn file(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
     if !may_see(&state, &auth, &d).await? {
         return Err(AppError::NotFound("document"));
     }
-    let fid: Option<Uuid> = sqlx::query_scalar("SELECT COALESCE(signed_file_id, file_id) FROM hr_docs WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+    let fid: Option<Uuid> = sqlx::query_scalar!(r#"SELECT COALESCE(signed_file_id, file_id) AS "v?" FROM hr_docs WHERE id = $1"#, id).fetch_one(&state.db).await?;
     let (_, _, _, bytes) = read_bytes(&state, fid.ok_or(AppError::NotFound("document"))?).await?;
     let mut r = bytes.into_response();
     let h = r.headers_mut();
@@ -519,7 +502,7 @@ async fn my_step(state: &AppState, auth: &AuthUser, id: Uuid, roles: &[&str]) ->
     if overdue(&d) {
         return Err(AppError::bad("the due date has passed; ask HR to send it again"));
     }
-    let step: Option<(i32, String)> = sqlx::query_as("SELECT position, role FROM hr_doc_steps WHERE doc_id = $1 AND user_id = $2 AND status = 'pending'").bind(id).bind(auth.id).fetch_optional(&state.db).await?;
+    let step: Option<(i32, String)> = sqlx::query!(r#"SELECT position, role FROM hr_doc_steps WHERE doc_id = $1 AND user_id = $2 AND status = 'pending'"#, id, auth.id).map(|r| (r.position, r.role)).fetch_optional(&state.db).await?;
     let (pos, role) = step.ok_or_else(|| AppError::bad("it isn't your turn on this document"))?;
     if !roles.contains(&role.as_str()) {
         return Err(AppError::bad(if role == "approver" { "approve or decline it" } else { "sign or decline it" }));
@@ -537,7 +520,7 @@ async fn approve(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
     let (d, pos, _) = my_step(&state, &auth, id, &["approver"]).await?;
     let comment = crate::routes::clean(b.comment).map(|c| c.chars().take(2000).collect::<String>());
     if b.approve {
-        sqlx::query("UPDATE hr_doc_steps SET status = 'done', acted_at = now(), comment = $3 WHERE doc_id = $1 AND position = $2").bind(id).bind(pos).bind(&comment).execute(&state.db).await?;
+        sqlx::query!("UPDATE hr_doc_steps SET status = 'done', acted_at = now(), comment = $3 WHERE doc_id = $1 AND position = $2", id, pos, comment.as_deref()).execute(&state.db).await?;
         advance(&state, id).await?;
     } else {
         stop(&state, &d, pos, comment, &auth, "sent back").await?;
@@ -547,10 +530,10 @@ async fn approve(State(state): State<AppState>, auth: AuthUser, Path(id): Path<U
 
 /// A step declined: the document stops; HR who made it is told.
 async fn stop(state: &AppState, d: &Doc, pos: i32, comment: Option<String>, auth: &AuthUser, verb: &str) -> AppResult<()> {
-    sqlx::query("UPDATE hr_doc_steps SET status = 'declined', acted_at = now(), comment = $3 WHERE doc_id = $1 AND position = $2").bind(d.id).bind(pos).bind(&comment).execute(&state.db).await?;
-    sqlx::query("UPDATE hr_docs SET status = 'declined' WHERE id = $1").bind(d.id).execute(&state.db).await?;
-    let by: Option<Uuid> = sqlx::query_scalar("SELECT created_by FROM hr_docs WHERE id = $1").bind(d.id).fetch_one(&state.db).await?;
-    let me: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(auth.id).fetch_one(&state.db).await?;
+    sqlx::query!("UPDATE hr_doc_steps SET status = 'declined', acted_at = now(), comment = $3 WHERE doc_id = $1 AND position = $2", d.id, pos, comment.as_deref()).execute(&state.db).await?;
+    sqlx::query!("UPDATE hr_docs SET status = 'declined' WHERE id = $1", d.id).execute(&state.db).await?;
+    let by: Option<Uuid> = sqlx::query_scalar!(r#"SELECT created_by AS "created_by?" FROM hr_docs WHERE id = $1"#, d.id).fetch_one(&state.db).await?;
+    let me: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, auth.id).fetch_one(&state.db).await?;
     notify(state, &by.into_iter().collect::<Vec<_>>(), NewNotification { kind: "hr.document", title: format!("{me} {verb} “{}” ({})", d.title, d.employee_name), body: comment, link: Some(format!("/hr/documents/{}", d.id)), actor: Some(auth.id) }).await;
     Ok(())
 }
@@ -580,16 +563,8 @@ async fn sign(State(state): State<AppState>, auth: AuthUser, ClientIp(ip): Clien
     }
     let sig = store_bytes(&state, None, &format!("signature-{id}-{pos}.png"), "image/png", &png).await?;
     let ua: Option<String> = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(300).collect());
-    let n = sqlx::query(
-        "UPDATE hr_doc_steps SET status = 'done', acted_at = now(), signed_name = $3, signature_file_id = $4, ip = $5, user_agent = $6
-         WHERE doc_id = $1 AND position = $2 AND status = 'pending'",
-    )
-    .bind(id)
-    .bind(pos)
-    .bind(&typed)
-    .bind(sig)
-    .bind(&ip)
-    .bind(&ua)
+    let n = sqlx::query!("UPDATE hr_doc_steps SET status = 'done', acted_at = now(), signed_name = $3, signature_file_id = $4, ip = $5, user_agent = $6
+         WHERE doc_id = $1 AND position = $2 AND status = 'pending'", id, pos, &typed, sig, ip.as_deref(), ua.as_deref())
     .execute(&state.db)
     .await?
     .rows_affected();
@@ -623,8 +598,8 @@ async fn revoke(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if d.status == "revoked" {
         return Err(AppError::bad("it is invalid already"));
     }
-    sqlx::query("UPDATE hr_docs SET status = 'revoked', revoked_at = now(), revoked_by = $2, revoke_reason = $3 WHERE id = $1").bind(id).bind(auth.id).bind(&reason).execute(&state.db).await?;
-    let mut people: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT user_id FROM hr_doc_steps WHERE doc_id = $1").bind(id).fetch_all(&state.db).await?;
+    sqlx::query!("UPDATE hr_docs SET status = 'revoked', revoked_at = now(), revoked_by = $2, revoke_reason = $3 WHERE id = $1", id, auth.id, &reason).execute(&state.db).await?;
+    let mut people: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT user_id FROM hr_doc_steps WHERE doc_id = $1", id).fetch_all(&state.db).await?;
     people.retain(|p| *p != auth.id);
     let verb = if d.status == "signed" { "is no longer valid" } else { "was withdrawn" };
     notify(&state, &people, NewNotification { kind: "hr.document", title: format!("“{}” {verb}", d.title), body: Some(reason), link: Some(format!("/hr/documents/{id}")), actor: Some(auth.id) }).await;
@@ -640,12 +615,12 @@ async fn verify(State(state): State<AppState>, Path(sha): Path<String>) -> AppRe
         return Err(AppError::bad("give the SHA-256 of the PDF (64 hex characters)"));
     }
     let hr: Option<(String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>, bool)> =
-        sqlx::query_as("SELECT title, status, completed_at, revoked_at, signed_sha256 = $1 FROM hr_docs WHERE signed_sha256 = $1 OR sha256 = $1 LIMIT 1").bind(&sha).fetch_optional(&state.db).await?;
+        sqlx::query!(r#"SELECT title AS "title!", status AS "status!", completed_at AS "completed_at?", revoked_at AS "revoked_at?", signed_sha256 = $1 AS "c4!" FROM hr_docs WHERE signed_sha256 = $1 OR sha256 = $1 LIMIT 1"#, &sha).map(|r| (r.title, r.status, r.completed_at, r.revoked_at, r.c4)).fetch_optional(&state.db).await?;
     if let Some((title, status, done, revoked, is_signed)) = hr {
         return Ok(Json(json!({ "found": true, "title": title, "signed_copy": is_signed, "status": status, "completed_at": done, "revoked_at": revoked, "valid": status == "signed" && is_signed })));
     }
     let crm: Option<(String, String, Option<DateTime<Utc>>, bool)> =
-        sqlx::query_as("SELECT title, status, completed_at, signed_sha256 = $1 FROM sign_requests WHERE signed_sha256 = $1 OR original_sha256 = $1 LIMIT 1").bind(&sha).fetch_optional(&state.db).await?;
+        sqlx::query!(r#"SELECT title AS "title!", status AS "status!", completed_at AS "completed_at?", signed_sha256 = $1 AS "c3!" FROM sign_requests WHERE signed_sha256 = $1 OR original_sha256 = $1 LIMIT 1"#, &sha).map(|r| (r.title, r.status, r.completed_at, r.c3)).fetch_optional(&state.db).await?;
     if let Some((title, status, done, is_signed)) = crm {
         return Ok(Json(json!({ "found": true, "title": title, "signed_copy": is_signed, "status": status, "completed_at": done, "valid": status == "completed" && is_signed })));
     }

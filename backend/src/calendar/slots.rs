@@ -76,7 +76,7 @@ impl Link {
 }
 
 async fn names(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Uuid, String, Option<Uuid>)>> {
-    Ok(sqlx::query_as("SELECT id, trim(first_name || ' ' || last_name), avatar_file_id FROM users WHERE id = ANY($1) ORDER BY array_position($1, id)").bind(ids).fetch_all(&state.db).await?)
+    Ok(sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!", avatar_file_id AS "avatar_file_id?" FROM users WHERE id = ANY($1) ORDER BY array_position($1, id)"#, ids).map(|r| (r.id, r.c1, r.avatar_file_id)).fetch_all(&state.db).await?)
 }
 
 async fn link_json(state: &AppState, l: &Link) -> AppResult<Value> {
@@ -149,13 +149,13 @@ async fn check_members(state: &AppState, owner: Uuid, members: &[Uuid]) -> AppRe
     if m.len() > 10 {
         return Err(AppError::bad("at most 10 members"));
     }
-    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&m).fetch_one(&state.db).await?;
+    let active: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &m).fetch_one(&state.db).await?;
     if active as usize != m.len() {
         return Err(AppError::bad("members must be active employees"));
     }
     for x in &m {
         if access::level(state, owner, *x).await? < access::Level::Busy {
-            let name: String = sqlx::query_scalar("SELECT trim(first_name || ' ' || last_name) FROM users WHERE id = $1").bind(x).fetch_one(&state.db).await?;
+            let name: String = sqlx::query_scalar!(r#"SELECT trim(first_name || ' ' || last_name) AS "v!" FROM users WHERE id = $1"#, x).fetch_one(&state.db).await?;
             return Err(AppError::bad(format!("{name} doesn't share their calendar with you")));
         }
     }
@@ -186,26 +186,9 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Lin
     check_hours(&hours)?;
     let members = check_members(&state, auth.id, b.members.as_deref().unwrap_or(&[])).await?;
     let slug = format!("{}-{}", slugify(&title, "meet"), &crate::auth::tokens::random_token(6).to_lowercase().replace(['-', '_'], "x")[..6]);
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO cal_slot_links (owner_id, slug, title, description, location, duration_minutes, members, hours, timezone, slot_step_minutes,
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO cal_slot_links (owner_id, slug, title, description, location, duration_minutes, members, hours, timezone, slot_step_minutes,
              buffer_minutes, min_notice_minutes, days_ahead, max_per_day, remind_minutes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id",
-    )
-    .bind(auth.id)
-    .bind(&slug)
-    .bind(&title)
-    .bind(clean(b.description.flatten()))
-    .bind(clean(b.location.flatten()))
-    .bind(b.duration_minutes.unwrap_or(30))
-    .bind(&members)
-    .bind(json!(hours))
-    .bind(b.timezone.clone().unwrap_or_else(|| "UTC".into()))
-    .bind(b.slot_step_minutes.unwrap_or(30))
-    .bind(b.buffer_minutes.unwrap_or(0))
-    .bind(b.min_notice_minutes.unwrap_or(120))
-    .bind(b.days_ahead.unwrap_or(30))
-    .bind(b.max_per_day.flatten())
-    .bind(b.remind_minutes.flatten().or(Some(15)))
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id", auth.id, &slug, &title, clean(b.description.flatten()), clean(b.location.flatten()), b.duration_minutes.unwrap_or(30), &members, json!(hours), b.timezone.clone().unwrap_or_else(|| "UTC".into()), b.slot_step_minutes.unwrap_or(30), b.buffer_minutes.unwrap_or(0), b.min_notice_minutes.unwrap_or(120), b.days_ahead.unwrap_or(30), b.max_per_day.flatten(), b.remind_minutes.flatten().or(Some(15)))
     .fetch_one(&state.db)
     .await?;
     Ok(Json(link_json(&state, &load(&state, id).await?).await?))
@@ -230,34 +213,13 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         Some(m) => Some(check_members(&state, auth.id, m).await?),
         None => None,
     };
-    sqlx::query(
-        "UPDATE cal_slot_links SET title = COALESCE($2, title), description = CASE WHEN $3 THEN $4 ELSE description END,
+    sqlx::query!("UPDATE cal_slot_links SET title = COALESCE($2, title), description = CASE WHEN $3 THEN $4 ELSE description END,
              location = CASE WHEN $5 THEN $6 ELSE location END, duration_minutes = COALESCE($7, duration_minutes), members = COALESCE($8, members),
              hours = COALESCE($9, hours), timezone = COALESCE($10, timezone), slot_step_minutes = COALESCE($11, slot_step_minutes),
              buffer_minutes = COALESCE($12, buffer_minutes), min_notice_minutes = COALESCE($13, min_notice_minutes), days_ahead = COALESCE($14, days_ahead),
              max_per_day = CASE WHEN $15 THEN $16 ELSE max_per_day END, remind_minutes = CASE WHEN $17 THEN $18 ELSE remind_minutes END,
              is_active = COALESCE($19, is_active), updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(l.id)
-    .bind(title)
-    .bind(b.description.is_some())
-    .bind(clean(b.description.flatten()))
-    .bind(b.location.is_some())
-    .bind(clean(b.location.flatten()))
-    .bind(b.duration_minutes)
-    .bind(members)
-    .bind(b.hours.map(|h| json!(h)))
-    .bind(b.timezone)
-    .bind(b.slot_step_minutes)
-    .bind(b.buffer_minutes)
-    .bind(b.min_notice_minutes)
-    .bind(b.days_ahead)
-    .bind(b.max_per_day.is_some())
-    .bind(b.max_per_day.flatten())
-    .bind(b.remind_minutes.is_some())
-    .bind(b.remind_minutes.flatten())
-    .bind(b.is_active)
+         WHERE id = $1", l.id, title, b.description.is_some(), clean(b.description.flatten()), b.location.is_some(), clean(b.location.flatten()), b.duration_minutes, members.as_deref(), b.hours.map(|h| json!(h)), b.timezone, b.slot_step_minutes, b.buffer_minutes, b.min_notice_minutes, b.days_ahead, b.max_per_day.is_some(), b.max_per_day.flatten(), b.remind_minutes.is_some(), b.remind_minutes.flatten(), b.is_active)
     .execute(&state.db)
     .await?;
     Ok(Json(link_json(&state, &load(&state, id).await?).await?))
@@ -265,7 +227,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let l = owned(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM cal_slot_links WHERE id = $1").bind(l.id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM cal_slot_links WHERE id = $1", l.id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -278,14 +240,9 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 /// absences and company holidays (whole days in `tz`).
 pub async fn busy_of(state: &AppState, users: &[Uuid], from: DateTime<Utc>, to: DateTime<Utc>, tz: Tz) -> AppResult<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
     let mut out = Vec::new();
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id AND a.user_id = ANY($1)
+    let ids: Vec<Uuid> = sqlx::query_scalar!("SELECT DISTINCT e.id FROM cal_events e LEFT JOIN cal_attendees a ON a.event_id = e.id AND a.user_id = ANY($1)
          WHERE (e.owner_id = ANY($1) OR (a.user_id IS NOT NULL AND a.status <> 'declined'))
-           AND e.starts_at < $3 AND (e.recurrence IS NOT NULL OR e.ends_at > $2)",
-    )
-    .bind(users)
-    .bind(from)
-    .bind(to)
+           AND e.starts_at < $3 AND (e.recurrence IS NOT NULL OR e.ends_at > $2)", users, from, to)
     .fetch_all(&state.db)
     .await?;
     let events = load_events(state, &ids).await?;
@@ -296,33 +253,20 @@ pub async fn busy_of(state: &AppState, users: &[Uuid], from: DateTime<Utc>, to: 
             out.push((s, s + (e.ends_at - e.starts_at)));
         }
     }
-    let bookings: Vec<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT b.starts_at, b.ends_at FROM bookings b JOIN booking_resources_used u ON u.booking_id = b.id JOIN booking_resources r ON r.id = u.resource_id
-         WHERE r.user_id = ANY($1) AND b.status IN ('booked', 'confirmed', 'came') AND b.starts_at < $3 AND b.ends_at > $2",
-    )
-    .bind(users)
-    .bind(from)
-    .bind(to)
+    let bookings: Vec<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query!(r#"SELECT b.starts_at, b.ends_at FROM bookings b JOIN booking_resources_used u ON u.booking_id = b.id JOIN booking_resources r ON r.id = u.resource_id
+         WHERE r.user_id = ANY($1) AND b.status IN ('booked', 'confirmed', 'came') AND b.starts_at < $3 AND b.ends_at > $2"#, users, from, to).map(|r| (r.starts_at, r.ends_at))
     .fetch_all(&state.db)
     .await?;
     out.extend(bookings);
-    let acts: Vec<(DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT COALESCE(starts_at, deadline), ends_at FROM crm_activities
-         WHERE responsible_id = ANY($1) AND NOT is_completed AND kind IN ('call', 'meeting') AND COALESCE(starts_at, deadline) < $3 AND COALESCE(ends_at, COALESCE(starts_at, deadline) + interval '30 minutes') > $2",
-    )
-    .bind(users)
-    .bind(from)
-    .bind(to)
+    let acts: Vec<(DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query!(r#"SELECT COALESCE(starts_at, deadline) AS "c0!", ends_at AS "ends_at?" FROM crm_activities
+         WHERE responsible_id = ANY($1) AND NOT is_completed AND kind IN ('call', 'meeting') AND COALESCE(starts_at, deadline) < $3 AND COALESCE(ends_at, COALESCE(starts_at, deadline) + interval '30 minutes') > $2"#, users, from, to).map(|r| (r.c0, r.ends_at))
     .fetch_all(&state.db)
     .await?;
     out.extend(acts.into_iter().map(|(s, e)| (s, e.filter(|e| *e > s).unwrap_or(s + Duration::minutes(30)))));
     // Whole days off.
     let (d0, d1) = (from.with_timezone(&tz).date_naive(), to.with_timezone(&tz).date_naive());
-    let mut days: Vec<NaiveDate> = sqlx::query_scalar("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $2").bind(d0).bind(d1).fetch_all(&state.db).await?;
-    let absences: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as("SELECT starts_on, ends_on FROM hr_absences WHERE user_id = ANY($1) AND status = 'approved' AND starts_on <= $3 AND ends_on >= $2")
-        .bind(users)
-        .bind(d0)
-        .bind(d1)
+    let mut days: Vec<NaiveDate> = sqlx::query_scalar!("SELECT day FROM hr_holidays WHERE day BETWEEN $1 AND $2", d0, d1).fetch_all(&state.db).await?;
+    let absences: Vec<(NaiveDate, NaiveDate)> = sqlx::query!(r#"SELECT starts_on, ends_on FROM hr_absences WHERE user_id = ANY($1) AND status = 'approved' AND starts_on <= $3 AND ends_on >= $2"#, users, d0, d1).map(|r| (r.starts_on, r.ends_on))
         .fetch_all(&state.db)
         .await?;
     for (s, e) in absences {
@@ -357,7 +301,7 @@ async fn free(state: &AppState, l: &Link, first: NaiveDate, last: NaiveDate) -> 
     let (from, to) = (at(first) - Duration::hours(12), at(last.succ_opt().unwrap()) + Duration::hours(12));
     let busy = busy_of(state, &l.people(), from, to, tz).await?;
     // Meetings already booked through this link, per day (for the daily limit).
-    let booked: Vec<DateTime<Utc>> = sqlx::query_scalar("SELECT starts_at FROM cal_events WHERE slot_link_id = $1 AND starts_at >= $2 AND starts_at < $3").bind(l.id).bind(from).bind(to).fetch_all(&state.db).await?;
+    let booked: Vec<DateTime<Utc>> = sqlx::query_scalar!("SELECT starts_at FROM cal_events WHERE slot_link_id = $1 AND starts_at >= $2 AND starts_at < $3", l.id, from, to).fetch_all(&state.db).await?;
     let dur = Duration::minutes(l.duration_minutes as i64);
     let buf = Duration::minutes(l.buffer_minutes as i64);
     let hours = l.hours();
@@ -396,7 +340,7 @@ async fn free(state: &AppState, l: &Link, first: NaiveDate, last: NaiveDate) -> 
 
 async fn active(state: &AppState, slug: &str) -> AppResult<Link> {
     let l: Link = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLS} FROM cal_slot_links WHERE slug = $1 AND is_active"))).bind(slug).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("page"))?;
-    let owner_active: bool = sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1").bind(l.owner_id).fetch_one(&state.db).await?;
+    let owner_active: bool = sqlx::query_scalar!("SELECT is_active FROM users WHERE id = $1", l.owner_id).fetch_one(&state.db).await?;
     if !owner_active {
         return Err(AppError::NotFound("page"));
     }
@@ -406,7 +350,7 @@ async fn active(state: &AppState, slug: &str) -> AppResult<Link> {
 async fn page(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Json<Value>> {
     let l = active(&state, &slug).await?;
     let people = names(&state, &l.people()).await?;
-    let company: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await?;
+    let company: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'company_name'").fetch_optional(&state.db).await?;
     Ok(Json(json!({
         "title": l.title, "description": l.description, "location": l.location, "duration_minutes": l.duration_minutes,
         "timezone": l.timezone, "days_ahead": l.days_ahead, "company": company.and_then(|v| v.as_str().map(String::from)),
@@ -490,33 +434,19 @@ async fn book_locked(state: &AppState, l: &Link, b: &BookInput, name: &str, gues
         description.push_str(&n.chars().take(2000).collect::<String>());
     }
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO cal_events (owner_id, created_by, title, description, location, starts_at, ends_at, all_day, timezone, remind_minutes, slot_link_id)
-         VALUES ($1, $1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9) RETURNING id",
-    )
-    .bind(l.owner_id)
-    .bind(format!("{}: {name}", l.title))
-    .bind(&description)
-    .bind(&l.location)
-    .bind(b.starts_at)
-    .bind(end)
-    .bind(&l.timezone)
-    .bind(l.remind_minutes)
-    .bind(l.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO cal_events (owner_id, created_by, title, description, location, starts_at, ends_at, all_day, timezone, remind_minutes, slot_link_id)
+         VALUES ($1, $1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9) RETURNING id", l.owner_id, format!("{}: {name}", l.title), &description, l.location.as_deref(), b.starts_at, end, &l.timezone, l.remind_minutes, l.id)
     .fetch_one(&mut *tx)
     .await?;
     for m in l.members.iter().filter(|m| **m != l.owner_id) {
-        sqlx::query("INSERT INTO cal_attendees (event_id, user_id, status) VALUES ($1, $2, 'accepted')").bind(id).bind(m).execute(&mut *tx).await?;
+        sqlx::query!("INSERT INTO cal_attendees (event_id, user_id, status) VALUES ($1, $2, 'accepted')", id, m).execute(&mut *tx).await?;
     }
     // Sent from a CRM record: the meeting is about it.
     let item = b.r.as_deref().and_then(|t| record_of(state, l.id, t));
     if let Some(i) = item {
-        sqlx::query("UPDATE cal_events SET item_id = (SELECT id FROM crm_items WHERE id = $2 AND deleted_at IS NULL) WHERE id = $1").bind(id).bind(i).execute(&mut *tx).await?;
+        sqlx::query!("UPDATE cal_events SET item_id = (SELECT id FROM crm_items WHERE id = $2 AND deleted_at IS NULL) WHERE id = $1", id, i).execute(&mut *tx).await?;
     }
-    let gid: Uuid = sqlx::query_scalar("INSERT INTO cal_email_guests (event_id, email, name, status, answered_at) VALUES ($1, $2, $3, 'accepted', now()) RETURNING id")
-        .bind(id)
-        .bind(&guest.email)
-        .bind(&guest.name)
+    let gid: Uuid = sqlx::query_scalar!("INSERT INTO cal_email_guests (event_id, email, name, status, answered_at) VALUES ($1, $2, $3, 'accepted', now()) RETURNING id", id, &guest.email, guest.name.as_deref())
         .fetch_one(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -579,21 +509,11 @@ async fn for_record(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 async fn booked_for_record(state: &AppState, l: &Link, item: Uuid, event: Uuid, name: &str, starts: DateTime<Utc>, ends: DateTime<Utc>) -> AppResult<()> {
     let Ok(row) = crate::crm::items::load_row(state, item, false).await else { return Ok(()) };
     let subject = format!("{}: {name}", l.title);
-    let act: Uuid = sqlx::query_scalar(
-        "INSERT INTO crm_activities (item_id, kind, subject, description, starts_at, ends_at, deadline, responsible_id, cal_event_id, remind_before_minutes)
-         VALUES ($1, 'meeting', $2, $3, $4, $5, $4, $6, $7, $8) RETURNING id",
-    )
-    .bind(item)
-    .bind(&subject)
-    .bind(format!("Booked through “{}”.", l.title))
-    .bind(starts)
-    .bind(ends)
-    .bind(l.owner_id)
-    .bind(event)
-    .bind(l.remind_minutes)
+    let act: Uuid = sqlx::query_scalar!("INSERT INTO crm_activities (item_id, kind, subject, description, starts_at, ends_at, deadline, responsible_id, cal_event_id, remind_before_minutes)
+         VALUES ($1, 'meeting', $2, $3, $4, $5, $4, $6, $7, $8) RETURNING id", item, &subject, format!("Booked through “{}”.", l.title), starts, ends, l.owner_id, event, l.remind_minutes)
     .fetch_one(&state.db)
     .await?;
-    sqlx::query("UPDATE crm_items SET last_activity_at = now() WHERE id = $1").bind(item).execute(&state.db).await?;
+    sqlx::query!("UPDATE crm_items SET last_activity_at = now() WHERE id = $1", item).execute(&state.db).await?;
     crate::crm::timeline(&state.db, item, "booking", None, None, json!({ "activity_id": act, "event_id": event, "name": name, "link": l.title, "starts_at": starts })).await?;
     crate::crm::broadcast(state, row.entity_type, item, false).await;
     Ok(())

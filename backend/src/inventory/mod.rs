@@ -83,21 +83,15 @@ pub async fn adjust_costed(
     why: Reason<'_>,
     unit_in: Option<Decimal>,
 ) -> AppResult<(Uuid, Decimal)> {
-    sqlx::query("INSERT INTO inv_stock (product_id, warehouse_id, quantity) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING")
-        .bind(product)
-        .bind(warehouse)
+    sqlx::query!("INSERT INTO inv_stock (product_id, warehouse_id, quantity) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING", product, warehouse)
         .execute(&mut **tx)
         .await?;
-    let have: Decimal = sqlx::query_scalar("SELECT quantity FROM inv_stock WHERE product_id = $1 AND warehouse_id = $2 FOR UPDATE")
-        .bind(product)
-        .bind(warehouse)
+    let have: Decimal = sqlx::query_scalar!("SELECT quantity FROM inv_stock WHERE product_id = $1 AND warehouse_id = $2 FOR UPDATE", product, warehouse)
         .fetch_one(&mut **tx)
         .await?;
     let after = have + delta;
     if after < Decimal::ZERO && !allow_negative {
-        let (name, wh): (String, String) = sqlx::query_as("SELECT p.name, w.name FROM crm_products p, inv_warehouses w WHERE p.id = $1 AND w.id = $2")
-            .bind(product)
-            .bind(warehouse)
+        let (name, wh): (String, String) = sqlx::query!(r#"SELECT p.name, w.name AS "c1" FROM crm_products p, inv_warehouses w WHERE p.id = $1 AND w.id = $2"#, product, warehouse).map(|r| (r.name, r.c1))
             .fetch_one(&mut **tx)
             .await?;
         return Err(AppError::bad(if have <= Decimal::ZERO {
@@ -106,28 +100,14 @@ pub async fn adjust_costed(
             format!("only {} of “{name}” left in {wh}", have.normalize())
         }));
     }
-    sqlx::query("UPDATE inv_stock SET quantity = $3 WHERE product_id = $1 AND warehouse_id = $2")
-        .bind(product)
-        .bind(warehouse)
-        .bind(after)
+    sqlx::query!("UPDATE inv_stock SET quantity = $3 WHERE product_id = $1 AND warehouse_id = $2", product, warehouse, after)
         .execute(&mut **tx)
         .await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO inv_movements (product_id, warehouse_id, delta, balance, reason, document_id, item_id, user_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-    )
-    .bind(product)
-    .bind(warehouse)
-    .bind(delta)
-    .bind(after)
-    .bind(why.kind)
-    .bind(why.document)
-    .bind(why.item)
-    .bind(why.user)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO inv_movements (product_id, warehouse_id, delta, balance, reason, document_id, item_id, user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id", product, warehouse, delta, after, why.kind, why.document, why.item, why.user)
     .fetch_one(&mut **tx)
     .await?;
-    sqlx::query("UPDATE crm_products SET stock = (SELECT COALESCE(SUM(quantity), 0) FROM inv_stock WHERE product_id = $1), updated_at = now() WHERE id = $1")
-        .bind(product)
+    sqlx::query!("UPDATE crm_products SET stock = (SELECT COALESCE(SUM(quantity), 0) FROM inv_stock WHERE product_id = $1), updated_at = now() WHERE id = $1", product)
         .execute(&mut **tx)
         .await?;
     let cost = costing::cost_movement(tx, id, product, warehouse, have, delta, unit_in).await?;
@@ -136,7 +116,7 @@ pub async fn adjust_costed(
 }
 
 pub async fn default_warehouse<'e, E: sqlx::PgExecutor<'e>>(db: E) -> AppResult<Uuid> {
-    sqlx::query_scalar("SELECT id FROM inv_warehouses WHERE is_default")
+    sqlx::query_scalar!("SELECT id FROM inv_warehouses WHERE is_default")
         .fetch_optional(db)
         .await?
         .ok_or_else(|| AppError::bad("there is no default warehouse"))
@@ -146,15 +126,15 @@ pub async fn default_warehouse<'e, E: sqlx::PgExecutor<'e>>(db: E) -> AppResult<
 /// default warehouse. `None` stops counting stock for it.
 pub async fn set_total(state: &AppState, auth: &AuthUser, product: Uuid, total: Option<Decimal>) -> AppResult<()> {
     let mut tx = state.db.begin().await?;
-    let current: Option<Decimal> = sqlx::query_scalar("SELECT stock FROM crm_products WHERE id = $1 FOR UPDATE").bind(product).fetch_one(&mut *tx).await?;
+    let current: Option<Decimal> = sqlx::query_scalar!(r#"SELECT stock AS "stock?" FROM crm_products WHERE id = $1 FOR UPDATE"#, product).fetch_one(&mut *tx).await?;
     match total {
         None => {
-            let held: Decimal = sqlx::query_scalar("SELECT COALESCE(SUM(abs(quantity)), 0) FROM inv_stock WHERE product_id = $1").bind(product).fetch_one(&mut *tx).await?;
+            let held: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(abs(quantity)), 0) AS "v!" FROM inv_stock WHERE product_id = $1"#, product).fetch_one(&mut *tx).await?;
             if held > Decimal::ZERO {
                 return Err(AppError::bad("warehouses still hold this product; write it off before you stop counting it"));
             }
-            sqlx::query("DELETE FROM inv_stock WHERE product_id = $1").bind(product).execute(&mut *tx).await?;
-            sqlx::query("UPDATE crm_products SET stock = NULL WHERE id = $1").bind(product).execute(&mut *tx).await?;
+            sqlx::query!("DELETE FROM inv_stock WHERE product_id = $1", product).execute(&mut *tx).await?;
+            sqlx::query!("UPDATE crm_products SET stock = NULL WHERE id = $1", product).execute(&mut *tx).await?;
         }
         Some(t) if Some(t) != current => {
             let delta = t - current.unwrap_or(Decimal::ZERO);
@@ -189,12 +169,10 @@ struct Warehouse {
 }
 
 async fn warehouses(state: &AppState) -> AppResult<Vec<Warehouse>> {
-    Ok(sqlx::query_as(
-        "SELECT w.id, w.name, w.address, w.is_default, w.is_active,
-                (SELECT COUNT(*) FROM inv_stock s WHERE s.warehouse_id = w.id AND s.quantity <> 0) AS products,
-                (SELECT COALESCE(SUM(quantity), 0) FROM inv_stock s WHERE s.warehouse_id = w.id) AS units
-         FROM inv_warehouses w ORDER BY w.is_active DESC, w.sort, w.name",
-    )
+    Ok(sqlx::query_as!(Warehouse, r#"SELECT w.id AS "id!", w.name AS "name!", w.address AS "address?", w.is_default AS "is_default!", w.is_active AS "is_active!",
+                (SELECT COUNT(*) FROM inv_stock s WHERE s.warehouse_id = w.id AND s.quantity <> 0) AS "products!",
+                (SELECT COALESCE(SUM(quantity), 0) FROM inv_stock s WHERE s.warehouse_id = w.id) AS "units!"
+         FROM inv_warehouses w ORDER BY w.is_active DESC, w.sort, w.name"#)
     .fetch_all(&state.db)
     .await?)
 }
@@ -215,11 +193,8 @@ struct WarehouseInput {
 async fn create_warehouse(State(state): State<AppState>, auth: AuthUser, Json(b): Json<WarehouseInput>) -> AppResult<Json<Value>> {
     require(&auth)?;
     let name = required("name", b.name.as_deref().unwrap_or(""), 120)?;
-    let sort: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) + 10 FROM inv_warehouses").fetch_one(&state.db).await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO inv_warehouses (name, address, sort) VALUES ($1, $2, $3) RETURNING id")
-        .bind(&name)
-        .bind(clean(b.address.flatten()))
-        .bind(sort)
+    let sort: i32 = sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) + 10 AS "v!" FROM inv_warehouses"#).fetch_one(&state.db).await?;
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO inv_warehouses (name, address, sort) VALUES ($1, $2, $3) RETURNING id", &name, clean(b.address.flatten()), sort)
         .fetch_one(&state.db)
         .await?;
     if b.is_default == Some(true) {
@@ -230,33 +205,26 @@ async fn create_warehouse(State(state): State<AppState>, auth: AuthUser, Json(b)
 
 async fn make_default(state: &AppState, id: Uuid) -> AppResult<()> {
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE inv_warehouses SET is_default = FALSE WHERE is_default AND id <> $1").bind(id).execute(&mut *tx).await?;
-    sqlx::query("UPDATE inv_warehouses SET is_default = TRUE, is_active = TRUE WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE inv_warehouses SET is_default = FALSE WHERE is_default AND id <> $1", id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE inv_warehouses SET is_default = TRUE, is_active = TRUE WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
 
 async fn update_warehouse(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<WarehouseInput>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let (is_default,): (bool,) = sqlx::query_as("SELECT is_default FROM inv_warehouses WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("warehouse"))?;
+    let (is_default,): (bool,) = sqlx::query!(r#"SELECT is_default FROM inv_warehouses WHERE id = $1"#, id).map(|r| (r.is_default,)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("warehouse"))?;
     let name = b.name.as_deref().map(|n| required("name", n, 120)).transpose()?;
     if b.is_active == Some(false) {
         if is_default {
             return Err(AppError::bad("make another warehouse the default first"));
         }
-        let held: Decimal = sqlx::query_scalar("SELECT COALESCE(SUM(abs(quantity)), 0) FROM inv_stock WHERE warehouse_id = $1").bind(id).fetch_one(&state.db).await?;
+        let held: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE(SUM(abs(quantity)), 0) AS "v!" FROM inv_stock WHERE warehouse_id = $1"#, id).fetch_one(&state.db).await?;
         if held > Decimal::ZERO {
             return Err(AppError::bad("it still holds stock; move or write it off first"));
         }
     }
-    sqlx::query(
-        "UPDATE inv_warehouses SET name = COALESCE($2, name), address = CASE WHEN $3 THEN $4 ELSE address END, is_active = COALESCE($5, is_active) WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(b.address.is_some())
-    .bind(clean(b.address.flatten()))
-    .bind(b.is_active)
+    sqlx::query!("UPDATE inv_warehouses SET name = COALESCE($2, name), address = CASE WHEN $3 THEN $4 ELSE address END, is_active = COALESCE($5, is_active) WHERE id = $1", id, name, b.address.is_some(), clean(b.address.flatten()), b.is_active)
     .execute(&state.db)
     .await?;
     if b.is_default == Some(true) {
@@ -268,18 +236,15 @@ async fn update_warehouse(State(state): State<AppState>, auth: AuthUser, Path(id
 /// Only a warehouse that was never used; others are deactivated.
 async fn delete_warehouse(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     require(&auth)?;
-    let used: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM inv_movements WHERE warehouse_id = $1)
+    let used: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM inv_movements WHERE warehouse_id = $1)
              OR EXISTS (SELECT 1 FROM inv_documents WHERE from_warehouse = $1 OR to_warehouse = $1)
-             OR EXISTS (SELECT 1 FROM inv_warehouses WHERE id = $1 AND is_default)",
-    )
-    .bind(id)
+             OR EXISTS (SELECT 1 FROM inv_warehouses WHERE id = $1 AND is_default) AS "v!""#, id)
     .fetch_one(&state.db)
     .await?;
     if used {
         return Err(AppError::bad("this warehouse has history or is the default; deactivate it instead"));
     }
-    sqlx::query("DELETE FROM inv_warehouses WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM inv_warehouses WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "items": warehouses(&state).await? })))
 }
 
@@ -363,28 +328,21 @@ struct Movement {
 
 /// One product: stock per warehouse and its movement history.
 async fn product_stock(State(state): State<AppState>, _auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
-    let (name, unit, total): (String, String, Option<Decimal>) = sqlx::query_as("SELECT name, unit, stock FROM crm_products WHERE id = $1")
-        .bind(id)
+    let (name, unit, total): (String, String, Option<Decimal>) = sqlx::query!(r#"SELECT name, unit, stock FROM crm_products WHERE id = $1"#, id).map(|r| (r.name, r.unit, r.stock))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("product"))?;
-    let per: Vec<(Uuid, String, Decimal)> = sqlx::query_as(
-        "SELECT w.id, w.name, s.quantity FROM inv_stock s JOIN inv_warehouses w ON w.id = s.warehouse_id WHERE s.product_id = $1 ORDER BY w.sort, w.name",
-    )
-    .bind(id)
+    let per: Vec<(Uuid, String, Decimal)> = sqlx::query!(r#"SELECT w.id, w.name, s.quantity FROM inv_stock s JOIN inv_warehouses w ON w.id = s.warehouse_id WHERE s.product_id = $1 ORDER BY w.sort, w.name"#, id).map(|r| (r.id, r.name, r.quantity))
     .fetch_all(&state.db)
     .await?;
-    let movements: Vec<Movement> = sqlx::query_as(
-        "SELECT m.id, w.name AS warehouse, m.delta, m.balance, m.reason, m.document_id, d.number AS document_number,
-                m.item_id, i.number AS item_number, t.code AS item_code,
-                trim(u.first_name || ' ' || u.last_name) AS user_name, round(m.unit_cost, 4) AS unit_cost, m.cost, m.entry_id, m.created_at
+    let movements: Vec<Movement> = sqlx::query_as!(Movement, r#"SELECT m.id, w.name AS warehouse, m.delta, m.balance, m.reason, m.document_id AS "document_id?", d.number AS "document_number?",
+                m.item_id AS "item_id?", i.number AS "item_number?", t.code AS "item_code?",
+                trim(u.first_name || ' ' || u.last_name) AS "user_name?", round(m.unit_cost, 4) AS "unit_cost?", m.cost AS "cost?", m.entry_id AS "entry_id?", m.created_at
          FROM inv_movements m JOIN inv_warehouses w ON w.id = m.warehouse_id
          LEFT JOIN inv_documents d ON d.id = m.document_id
          LEFT JOIN crm_items i ON i.id = m.item_id LEFT JOIN crm_entity_types t ON t.id = i.entity_type
          LEFT JOIN users u ON u.id = m.user_id
-         WHERE m.product_id = $1 ORDER BY m.created_at DESC LIMIT 200",
-    )
-    .bind(id)
+         WHERE m.product_id = $1 ORDER BY m.created_at DESC LIMIT 200"#, id)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({

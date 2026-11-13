@@ -54,13 +54,10 @@ async fn require_owner(state: &AppState, auth: &AuthUser, project: Uuid) -> AppR
 async fn overview(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     project_access(&state, &auth, id).await?;
     let rules: Vec<(Uuid, Uuid, String, Value, i32)> =
-        sqlx::query_as("SELECT id, stage_id, kind, params, sort FROM project_stage_rules WHERE project_id = $1 ORDER BY sort, created_at").bind(id).fetch_all(&state.db).await?;
-    let triggers: Vec<(String, Uuid)> = sqlx::query_as("SELECT event, stage_id FROM project_stage_triggers WHERE project_id = $1").bind(id).fetch_all(&state.db).await?;
-    let log: Vec<(Option<Uuid>, Option<i64>, Option<String>, String, bool, chrono::DateTime<Utc>)> = sqlx::query_as(
-        "SELECT l.task_id, t.number, t.title, l.what, l.ok, l.created_at FROM project_automation_log l LEFT JOIN tasks t ON t.id = l.task_id
-         WHERE l.project_id = $1 ORDER BY l.created_at DESC LIMIT 50",
-    )
-    .bind(id)
+        sqlx::query!(r#"SELECT id, stage_id, kind, params, sort FROM project_stage_rules WHERE project_id = $1 ORDER BY sort, created_at"#, id).map(|r| (r.id, r.stage_id, r.kind, r.params, r.sort)).fetch_all(&state.db).await?;
+    let triggers: Vec<(String, Uuid)> = sqlx::query!(r#"SELECT event, stage_id FROM project_stage_triggers WHERE project_id = $1"#, id).map(|r| (r.event, r.stage_id)).fetch_all(&state.db).await?;
+    let log: Vec<(Option<Uuid>, Option<i64>, Option<String>, String, bool, chrono::DateTime<Utc>)> = sqlx::query!(r#"SELECT l.task_id AS "task_id?", t.number AS "number?", t.title AS "title?", l.what AS "what!", l.ok AS "ok!", l.created_at AS "created_at!" FROM project_automation_log l LEFT JOIN tasks t ON t.id = l.task_id
+         WHERE l.project_id = $1 ORDER BY l.created_at DESC LIMIT 50"#, id).map(|r| (r.task_id, r.number, r.title, r.what, r.ok, r.created_at))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -71,7 +68,7 @@ async fn overview(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 }
 
 async fn stage_of(state: &AppState, project: Uuid, stage: Uuid) -> AppResult<()> {
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM project_stages WHERE id = $1 AND project_id = $2)").bind(stage).bind(project).fetch_one(&state.db).await?;
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM project_stages WHERE id = $1 AND project_id = $2) AS "v!""#, stage, project).fetch_one(&state.db).await?;
     if ok { Ok(()) } else { Err(AppError::bad("that column belongs to another project")) }
 }
 
@@ -82,7 +79,7 @@ async fn check_params(state: &AppState, kind: &str, p: &Value) -> AppResult<Valu
     };
     let user = |k: &str| -> AppResult<Uuid> { p[k].as_str().and_then(|s| s.parse().ok()).ok_or_else(|| AppError::bad("choose someone")) };
     let active = |u: Uuid| async move {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active)").bind(u).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active) AS "v!""#, u).fetch_one(&state.db).await?;
         if ok { Ok::<_, AppError>(u) } else { Err(AppError::bad("choose an active employee")) }
     };
     Ok(match kind {
@@ -140,17 +137,11 @@ async fn add_rule(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
     require_owner(&state, &auth, id).await?;
     stage_of(&state, id, b.stage_id).await?;
     let params = check_params(&state, &b.kind, &b.params).await?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_stage_rules WHERE stage_id = $1").bind(b.stage_id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM project_stage_rules WHERE stage_id = $1"#, b.stage_id).fetch_one(&state.db).await?;
     if n >= 20 {
         return Err(AppError::bad("a column can have at most 20 rules"));
     }
-    sqlx::query("INSERT INTO project_stage_rules (project_id, stage_id, kind, params, sort, created_by) VALUES ($1, $2, $3, $4, $5, $6)")
-        .bind(id)
-        .bind(b.stage_id)
-        .bind(&b.kind)
-        .bind(params)
-        .bind(n as i32)
-        .bind(auth.id)
+    sqlx::query!("INSERT INTO project_stage_rules (project_id, stage_id, kind, params, sort, created_by) VALUES ($1, $2, $3, $4, $5, $6)", id, b.stage_id, &b.kind, params, n as i32, auth.id)
         .execute(&state.db)
         .await?;
     overview(State(state), auth, Path(id)).await
@@ -158,7 +149,7 @@ async fn add_rule(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 
 async fn remove_rule(State(state): State<AppState>, auth: AuthUser, Path((id, rule)): Path<(Uuid, Uuid)>) -> AppResult<Json<Value>> {
     require_owner(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM project_stage_rules WHERE id = $1 AND project_id = $2").bind(rule).bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM project_stage_rules WHERE id = $1 AND project_id = $2", rule, id).execute(&state.db).await?;
     overview(State(state), auth, Path(id)).await
 }
 
@@ -174,13 +165,8 @@ async fn set_trigger(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
         return Err(AppError::bad(format!("event must be one of: {}", EVENTS.join(", "))));
     }
     stage_of(&state, id, b.stage_id).await?;
-    sqlx::query(
-        "INSERT INTO project_stage_triggers (project_id, stage_id, event) VALUES ($1, $2, $3)
-         ON CONFLICT (project_id, event) DO UPDATE SET stage_id = EXCLUDED.stage_id",
-    )
-    .bind(id)
-    .bind(b.stage_id)
-    .bind(&b.event)
+    sqlx::query!("INSERT INTO project_stage_triggers (project_id, stage_id, event) VALUES ($1, $2, $3)
+         ON CONFLICT (project_id, event) DO UPDATE SET stage_id = EXCLUDED.stage_id", id, b.stage_id, &b.event)
     .execute(&state.db)
     .await?;
     overview(State(state), auth, Path(id)).await
@@ -188,7 +174,7 @@ async fn set_trigger(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 
 async fn remove_trigger(State(state): State<AppState>, auth: AuthUser, Path((id, event)): Path<(Uuid, String)>) -> AppResult<Json<Value>> {
     require_owner(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM project_stage_triggers WHERE project_id = $1 AND event = $2").bind(id).bind(event).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM project_stage_triggers WHERE project_id = $1 AND event = $2", id, event).execute(&state.db).await?;
     overview(State(state), auth, Path(id)).await
 }
 
@@ -202,7 +188,7 @@ pub async fn stage_entered(state: &AppState, task: Uuid, stage: Uuid, actor: Uui
 }
 
 async fn stage_entered_at(state: &AppState, task: Uuid, stage: Uuid, actor: Uuid, depth: i64) {
-    let has: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM project_stage_rules WHERE stage_id = $1)").bind(stage).fetch_one(&state.db).await.unwrap_or(false);
+    let has: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM project_stage_rules WHERE stage_id = $1) AS "v!""#, stage).fetch_one(&state.db).await.unwrap_or(false);
     if !has || depth >= MAX_DEPTH {
         return;
     }
@@ -213,12 +199,8 @@ async fn stage_entered_at(state: &AppState, task: Uuid, stage: Uuid, actor: Uuid
 
 /// Something happened to a task: if its project has a trigger for it, move the task there.
 pub async fn fire(state: &AppState, task: Uuid, event: &str, actor: Uuid) {
-    let target: Option<(Uuid, Option<String>, Option<Uuid>, String)> = sqlx::query_as(
-        "SELECT g.stage_id, s.status, t.stage_id, s.name FROM tasks t JOIN project_stage_triggers g ON g.project_id = t.project_id AND g.event = $2
-         JOIN project_stages s ON s.id = g.stage_id WHERE t.id = $1",
-    )
-    .bind(task)
-    .bind(event)
+    let target: Option<(Uuid, Option<String>, Option<Uuid>, String)> = sqlx::query!(r#"SELECT g.stage_id, s.status, t.stage_id AS "c2", s.name FROM tasks t JOIN project_stage_triggers g ON g.project_id = t.project_id AND g.event = $2
+         JOIN project_stages s ON s.id = g.stage_id WHERE t.id = $1"#, task, event).map(|r| (r.stage_id, r.status, r.c2, r.name))
     .fetch_optional(&state.db)
     .await
     .ok()
@@ -231,7 +213,7 @@ pub async fn fire(state: &AppState, task: Uuid, event: &str, actor: Uuid) {
         tracing::warn!(error = ?e, "trigger could not move the task");
         return;
     }
-    let project: Option<Uuid> = sqlx::query_scalar("SELECT project_id FROM tasks WHERE id = $1").bind(task).fetch_optional(&state.db).await.ok().flatten().flatten();
+    let project: Option<Uuid> = sqlx::query_scalar!("SELECT project_id FROM tasks WHERE id = $1", task).fetch_optional(&state.db).await.ok().flatten().flatten();
     if let Some(p) = project {
         log(state, p, Some(task), format!("Moved to “{name}” ({})", match event {
             "comment" => "a comment",
@@ -247,7 +229,7 @@ pub async fn fire(state: &AppState, task: Uuid, event: &str, actor: Uuid) {
 
 /// Moves a task to a column (and to the column's status, if it has one).
 async fn move_to(state: &AppState, task: Uuid, stage: Uuid, linked: Option<String>, name: &str, actor: Uuid) -> Result<()> {
-    sqlx::query("UPDATE tasks SET stage_id = $2, updated_at = now(), last_activity_at = now() WHERE id = $1").bind(task).bind(stage).execute(&state.db).await?;
+    sqlx::query!("UPDATE tasks SET stage_id = $2, updated_at = now(), last_activity_at = now() WHERE id = $1", task, stage).execute(&state.db).await?;
     record_history(&state.db, task, actor, "stage", None, Some(name.to_string())).await?;
     if let Some(status) = linked {
         set_status(state, task, &status, actor).await?;
@@ -256,13 +238,11 @@ async fn move_to(state: &AppState, task: Uuid, stage: Uuid, linked: Option<Strin
 }
 
 async fn set_status(state: &AppState, task: Uuid, status: &str, actor: Uuid) -> Result<()> {
-    let old: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+    let old: String = sqlx::query_scalar!("SELECT status FROM tasks WHERE id = $1", task).fetch_one(&state.db).await?;
     if old == status {
         return Ok(());
     }
-    sqlx::query("UPDATE tasks SET status = $2, completed_at = CASE WHEN $2 = 'done' THEN now() ELSE NULL END WHERE id = $1")
-    .bind(task)
-    .bind(status)
+    sqlx::query!("UPDATE tasks SET status = $2, completed_at = CASE WHEN $2 = 'done' THEN now() ELSE NULL END WHERE id = $1", task, status)
     .execute(&state.db)
     .await?;
     record_history(&state.db, task, actor, "status", Some(old), Some(status.to_string())).await?;
@@ -270,11 +250,7 @@ async fn set_status(state: &AppState, task: Uuid, status: &str, actor: Uuid) -> 
 }
 
 async fn log(state: &AppState, project: Uuid, task: Option<Uuid>, what: String, ok: bool) {
-    let _ = sqlx::query("INSERT INTO project_automation_log (project_id, task_id, what, ok) VALUES ($1, $2, $3, $4)")
-        .bind(project)
-        .bind(task)
-        .bind(what)
-        .bind(ok)
+    let _ = sqlx::query!("INSERT INTO project_automation_log (project_id, task_id, what, ok) VALUES ($1, $2, $3, $4)", project, task, what, ok)
         .execute(&state.db)
         .await;
 }
@@ -285,22 +261,19 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
     let stage: Uuid = serde_json::from_value(payload["stage_id"].clone())?;
     let actor: Uuid = serde_json::from_value(payload["actor"].clone())?;
     let depth = payload["depth"].as_i64().unwrap_or(0);
-    let row: Option<(Option<Uuid>, Option<Uuid>, i64, String, Uuid, Uuid, String)> = sqlx::query_as(
-        "SELECT t.project_id, t.stage_id, t.number, t.title, t.responsible_id, t.created_by, COALESCE(s.name, '') FROM tasks t
-         LEFT JOIN project_stages s ON s.id = t.stage_id WHERE t.id = $1",
-    )
-    .bind(task)
+    let row: Option<(Option<Uuid>, Option<Uuid>, i64, String, Uuid, Uuid, String)> = sqlx::query!(r#"SELECT t.project_id AS "project_id?", t.stage_id AS "stage_id?", t.number AS "number!", t.title AS "title!", t.responsible_id AS "responsible_id!", t.created_by AS "created_by!", COALESCE(s.name, '') AS "c6!" FROM tasks t
+         LEFT JOIN project_stages s ON s.id = t.stage_id WHERE t.id = $1"#, task).map(|r| (r.project_id, r.stage_id, r.number, r.title, r.responsible_id, r.created_by, r.c6))
     .fetch_optional(&state.db)
     .await?;
     let Some((Some(project), current, number, title, _, creator, column)) = row else { return Ok(()) };
     if current != Some(stage) {
         return Ok(());
     }
-    let rules: Vec<(String, Value)> = sqlx::query_as("SELECT kind, params FROM project_stage_rules WHERE stage_id = $1 ORDER BY sort, created_at").bind(stage).fetch_all(&state.db).await?;
+    let rules: Vec<(String, Value)> = sqlx::query!(r#"SELECT kind, params FROM project_stage_rules WHERE stage_id = $1 ORDER BY sort, created_at"#, stage).map(|r| (r.kind, r.params)).fetch_all(&state.db).await?;
     let fill = |t: &str, resp_name: &str| t.replace("{task}", &title).replace("{number}", &number.to_string()).replace("{column}", &column).replace("{responsible}", resp_name);
     for (kind, p) in rules {
         // An earlier rule may have changed who is responsible.
-        let responsible: Uuid = sqlx::query_scalar("SELECT responsible_id FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+        let responsible: Uuid = sqlx::query_scalar!("SELECT responsible_id FROM tasks WHERE id = $1", task).fetch_one(&state.db).await?;
         let resp_name = super::user_name(state, responsible).await;
         let outcome: Result<String> = async {
             let uid = |k: &str| p[k].as_str().and_then(|s| s.parse::<Uuid>().ok());
@@ -309,7 +282,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
                     let to: Vec<Uuid> = match p["to"].as_str().unwrap_or("responsible") {
                         "responsible" => vec![responsible],
                         "creator" => vec![creator],
-                        "owners" => sqlx::query_scalar("SELECT user_id FROM project_members WHERE project_id = $1 AND role = 'owner'").bind(project).fetch_all(&state.db).await?,
+                        "owners" => sqlx::query_scalar!("SELECT user_id FROM project_members WHERE project_id = $1 AND role = 'owner'", project).fetch_all(&state.db).await?,
                         "participants" => super::participants(state, task).await,
                         other => other.parse().ok().into_iter().collect(),
                     };
@@ -319,13 +292,13 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
                 }
                 "comment" => {
                     let text = fill(p["text"].as_str().unwrap_or(""), &resp_name);
-                    sqlx::query("INSERT INTO task_comments (task_id, author_id, body) VALUES ($1, NULL, $2)").bind(task).bind(&text).execute(&state.db).await?;
+                    sqlx::query!("INSERT INTO task_comments (task_id, author_id, body) VALUES ($1, NULL, $2)", task, &text).execute(&state.db).await?;
                     Ok(format!("Commented: {text}"))
                 }
                 "set_responsible" => {
                     let u = uid("user_id").ok_or_else(|| anyhow::anyhow!("no one chosen"))?;
-                    sqlx::query("UPDATE tasks SET responsible_id = $2 WHERE id = $1").bind(task).bind(u).execute(&state.db).await?;
-                    sqlx::query("DELETE FROM task_members WHERE task_id = $1 AND user_id = $2").bind(task).bind(u).execute(&state.db).await?;
+                    sqlx::query!("UPDATE tasks SET responsible_id = $2 WHERE id = $1", task, u).execute(&state.db).await?;
+                    sqlx::query!("DELETE FROM task_members WHERE task_id = $1 AND user_id = $2", task, u).execute(&state.db).await?;
                     let name = super::user_name(state, u).await;
                     record_history(&state.db, task, actor, "responsible", Some(resp_name.clone()), Some(name.clone())).await?;
                     notify_task(state, &[u], "task.assigned", format!("New task for you: {title}"), None, task, Uuid::nil()).await;
@@ -335,10 +308,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
                     let u = uid("user_id").ok_or_else(|| anyhow::anyhow!("no one chosen"))?;
                     let role = if kind == "add_assistant" { "assistant" } else { "watcher" };
                     if u != responsible {
-                        sqlx::query("INSERT INTO task_members (task_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (task_id, user_id) DO UPDATE SET role = EXCLUDED.role")
-                            .bind(task)
-                            .bind(u)
-                            .bind(role)
+                        sqlx::query!("INSERT INTO task_members (task_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (task_id, user_id) DO UPDATE SET role = EXCLUDED.role", task, u, role)
                             .execute(&state.db)
                             .await?;
                     }
@@ -346,17 +316,17 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
                 }
                 "set_deadline" => {
                     let mut at = Utc::now() + Duration::days(p["days"].as_i64().unwrap_or(0)) + Duration::hours(p["hours"].as_i64().unwrap_or(0));
-                    let skip: bool = sqlx::query_scalar("SELECT skip_nonworking FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+                    let skip: bool = sqlx::query_scalar!("SELECT skip_nonworking FROM tasks WHERE id = $1", task).fetch_one(&state.db).await?;
                     if skip {
                         at = super::depth::to_working_day(state, at).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
                     }
-                    sqlx::query("UPDATE tasks SET deadline = $2, deadline_reminded_at = NULL, overdue_notified_at = NULL WHERE id = $1").bind(task).bind(at).execute(&state.db).await?;
+                    sqlx::query!("UPDATE tasks SET deadline = $2, deadline_reminded_at = NULL, overdue_notified_at = NULL WHERE id = $1", task, at).execute(&state.db).await?;
                     record_history(&state.db, task, actor, "deadline", None, Some(at.to_rfc3339())).await?;
                     Ok(format!("Set the deadline to {}", at.format("%Y-%m-%d %H:%M UTC")))
                 }
                 "set_priority" => {
                     let v = p["priority"].as_str().unwrap_or("normal");
-                    sqlx::query("UPDATE tasks SET priority = $2 WHERE id = $1").bind(task).bind(v).execute(&state.db).await?;
+                    sqlx::query!("UPDATE tasks SET priority = $2 WHERE id = $1", task, v).execute(&state.db).await?;
                     Ok(format!("Set the priority to {v}"))
                 }
                 "set_status" => {
@@ -364,7 +334,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
                     set_status(state, task, v, actor).await?;
                     // The status may take the task to another column, whose rules then run.
                     super::stages::sync_after_status(state, task, v).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
-                    let now: Option<Uuid> = sqlx::query_scalar("SELECT stage_id FROM tasks WHERE id = $1").bind(task).fetch_one(&state.db).await?;
+                    let now: Option<Uuid> = sqlx::query_scalar!(r#"SELECT stage_id AS "stage_id?" FROM tasks WHERE id = $1"#, task).fetch_one(&state.db).await?;
                     if let Some(next) = now.filter(|n| *n != stage) {
                         stage_entered_at(state, task, next, actor, depth + 1).await;
                     }
@@ -377,18 +347,10 @@ pub async fn run_job(state: &AppState, payload: &Value) -> Result<()> {
                         other => other.parse().unwrap_or(responsible),
                     };
                     let sub_title = fill(p["title"].as_str().unwrap_or(""), &resp_name);
-                    let number: i64 = sqlx::query_scalar("UPDATE counters SET value = value + 1 WHERE name = 'task_number' RETURNING value").fetch_one(&state.db).await?;
-                    let sid: Uuid = sqlx::query_scalar(
-                        "INSERT INTO tasks (title, responsible_id, created_by, project_id, parent_id, number, stage_id)
+                    let number: i64 = sqlx::query_scalar!("UPDATE counters SET value = value + 1 WHERE name = 'task_number' RETURNING value").fetch_one(&state.db).await?;
+                    let sid: Uuid = sqlx::query_scalar!(r#"INSERT INTO tasks (title, responsible_id, created_by, project_id, parent_id, number, stage_id)
                          VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM project_stages WHERE project_id = $4 ORDER BY (status IS NOT DISTINCT FROM 'new') DESC, sort LIMIT 1))
-                         RETURNING id",
-                    )
-                    .bind(&sub_title)
-                    .bind(who)
-                    .bind(creator)
-                    .bind(project)
-                    .bind(task)
-                    .bind(number)
+                         RETURNING id AS "id!""#, &sub_title, who, creator, project, task, number)
                     .fetch_one(&state.db)
                     .await?;
                     record_history(&state.db, sid, actor, "created", None, Some(sub_title.clone())).await?;

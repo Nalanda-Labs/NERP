@@ -80,15 +80,10 @@ fn s(d: Decimal) -> String {
 /// Balances per account (debits minus credits) between two dates (inclusive; None: unbounded).
 /// `no_closing` leaves year-end closing entries out (for profit and loss).
 async fn balances(state: &AppState, from: Option<NaiveDate>, to: NaiveDate, no_closing: bool) -> AppResult<Vec<(Uuid, String, String, String, String, Decimal, Decimal)>> {
-    Ok(sqlx::query_as(
-        "SELECT a.id, a.code, a.name, a.type, a.subtype, COALESCE(SUM(l.debit), 0), COALESCE(SUM(l.credit), 0)
+    Ok(sqlx::query!(r#"SELECT a.id AS "id!", a.code AS "code!", a.name AS "name!", a.type AS "c3!", a.subtype AS "subtype!", COALESCE(SUM(l.debit), 0) AS "c5!", COALESCE(SUM(l.credit), 0) AS "c6!"
          FROM acc_accounts a JOIN acc_lines l ON l.account_id = a.id JOIN acc_entries e ON e.id = l.entry_id
          WHERE e.status <> 'draft' AND l.date <= $2 AND ($1::date IS NULL OR l.date >= $1) AND (NOT $3 OR e.source <> 'closing')
-         GROUP BY a.id, a.code, a.name, a.type, a.subtype ORDER BY a.code",
-    )
-    .bind(from)
-    .bind(to)
-    .bind(no_closing)
+         GROUP BY a.id, a.code, a.name, a.type, a.subtype ORDER BY a.code"#, from, to, no_closing).map(|r| (r.id, r.code, r.name, r.c3, r.subtype, r.c5, r.c6))
     .fetch_all(&state.db)
     .await?)
 }
@@ -224,14 +219,10 @@ async fn balance_sheet(State(state): State<AppState>, auth: AuthUser, Query(q): 
 async fn ledger_report(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Period>) -> AppResult<Response> {
     need(&auth, Level::View)?;
     let account = q.account_id.ok_or_else(|| AppError::bad("choose an account"))?;
-    let (code, name): (String, String) = sqlx::query_as("SELECT code, name FROM acc_accounts WHERE id = $1").bind(account).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("account"))?;
+    let (code, name): (String, String) = sqlx::query!(r#"SELECT code, name FROM acc_accounts WHERE id = $1"#, account).map(|r| (r.code, r.name)).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("account"))?;
     let to = q.to.unwrap_or_else(today);
     let opening: Decimal = match q.from {
-        Some(f) => sqlx::query_scalar(
-            "SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = $1 AND e.status <> 'draft' AND l.date < $2",
-        )
-        .bind(account)
-        .bind(f)
+        Some(f) => sqlx::query_scalar!(r#"SELECT COALESCE(SUM(l.debit - l.credit), 0) AS "v!" FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = $1 AND e.status <> 'draft' AND l.date < $2"#, account, f)
         .fetch_one(&state.db)
         .await?,
         None => Decimal::ZERO,
@@ -286,14 +277,10 @@ async fn aging(State(state): State<AppState>, auth: AuthUser, Query(q): Query<Pe
     .await?;
     // Money received (paid) by then and not allocated by then: a credit on the account, so the
     // ageing adds up to the receivables (payables) account.
-    let credits: Vec<(Uuid, Option<Uuid>, Option<String>, i64, NaiveDate, String, Decimal, Decimal, Decimal)> = sqlx::query_as(
-        "SELECT p.id, p.party_id, x.title, p.number, p.date, p.currency, p.fx_rate, p.amount,
-                COALESCE((SELECT SUM(al.amount) FROM acc_allocations al WHERE al.payment_id = p.id), 0)
+    let credits: Vec<(Uuid, Option<Uuid>, Option<String>, i64, NaiveDate, String, Decimal, Decimal, Decimal)> = sqlx::query!(r#"SELECT p.id AS "id!", p.party_id AS "party_id?", x.title AS "title?", p.number AS "number!", p.date AS "date!", p.currency AS "currency!", p.fx_rate AS "fx_rate!", p.amount AS "amount!",
+                COALESCE((SELECT SUM(al.amount) FROM acc_allocations al WHERE al.payment_id = p.id), 0) AS "c8!"
          FROM acc_payments p LEFT JOIN crm_items x ON x.id = p.party_id
-         WHERE p.status = 'posted' AND p.direction = $1 AND p.date <= $2",
-    )
-    .bind(if receivable { "in" } else { "out" })
-    .bind(as_of)
+         WHERE p.status = 'posted' AND p.direction = $1 AND p.date <= $2"#, if receivable { "in" } else { "out" }, as_of).map(|r| (r.id, r.party_id, r.title, r.number, r.date, r.currency, r.fx_rate, r.amount, r.c8))
     .fetch_all(&state.db)
     .await?;
     const BUCKETS: [&str; 5] = ["current", "1-30", "31-60", "61-90", "over 90"];
@@ -347,14 +334,10 @@ async fn tax_report(State(state): State<AppState>, auth: AuthUser, Query(q): Que
     need(&auth, Level::View)?;
     let to = q.to.unwrap_or_else(today);
     let from = q.from.unwrap_or_else(|| NaiveDate::from_ymd_opt(to.year(), to.month(), 1).unwrap());
-    let rows: Vec<(Uuid, String, Decimal, String, Decimal, Decimal)> = sqlx::query_as(
-        "SELECT t.id, t.name, t.rate, t.scope, COALESCE(SUM(l.tax_base), 0),
-                COALESCE(SUM(CASE WHEN t.scope = 'sales' THEN l.credit - l.debit ELSE l.debit - l.credit END), 0)
+    let rows: Vec<(Uuid, String, Decimal, String, Decimal, Decimal)> = sqlx::query!(r#"SELECT t.id AS "id!", t.name AS "name!", t.rate AS "rate!", t.scope AS "scope!", COALESCE(SUM(l.tax_base), 0) AS "c4!",
+                COALESCE(SUM(CASE WHEN t.scope = 'sales' THEN l.credit - l.debit ELSE l.debit - l.credit END), 0) AS "c5!"
          FROM acc_taxes t JOIN acc_lines l ON l.tax_id = t.id JOIN acc_entries e ON e.id = l.entry_id
-         WHERE e.status <> 'draft' AND l.date BETWEEN $1 AND $2 GROUP BY t.id, t.name, t.rate, t.scope ORDER BY t.scope DESC, t.rate",
-    )
-    .bind(from)
-    .bind(to)
+         WHERE e.status <> 'draft' AND l.date BETWEEN $1 AND $2 GROUP BY t.id, t.name, t.rate, t.scope ORDER BY t.scope DESC, t.rate"#, from, to).map(|r| (r.id, r.name, r.rate, r.scope, r.c4, r.c5))
     .fetch_all(&state.db)
     .await?;
     let sales: Decimal = rows.iter().filter(|r| r.3 == "sales").map(|r| r.5).sum();
@@ -381,30 +364,19 @@ async fn statement(State(state): State<AppState>, auth: AuthUser, Query(q): Quer
     let st = ready(&state).await?;
     let receivable = q.kind.as_deref() != Some("payable");
     let control = if receivable { default_account(st.receivable_account, "receivables")? } else { default_account(st.payable_account, "payables")? };
-    let name: String = sqlx::query_scalar("SELECT title FROM crm_items WHERE id = $1").bind(party).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("party"))?;
+    let name: String = sqlx::query_scalar!("SELECT title FROM crm_items WHERE id = $1", party).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("party"))?;
     let to = q.to.unwrap_or_else(today);
     let sign = if receivable { Decimal::ONE } else { -Decimal::ONE };
     let opening: Decimal = match q.from {
-        Some(f) => sqlx::query_scalar::<_, Decimal>(
-            "SELECT COALESCE(SUM(l.debit - l.credit), 0) FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id
-             WHERE l.account_id = $1 AND l.party_id = $2 AND e.status <> 'draft' AND l.date < $3",
-        )
-        .bind(control)
-        .bind(party)
-        .bind(f)
+        Some(f) => sqlx::query_scalar!(r#"SELECT COALESCE(SUM(l.debit - l.credit), 0) AS "v!" FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id
+             WHERE l.account_id = $1 AND l.party_id = $2 AND e.status <> 'draft' AND l.date < $3"#, control, party, f)
         .fetch_one(&state.db)
         .await?
             * sign,
         None => Decimal::ZERO,
     };
-    let lines: Vec<(NaiveDate, Option<i64>, Option<String>, Option<String>, Decimal, Decimal)> = sqlx::query_as(
-        "SELECT l.date, e.number, e.memo, l.description, l.debit, l.credit FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id
-         WHERE l.account_id = $1 AND l.party_id = $2 AND e.status <> 'draft' AND ($3::date IS NULL OR l.date >= $3) AND l.date <= $4 ORDER BY l.date, e.number",
-    )
-    .bind(control)
-    .bind(party)
-    .bind(q.from)
-    .bind(to)
+    let lines: Vec<(NaiveDate, Option<i64>, Option<String>, Option<String>, Decimal, Decimal)> = sqlx::query!(r#"SELECT l.date, e.number, e.memo, l.description, l.debit, l.credit FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id
+         WHERE l.account_id = $1 AND l.party_id = $2 AND e.status <> 'draft' AND ($3::date IS NULL OR l.date >= $3) AND l.date <= $4 ORDER BY l.date, e.number"#, control, party, q.from, to).map(|r| (r.date, r.number, r.memo, r.description, r.debit, r.credit))
     .fetch_all(&state.db)
     .await?;
     let mut running = opening;
@@ -429,12 +401,10 @@ async fn summary(State(state): State<AppState>, auth: AuthUser) -> AppResult<Jso
         return Ok(Json(json!({ "ready": false })));
     }
     let t = today();
-    let money: Vec<(Uuid, String, String, Option<String>, Decimal, Decimal)> = sqlx::query_as(
-        "SELECT a.id, a.code, a.name, a.currency,
-                COALESCE((SELECT SUM(l.debit - l.credit) FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = a.id AND e.status <> 'draft'), 0),
-                COALESCE((SELECT SUM(l.amount_currency) FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = a.id AND e.status <> 'draft' AND l.currency IS NOT NULL), 0)
-         FROM acc_accounts a WHERE a.subtype IN ('bank', 'cash') AND a.is_active ORDER BY a.code",
-    )
+    let money: Vec<(Uuid, String, String, Option<String>, Decimal, Decimal)> = sqlx::query!(r#"SELECT a.id AS "id!", a.code AS "code!", a.name AS "name!", a.currency AS "currency?",
+                COALESCE((SELECT SUM(l.debit - l.credit) FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = a.id AND e.status <> 'draft'), 0) AS "c4!",
+                COALESCE((SELECT SUM(l.amount_currency) FROM acc_lines l JOIN acc_entries e ON e.id = l.entry_id WHERE l.account_id = a.id AND e.status <> 'draft' AND l.currency IS NOT NULL), 0) AS "c5!"
+         FROM acc_accounts a WHERE a.subtype IN ('bank', 'cash') AND a.is_active ORDER BY a.code"#).map(|r| (r.id, r.code, r.name, r.currency, r.c4, r.c5))
     .fetch_all(&state.db)
     .await?;
     let db = &state.db;
@@ -454,14 +424,12 @@ async fn summary(State(state): State<AppState>, auth: AuthUser) -> AppResult<Jso
     let (ap, ap_late, ap_late_n) = owed("bill").await?;
     let year = pl(&state, year_start(t, st.fiscal_year_start as u32), t).await?;
     let month = pl(&state, NaiveDate::from_ymd_opt(t.year(), t.month(), 1).unwrap(), t).await?;
-    let unposted: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM crm_items i WHERE i.entity_type = 6 AND i.deleted_at IS NULL AND i.stage_semantics <> 'failure'
-           AND NOT EXISTS (SELECT 1 FROM acc_invoices a WHERE a.item_id = i.id AND a.status <> 'void')",
-    )
+    let unposted: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_items i WHERE i.entity_type = 6 AND i.deleted_at IS NULL AND i.stage_semantics <> 'failure'
+           AND NOT EXISTS (SELECT 1 FROM acc_invoices a WHERE a.item_id = i.id AND a.status <> 'void')"#)
     .fetch_one(&state.db)
     .await?;
-    let unmatched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM acc_bank_lines WHERE status = 'unmatched'").fetch_one(&state.db).await?;
-    let drafts: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM acc_bills WHERE status = 'draft') + (SELECT COUNT(*) FROM acc_entries WHERE status = 'draft')").fetch_one(&state.db).await?;
+    let unmatched: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM acc_bank_lines WHERE status = 'unmatched'"#).fetch_one(&state.db).await?;
+    let drafts: i64 = sqlx::query_scalar!(r#"SELECT (SELECT COUNT(*) FROM acc_bills WHERE status = 'draft') + (SELECT COUNT(*) FROM acc_entries WHERE status = 'draft') AS "v!""#).fetch_one(&state.db).await?;
     Ok(Json(json!({
         "ready": true, "base_currency": super::base_currency(&state).await?, "lock_date": st.lock_date,
         "money": money.into_iter().map(|(id, code, name, cur, bal, foreign)| json!({ "account_id": id, "code": code, "name": name, "currency": cur, "balance": bal, "balance_currency": if cur.is_some() { Some(foreign) } else { None } })).collect::<Vec<_>>(),
@@ -492,19 +460,16 @@ async fn close_year(State(state): State<AppState>, auth: AuthUser, Json(b): Json
     }
     let mut tx = state.db.begin().await?;
     sqlx::query("SELECT id FROM acc_settings WHERE id = 1 FOR UPDATE").execute(&mut *tx).await?;
-    let done: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM acc_entries WHERE source = 'closing' AND date = $1 AND status = 'posted')").bind(b.year_end).fetch_one(&mut *tx).await?;
+    let done: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM acc_entries WHERE source = 'closing' AND date = $1 AND status = 'posted') AS "v!""#, b.year_end).fetch_one(&mut *tx).await?;
     if done {
         return Err(AppError::Conflict("that year is already closed".into()));
     }
-    let drafts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM acc_entries WHERE status = 'draft' AND date <= $1").bind(b.year_end).fetch_one(&mut *tx).await?;
+    let drafts: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM acc_entries WHERE status = 'draft' AND date <= $1"#, b.year_end).fetch_one(&mut *tx).await?;
     if drafts > 0 {
         return Err(AppError::bad(format!("{drafts} draft entr{} dated in that year; post or delete them first", if drafts == 1 { "y is" } else { "ies are" })));
     }
-    let rows: Vec<(Uuid, Decimal)> = sqlx::query_as(
-        "SELECT a.id, SUM(l.debit - l.credit) FROM acc_accounts a JOIN acc_lines l ON l.account_id = a.id JOIN acc_entries e ON e.id = l.entry_id
-         WHERE a.type IN ('income', 'expense') AND e.status <> 'draft' AND l.date <= $1 GROUP BY a.id HAVING SUM(l.debit - l.credit) <> 0",
-    )
-    .bind(b.year_end)
+    let rows: Vec<(Uuid, Decimal)> = sqlx::query!(r#"SELECT a.id AS "id!", SUM(l.debit - l.credit) AS "c1!" FROM acc_accounts a JOIN acc_lines l ON l.account_id = a.id JOIN acc_entries e ON e.id = l.entry_id
+         WHERE a.type IN ('income', 'expense') AND e.status <> 'draft' AND l.date <= $1 GROUP BY a.id HAVING SUM(l.debit - l.credit) <> 0"#, b.year_end).map(|r| (r.id, r.c1))
     .fetch_all(&mut *tx)
     .await?;
     let mut entry = None;
@@ -514,7 +479,7 @@ async fn close_year(State(state): State<AppState>, auth: AuthUser, Json(b): Json
         lines.push(ledger::signed(re, -profit).text("Profit for the year"));
         entry = Some(ledger::post(&mut tx, b.year_end, Some(&format!("Year-end closing {}", b.year_end)), "closing", None, &lines, Some(auth.id)).await?);
     }
-    sqlx::query("UPDATE acc_settings SET lock_date = GREATEST(COALESCE(lock_date, $1), $1) WHERE id = 1").bind(b.year_end).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE acc_settings SET lock_date = GREATEST(COALESCE(lock_date, $1), $1) WHERE id = 1", b.year_end).execute(&mut *tx).await?;
     tx.commit().await?;
     audit::record(&state.db, Some(auth.id), "accounting.close_year", "settings", None, json!({ "year_end": b.year_end }), None).await;
     Ok(Json(json!({ "entry_id": entry, "lock_date": b.year_end })))

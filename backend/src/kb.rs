@@ -215,22 +215,19 @@ struct TreeNode {
 }
 
 async fn tree(state: &AppState, space: Uuid) -> AppResult<Vec<TreeNode>> {
-    Ok(sqlx::query_as("SELECT id, parent_id, title, sort FROM kb_pages WHERE space_id = $1 ORDER BY sort, title").bind(space).fetch_all(&state.db).await?)
+    Ok(sqlx::query_as!(TreeNode, r#"SELECT id, parent_id AS "parent_id?", title, sort FROM kb_pages WHERE space_id = $1 ORDER BY sort, title"#, space).fetch_all(&state.db).await?)
 }
 
 async fn get_space(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     readable(&state, &auth, id).await?;
     let (name, description, to_all, created_by): (String, Option<String>, bool, Option<Uuid>) =
-        sqlx::query_as("SELECT name, description, to_all, created_by FROM kb_spaces WHERE id = $1").bind(id).fetch_one(&state.db).await?;
+        sqlx::query!(r#"SELECT name, description, to_all, created_by FROM kb_spaces WHERE id = $1"#, id).map(|r| (r.name, r.description, r.to_all, r.created_by)).fetch_one(&state.db).await?;
     let can_edit = can(&state, &auth, id, "edit").await?;
     let mut v = json!({ "id": id, "name": name, "description": description, "to_all": to_all, "can_edit": can_edit, "pages": tree(&state, id).await? });
     // Who reads and edits it: for those who can change that.
     if manager(&auth) || created_by == Some(auth.id) {
-        let rows: Vec<(String, Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query_as(
-            "SELECT a.level, a.user_id, a.department_id, COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) FROM kb_access a
-             LEFT JOIN users u ON u.id = a.user_id LEFT JOIN departments d ON d.id = a.department_id WHERE a.space_id = $1",
-        )
-        .bind(id)
+        let rows: Vec<(String, Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query!(r#"SELECT a.level AS "level!", a.user_id AS "user_id?", a.department_id AS "department_id?", COALESCE(trim(u.first_name || ' ' || u.last_name), d.name) AS "c3?" FROM kb_access a
+             LEFT JOIN users u ON u.id = a.user_id LEFT JOIN departments d ON d.id = a.department_id WHERE a.space_id = $1"#, id).map(|r| (r.level, r.user_id, r.department_id, r.c3))
         .fetch_all(&state.db)
         .await?;
         let pick = |level: &str| -> Value {
@@ -265,8 +262,8 @@ struct SpaceInput {
 }
 
 async fn check_who(state: &AppState, w: &Who) -> AppResult<()> {
-    let u: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = ANY($1) AND is_active").bind(&w.users).fetch_one(&state.db).await?;
-    let d: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM departments WHERE id = ANY($1)").bind(&w.departments).fetch_one(&state.db).await?;
+    let u: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM users WHERE id = ANY($1) AND is_active"#, &w.users).fetch_one(&state.db).await?;
+    let d: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM departments WHERE id = ANY($1)"#, &w.departments).fetch_one(&state.db).await?;
     if u as usize != w.users.len() || d as usize != w.departments.len() {
         return Err(AppError::bad("some of the people or departments don't exist"));
     }
@@ -274,12 +271,12 @@ async fn check_who(state: &AppState, w: &Who) -> AppResult<()> {
 }
 
 async fn set_access(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, space: Uuid, level: &str, w: &Who) -> AppResult<()> {
-    sqlx::query("DELETE FROM kb_access WHERE space_id = $1 AND level = $2").bind(space).bind(level).execute(&mut **tx).await?;
+    sqlx::query!("DELETE FROM kb_access WHERE space_id = $1 AND level = $2", space, level).execute(&mut **tx).await?;
     for u in &w.users {
-        sqlx::query("INSERT INTO kb_access (space_id, user_id, level) VALUES ($1, $2, $3)").bind(space).bind(u).bind(level).execute(&mut **tx).await?;
+        sqlx::query!("INSERT INTO kb_access (space_id, user_id, level) VALUES ($1, $2, $3)", space, u, level).execute(&mut **tx).await?;
     }
     for d in &w.departments {
-        sqlx::query("INSERT INTO kb_access (space_id, department_id, level) VALUES ($1, $2, $3)").bind(space).bind(d).bind(level).execute(&mut **tx).await?;
+        sqlx::query!("INSERT INTO kb_access (space_id, department_id, level) VALUES ($1, $2, $3)", space, d, level).execute(&mut **tx).await?;
     }
     Ok(())
 }
@@ -292,11 +289,7 @@ async fn create_space(State(state): State<AppState>, auth: AuthUser, Json(b): Js
     check_who(&state, &readers).await?;
     check_who(&state, &editors).await?;
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO kb_spaces (name, description, to_all, created_by) VALUES ($1, $2, $3, $4) RETURNING id")
-        .bind(&name)
-        .bind(clean(b.description.flatten()))
-        .bind(b.to_all.unwrap_or(true))
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO kb_spaces (name, description, to_all, created_by) VALUES ($1, $2, $3, $4) RETURNING id", &name, clean(b.description.flatten()), b.to_all.unwrap_or(true), auth.id)
         .fetch_one(&mut *tx)
         .await?;
     set_access(&mut tx, id, "read", &readers).await?;
@@ -306,7 +299,7 @@ async fn create_space(State(state): State<AppState>, auth: AuthUser, Json(b): Js
 }
 
 async fn owns_space(state: &AppState, auth: &AuthUser, id: Uuid) -> AppResult<()> {
-    let created_by: Option<Uuid> = sqlx::query_scalar("SELECT created_by FROM kb_spaces WHERE id = $1").bind(id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("space"))?;
+    let created_by: Option<Uuid> = sqlx::query_scalar!("SELECT created_by FROM kb_spaces WHERE id = $1", id).fetch_optional(&state.db).await?.ok_or(AppError::NotFound("space"))?;
     readable(state, auth, id).await?;
     if manager(auth) || created_by == Some(auth.id) { Ok(()) } else { Err(AppError::Forbidden) }
 }
@@ -321,12 +314,7 @@ async fn update_space(State(state): State<AppState>, auth: AuthUser, Path(id): P
         check_who(&state, w).await?;
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE kb_spaces SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END, to_all = COALESCE($5, to_all) WHERE id = $1")
-        .bind(id)
-        .bind(name)
-        .bind(b.description.is_some())
-        .bind(clean(b.description.flatten()))
-        .bind(b.to_all)
+    sqlx::query!("UPDATE kb_spaces SET name = COALESCE($2, name), description = CASE WHEN $3 THEN $4 ELSE description END, to_all = COALESCE($5, to_all) WHERE id = $1", id, name, b.description.is_some(), clean(b.description.flatten()), b.to_all)
         .execute(&mut *tx)
         .await?;
     if let Some(w) = &b.readers {
@@ -341,7 +329,7 @@ async fn update_space(State(state): State<AppState>, auth: AuthUser, Path(id): P
 
 async fn delete_space(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     owns_space(&state, &auth, id).await?;
-    sqlx::query("DELETE FROM kb_spaces WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM kb_spaces WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -362,11 +350,8 @@ struct PageRow {
 }
 
 async fn page_row(state: &AppState, id: Uuid) -> AppResult<PageRow> {
-    sqlx::query_as(
-        "SELECT p.id, p.space_id, p.parent_id, p.title, p.body, p.version, trim(u.first_name || ' ' || u.last_name) AS updated_by_name, p.updated_at
-         FROM kb_pages p LEFT JOIN users u ON u.id = p.updated_by WHERE p.id = $1",
-    )
-    .bind(id)
+    sqlx::query_as!(PageRow, r#"SELECT p.id AS "id!", p.space_id AS "space_id!", p.parent_id AS "parent_id?", p.title AS "title!", p.body AS "body!", p.version AS "version!", trim(u.first_name || ' ' || u.last_name) AS "updated_by_name?", p.updated_at AS "updated_at!"
+         FROM kb_pages p LEFT JOIN users u ON u.id = p.updated_by WHERE p.id = $1"#, id)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("page"))
@@ -375,16 +360,13 @@ async fn page_row(state: &AppState, id: Uuid) -> AppResult<PageRow> {
 async fn get_page(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let p = page_row(&state, id).await?;
     readable(&state, &auth, p.space_id).await.map_err(|_| AppError::NotFound("page"))?;
-    let path: Vec<(Uuid, String)> = sqlx::query_as(
-        "WITH RECURSIVE up AS (SELECT id, parent_id, title, 0 AS n FROM kb_pages WHERE id = $1
+    let path: Vec<(Uuid, String)> = sqlx::query!(r#"WITH RECURSIVE up AS (SELECT id, parent_id, title, 0 AS n FROM kb_pages WHERE id = $1
                                UNION ALL SELECT p.id, p.parent_id, p.title, up.n + 1 FROM kb_pages p JOIN up ON p.id = up.parent_id)
-         SELECT id, title FROM up WHERE id <> $1 ORDER BY n DESC",
-    )
-    .bind(id)
+         SELECT id AS "id!", title AS "title!" FROM up WHERE id <> $1 ORDER BY n DESC"#, id).map(|r| (r.id, r.title))
     .fetch_all(&state.db)
     .await?;
-    let children: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, title FROM kb_pages WHERE parent_id = $1 ORDER BY sort, title").bind(id).fetch_all(&state.db).await?;
-    let space: String = sqlx::query_scalar("SELECT name FROM kb_spaces WHERE id = $1").bind(p.space_id).fetch_one(&state.db).await?;
+    let children: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id, title FROM kb_pages WHERE parent_id = $1 ORDER BY sort, title"#, id).map(|r| (r.id, r.title)).fetch_all(&state.db).await?;
+    let space: String = sqlx::query_scalar!("SELECT name FROM kb_spaces WHERE id = $1", p.space_id).fetch_one(&state.db).await?;
     Ok(Json(json!({
         "id": p.id, "space_id": p.space_id, "space_name": space, "parent_id": p.parent_id, "title": p.title, "body": p.body,
         "html": render(&p.body), "version": p.version, "updated_by_name": p.updated_by_name, "updated_at": p.updated_at,
@@ -412,18 +394,14 @@ const MAX_BODY: usize = 500_000;
 
 pub(crate) async fn check_parent(state: &AppState, space: Uuid, parent: Option<Uuid>, page: Option<Uuid>) -> AppResult<()> {
     let Some(parent) = parent else { return Ok(()) };
-    let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM kb_pages WHERE id = $1 AND space_id = $2)").bind(parent).bind(space).fetch_one(&state.db).await?;
+    let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM kb_pages WHERE id = $1 AND space_id = $2) AS "v!""#, parent, space).fetch_one(&state.db).await?;
     if !ok {
         return Err(AppError::bad("the parent page must be in the same space"));
     }
     if let Some(page) = page {
         // Not under itself.
-        let cycle: bool = sqlx::query_scalar(
-            "WITH RECURSIVE up AS (SELECT id, parent_id FROM kb_pages WHERE id = $1 UNION ALL SELECT p.id, p.parent_id FROM kb_pages p JOIN up ON p.id = up.parent_id)
-             SELECT EXISTS (SELECT 1 FROM up WHERE id = $2)",
-        )
-        .bind(parent)
-        .bind(page)
+        let cycle: bool = sqlx::query_scalar!(r#"WITH RECURSIVE up AS (SELECT id, parent_id FROM kb_pages WHERE id = $1 UNION ALL SELECT p.id, p.parent_id FROM kb_pages p JOIN up ON p.id = up.parent_id)
+             SELECT EXISTS (SELECT 1 FROM up WHERE id = $2) AS "v!""#, parent, page)
         .fetch_one(&state.db)
         .await?;
         if cycle {
@@ -442,35 +420,23 @@ async fn create_page(State(state): State<AppState>, auth: AuthUser, Path(space):
     }
     let parent = b.parent_id.flatten();
     check_parent(&state, space, parent, None).await?;
-    let sort: i32 = sqlx::query_scalar("SELECT COALESCE(MAX(sort), 0) + 10 FROM kb_pages WHERE space_id = $1 AND parent_id IS NOT DISTINCT FROM $2").bind(space).bind(parent).fetch_one(&state.db).await?;
+    let sort: i32 = sqlx::query_scalar!(r#"SELECT COALESCE(MAX(sort), 0) + 10 AS "v!" FROM kb_pages WHERE space_id = $1 AND parent_id IS NOT DISTINCT FROM $2"#, space, parent).fetch_one(&state.db).await?;
     let mut tx = state.db.begin().await?;
-    let id: Uuid = sqlx::query_scalar("INSERT INTO kb_pages (space_id, parent_id, title, body, sort, created_by, updated_by) VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id")
-        .bind(space)
-        .bind(parent)
-        .bind(&title)
-        .bind(&body)
-        .bind(sort)
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO kb_pages (space_id, parent_id, title, body, sort, created_by, updated_by) VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id", space, parent, &title, &body, sort, auth.id)
         .fetch_one(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO kb_versions (page_id, version, title, body, saved_by) VALUES ($1, 1, $2, $3, $4)").bind(id).bind(&title).bind(&body).bind(auth.id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO kb_versions (page_id, version, title, body, saved_by) VALUES ($1, 1, $2, $3, $4)", id, &title, &body, auth.id).execute(&mut *tx).await?;
     tx.commit().await?;
     get_page(State(state), auth, Path(id)).await
 }
 
 async fn save(state: &AppState, auth: &AuthUser, p: &PageRow, title: String, body: String, parent: Option<Uuid>) -> AppResult<()> {
     let mut tx = state.db.begin().await?;
-    let v: i32 = sqlx::query_scalar("UPDATE kb_pages SET title = $2, body = $3, parent_id = $4, version = version + 1, updated_by = $5, updated_at = now() WHERE id = $1 AND version = $6 RETURNING version")
-        .bind(p.id)
-        .bind(&title)
-        .bind(&body)
-        .bind(parent)
-        .bind(auth.id)
-        .bind(p.version)
+    let v: i32 = sqlx::query_scalar!("UPDATE kb_pages SET title = $2, body = $3, parent_id = $4, version = version + 1, updated_by = $5, updated_at = now() WHERE id = $1 AND version = $6 RETURNING version", p.id, &title, &body, parent, auth.id, p.version)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| AppError::Conflict("someone saved this page meanwhile; reload it and make your change again".into()))?;
-    sqlx::query("INSERT INTO kb_versions (page_id, version, title, body, saved_by) VALUES ($1, $2, $3, $4, $5)").bind(p.id).bind(v).bind(&title).bind(&body).bind(auth.id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO kb_versions (page_id, version, title, body, saved_by) VALUES ($1, $2, $3, $4, $5)", p.id, v, &title, &body, auth.id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -512,18 +478,15 @@ async fn update_page(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
 async fn delete_page(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let p = page_row(&state, id).await?;
     editable(&state, &auth, p.space_id).await?;
-    sqlx::query("DELETE FROM kb_pages WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM kb_pages WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "ok": true, "space_id": p.space_id, "parent_id": p.parent_id })))
 }
 
 async fn versions(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let p = page_row(&state, id).await?;
     readable(&state, &auth, p.space_id).await.map_err(|_| AppError::NotFound("page"))?;
-    let items: Vec<(i32, String, Option<String>, DateTime<Utc>, i32)> = sqlx::query_as(
-        "SELECT v.version, v.title, trim(u.first_name || ' ' || u.last_name), v.saved_at, length(v.body) FROM kb_versions v LEFT JOIN users u ON u.id = v.saved_by
-         WHERE v.page_id = $1 ORDER BY v.version DESC",
-    )
-    .bind(id)
+    let items: Vec<(i32, String, Option<String>, DateTime<Utc>, i32)> = sqlx::query!(r#"SELECT v.version AS "version!", v.title AS "title!", trim(u.first_name || ' ' || u.last_name) AS "c2?", v.saved_at AS "saved_at!", length(v.body) AS "c4!" FROM kb_versions v LEFT JOIN users u ON u.id = v.saved_by
+         WHERE v.page_id = $1 ORDER BY v.version DESC"#, id).map(|r| (r.version, r.title, r.c2, r.saved_at, r.c4))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": items.into_iter().map(|(v, t, by, at, len)| json!({ "version": v, "title": t, "saved_by": by, "saved_at": at, "length": len })).collect::<Vec<_>>() })))
@@ -532,9 +495,7 @@ async fn versions(State(state): State<AppState>, auth: AuthUser, Path(id): Path<
 async fn version(State(state): State<AppState>, auth: AuthUser, Path((id, v)): Path<(Uuid, i32)>) -> AppResult<Json<Value>> {
     let p = page_row(&state, id).await?;
     readable(&state, &auth, p.space_id).await.map_err(|_| AppError::NotFound("page"))?;
-    let (title, body, at): (String, String, DateTime<Utc>) = sqlx::query_as("SELECT title, body, saved_at FROM kb_versions WHERE page_id = $1 AND version = $2")
-        .bind(id)
-        .bind(v)
+    let (title, body, at): (String, String, DateTime<Utc>) = sqlx::query!(r#"SELECT title, body, saved_at FROM kb_versions WHERE page_id = $1 AND version = $2"#, id, v).map(|r| (r.title, r.body, r.saved_at))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("version"))?;
@@ -545,9 +506,7 @@ async fn version(State(state): State<AppState>, auth: AuthUser, Path((id, v)): P
 async fn restore(State(state): State<AppState>, auth: AuthUser, Path((id, v)): Path<(Uuid, i32)>) -> AppResult<Json<Value>> {
     let p = page_row(&state, id).await?;
     editable(&state, &auth, p.space_id).await?;
-    let (title, body): (String, String) = sqlx::query_as("SELECT title, body FROM kb_versions WHERE page_id = $1 AND version = $2")
-        .bind(id)
-        .bind(v)
+    let (title, body): (String, String) = sqlx::query!(r#"SELECT title, body FROM kb_versions WHERE page_id = $1 AND version = $2"#, id, v).map(|r| (r.title, r.body))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("version"))?;
@@ -587,18 +546,15 @@ async fn attach_file(State(state): State<AppState>, auth: AuthUser, Path(id): Pa
     if !crate::routes::files::may_read(&state, &auth, b.file_id).await? {
         return Err(AppError::NotFound("file"));
     }
-    sqlx::query("INSERT INTO kb_files (page_id, file_id, added_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING").bind(id).bind(b.file_id).bind(auth.id).execute(&state.db).await?;
-    let (name, mime): (String, String) = sqlx::query_as("SELECT original_name, mime_type FROM files WHERE id = $1").bind(b.file_id).fetch_one(&state.db).await?;
+    sqlx::query!("INSERT INTO kb_files (page_id, file_id, added_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", id, b.file_id, auth.id).execute(&state.db).await?;
+    let (name, mime): (String, String) = sqlx::query!(r#"SELECT original_name, mime_type FROM files WHERE id = $1"#, b.file_id).map(|r| (r.original_name, r.mime_type)).fetch_one(&state.db).await?;
     Ok(Json(json!({ "id": b.file_id, "name": name, "mime_type": mime, "url": format!("/api/files/{}/content", b.file_id) })))
 }
 
 async fn page_files(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     let p = page_row(&state, id).await?;
     readable(&state, &auth, p.space_id).await.map_err(|_| AppError::NotFound("page"))?;
-    let rows: Vec<(Uuid, String, String, i64)> = sqlx::query_as(
-        "SELECT f.id, f.original_name, f.mime_type, f.size_bytes FROM kb_files k JOIN files f ON f.id = k.file_id WHERE k.page_id = $1 ORDER BY k.created_at",
-    )
-    .bind(id)
+    let rows: Vec<(Uuid, String, String, i64)> = sqlx::query!(r#"SELECT f.id, f.original_name, f.mime_type, f.size_bytes FROM kb_files k JOIN files f ON f.id = k.file_id WHERE k.page_id = $1 ORDER BY k.created_at"#, id).map(|r| (r.id, r.original_name, r.mime_type, r.size_bytes))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": rows.into_iter().map(|(fid, n, m, s)| json!({ "id": fid, "name": n, "mime_type": m, "size_bytes": s, "url": format!("/api/files/{fid}/content") })).collect::<Vec<_>>() })))

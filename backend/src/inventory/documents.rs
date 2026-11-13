@@ -117,13 +117,10 @@ async fn view(state: &AppState, id: Uuid) -> AppResult<Value> {
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("document"))?;
-    let lines: Vec<LineView> = sqlx::query_as(
-        "SELECT l.id, l.product_id, p.name, p.sku, p.unit, l.quantity, l.price, l.applied,
-                (SELECT quantity FROM inv_stock s WHERE s.product_id = l.product_id AND s.warehouse_id = COALESCE(d.from_warehouse, d.to_warehouse)) AS in_stock
+    let lines: Vec<LineView> = sqlx::query_as!(LineView, r#"SELECT l.id, l.product_id, p.name, p.sku AS "sku?", p.unit, l.quantity, l.price AS "price?", l.applied AS "applied?",
+                (SELECT quantity FROM inv_stock s WHERE s.product_id = l.product_id AND s.warehouse_id = COALESCE(d.from_warehouse, d.to_warehouse)) AS "in_stock?"
          FROM inv_document_lines l JOIN crm_products p ON p.id = l.product_id JOIN inv_documents d ON d.id = l.document_id
-         WHERE l.document_id = $1 ORDER BY l.sort",
-    )
-    .bind(id)
+         WHERE l.document_id = $1 ORDER BY l.sort"#, id)
     .fetch_all(&state.db)
     .await?;
     let mut v = serde_json::to_value(d).unwrap();
@@ -170,7 +167,7 @@ async fn save_lines(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: Uuid, ki
         return Err(AppError::bad("at most 1000 lines in one document"));
     }
     let mut seen = std::collections::HashSet::new();
-    sqlx::query("DELETE FROM inv_document_lines WHERE document_id = $1").bind(id).execute(&mut **tx).await?;
+    sqlx::query!("DELETE FROM inv_document_lines WHERE document_id = $1", id).execute(&mut **tx).await?;
     for (i, l) in items.iter().enumerate() {
         let q = dec(l.quantity, "quantity")?;
         if q < Decimal::ZERO || (kind != "count" && q == Decimal::ZERO) {
@@ -189,16 +186,11 @@ async fn save_lines(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: Uuid, ki
             }
             _ => None,
         };
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_products WHERE id = $1)").bind(l.product_id).fetch_one(&mut **tx).await?;
+        let exists: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_products WHERE id = $1) AS "v!""#, l.product_id).fetch_one(&mut **tx).await?;
         if !exists {
             return Err(AppError::bad("a product on the document does not exist"));
         }
-        sqlx::query("INSERT INTO inv_document_lines (document_id, product_id, quantity, price, sort) VALUES ($1, $2, $3, $4, $5)")
-            .bind(id)
-            .bind(l.product_id)
-            .bind(q)
-            .bind(price)
-            .bind(i as i32)
+        sqlx::query!("INSERT INTO inv_document_lines (document_id, product_id, quantity, price, sort) VALUES ($1, $2, $3, $4, $5)", id, l.product_id, q, price, i as i32)
             .execute(&mut **tx)
             .await?;
     }
@@ -207,7 +199,7 @@ async fn save_lines(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: Uuid, ki
 
 async fn active_warehouse(state: &AppState, id: Option<Uuid>) -> AppResult<()> {
     if let Some(w) = id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM inv_warehouses WHERE id = $1 AND is_active)").bind(w).fetch_one(&state.db).await?;
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM inv_warehouses WHERE id = $1 AND is_active) AS "v!""#, w).fetch_one(&state.db).await?;
         if !ok {
             return Err(AppError::bad("that warehouse does not exist or is inactive"));
         }
@@ -217,9 +209,7 @@ async fn active_warehouse(state: &AppState, id: Option<Uuid>) -> AppResult<()> {
 
 async fn check_supplier(state: &AppState, id: Option<Uuid>) -> AppResult<()> {
     if let Some(s) = id {
-        let ok: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND entity_type = $2 AND deleted_at IS NULL)")
-            .bind(s)
-            .bind(crate::crm::COMPANY)
+        let ok: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM crm_items WHERE id = $1 AND entity_type = $2 AND deleted_at IS NULL) AS "v!""#, s, crate::crm::COMPANY)
             .fetch_one(&state.db)
             .await?;
         if !ok {
@@ -250,21 +240,9 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Doc
         None => None,
     };
     let mut tx = state.db.begin().await?;
-    let n: i64 = sqlx::query_scalar("UPDATE inv_counters SET last = last + 1 WHERE kind = $1 RETURNING last").bind(&kind).fetch_one(&mut *tx).await?;
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO inv_documents (kind, number, from_warehouse, to_warehouse, supplier_id, reference, currency, comment, doc_date, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, CURRENT_DATE), $10) RETURNING id",
-    )
-    .bind(&kind)
-    .bind(format!("{prefix}-{n:04}"))
-    .bind(from)
-    .bind(to)
-    .bind(supplier)
-    .bind(clean(b.reference.flatten()))
-    .bind(currency)
-    .bind(clean(b.comment.flatten()))
-    .bind(b.doc_date)
-    .bind(auth.id)
+    let n: i64 = sqlx::query_scalar!("UPDATE inv_counters SET last = last + 1 WHERE kind = $1 RETURNING last", &kind).fetch_one(&mut *tx).await?;
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO inv_documents (kind, number, from_warehouse, to_warehouse, supplier_id, reference, currency, comment, doc_date, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, CURRENT_DATE), $10) RETURNING id", &kind, format!("{prefix}-{n:04}"), from, to, supplier, clean(b.reference.flatten()), currency, clean(b.comment.flatten()), b.doc_date, auth.id)
     .fetch_one(&mut *tx)
     .await?;
     if let Some(items) = &b.items {
@@ -275,8 +253,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Doc
 }
 
 async fn draft(state: &AppState, id: Uuid) -> AppResult<(String, String)> {
-    let (kind, status): (String, String) = sqlx::query_as("SELECT kind, status FROM inv_documents WHERE id = $1")
-        .bind(id)
+    let (kind, status): (String, String) = sqlx::query!(r#"SELECT kind, status FROM inv_documents WHERE id = $1"#, id).map(|r| (r.kind, r.status))
         .fetch_optional(&state.db)
         .await?
         .ok_or(AppError::NotFound("document"))?;
@@ -299,8 +276,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
         check_supplier(&state, s).await?;
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "UPDATE inv_documents SET
+    sqlx::query!("UPDATE inv_documents SET
              from_warehouse = CASE WHEN $2 THEN $3 ELSE from_warehouse END,
              to_warehouse = CASE WHEN $4 THEN $5 ELSE to_warehouse END,
              supplier_id = CASE WHEN $6 THEN $7 ELSE supplier_id END,
@@ -308,22 +284,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
              currency = CASE WHEN $10 THEN $11 ELSE currency END,
              comment = CASE WHEN $12 THEN $13 ELSE comment END,
              doc_date = COALESCE($14, doc_date), updated_at = now()
-         WHERE id = $1",
-    )
-    .bind(id)
-    .bind(b.from_warehouse.is_some())
-    .bind(b.from_warehouse.flatten())
-    .bind(b.to_warehouse.is_some())
-    .bind(b.to_warehouse.flatten())
-    .bind(b.supplier_id.is_some())
-    .bind(b.supplier_id.flatten())
-    .bind(b.reference.is_some())
-    .bind(clean(b.reference.clone().flatten()))
-    .bind(b.currency.is_some())
-    .bind(b.currency.clone().flatten().map(|c| c.trim().to_uppercase()))
-    .bind(b.comment.is_some())
-    .bind(clean(b.comment.clone().flatten()))
-    .bind(b.doc_date)
+         WHERE id = $1", id, b.from_warehouse.is_some(), b.from_warehouse.flatten(), b.to_warehouse.is_some(), b.to_warehouse.flatten(), b.supplier_id.is_some(), b.supplier_id.flatten(), b.reference.is_some(), clean(b.reference.clone().flatten()), b.currency.is_some(), b.currency.clone().flatten().map(|c| c.trim().to_uppercase()), b.comment.is_some(), clean(b.comment.clone().flatten()), b.doc_date)
     .execute(&mut *tx)
     .await?;
     if let Some(items) = &b.items {
@@ -340,7 +301,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
     if status != "draft" {
         return Err(AppError::bad("only drafts can be deleted; cancel a posted document instead"));
     }
-    sqlx::query("DELETE FROM inv_documents WHERE id = $1").bind(id).execute(&state.db).await?;
+    sqlx::query!("DELETE FROM inv_documents WHERE id = $1", id).execute(&state.db).await?;
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -363,17 +324,13 @@ struct Line {
 }
 
 async fn head_and_lines(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: Uuid) -> AppResult<(Head, Vec<Line>)> {
-    let h: Head = sqlx::query_as("SELECT kind, status, from_warehouse, to_warehouse FROM inv_documents WHERE id = $1 FOR UPDATE")
-        .bind(id)
+    let h: Head = sqlx::query_as!(Head, r#"SELECT kind, status, from_warehouse AS "from_warehouse?", to_warehouse AS "to_warehouse?" FROM inv_documents WHERE id = $1 FOR UPDATE"#, id)
         .fetch_optional(&mut **tx)
         .await?
         .ok_or(AppError::NotFound("document"))?;
-    let lines: Vec<Line> = sqlx::query_as(
-        "SELECT l.id, l.product_id, l.quantity, l.applied,
-                l.price * COALESCE((SELECT c.rate FROM crm_currencies c WHERE c.code = d.currency), 1) AS base_price
-         FROM inv_document_lines l JOIN inv_documents d ON d.id = l.document_id WHERE l.document_id = $1 ORDER BY l.sort",
-    )
-        .bind(id)
+    let lines: Vec<Line> = sqlx::query_as!(Line, r#"SELECT l.id, l.product_id, l.quantity, l.applied AS "applied?",
+                l.price * COALESCE((SELECT c.rate FROM crm_currencies c WHERE c.code = d.currency), 1) AS "base_price?"
+         FROM inv_document_lines l JOIN inv_documents d ON d.id = l.document_id WHERE l.document_id = $1 ORDER BY l.sort"#, id)
         .fetch_all(&mut **tx)
         .await?;
     Ok((h, lines))
@@ -420,9 +377,7 @@ async fn post_document(State(state): State<AppState>, auth: AuthUser, Path(id): 
         _ => {
             let at = need(h.to_warehouse, "were counted in")?;
             for l in &lines {
-                let have: Decimal = sqlx::query_scalar("SELECT COALESCE((SELECT quantity FROM inv_stock WHERE product_id = $1 AND warehouse_id = $2), 0)")
-                    .bind(l.product_id)
-                    .bind(at)
+                let have: Decimal = sqlx::query_scalar!(r#"SELECT COALESCE((SELECT quantity FROM inv_stock WHERE product_id = $1 AND warehouse_id = $2), 0) AS "v!""#, l.product_id, at)
                     .fetch_one(&mut *tx)
                     .await?;
                 let delta = l.quantity - have;
@@ -430,16 +385,14 @@ async fn post_document(State(state): State<AppState>, auth: AuthUser, Path(id): 
                     adjust(&mut tx, l.product_id, at, delta, true, why()).await?;
                 } else {
                     // Counting turns stock counting on even when nothing changes.
-                    sqlx::query("INSERT INTO inv_stock (product_id, warehouse_id, quantity) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING").bind(l.product_id).bind(at).execute(&mut *tx).await?;
-                    sqlx::query("UPDATE crm_products SET stock = COALESCE(stock, 0) WHERE id = $1").bind(l.product_id).execute(&mut *tx).await?;
+                    sqlx::query!("INSERT INTO inv_stock (product_id, warehouse_id, quantity) VALUES ($1, $2, 0) ON CONFLICT DO NOTHING", l.product_id, at).execute(&mut *tx).await?;
+                    sqlx::query!("UPDATE crm_products SET stock = COALESCE(stock, 0) WHERE id = $1", l.product_id).execute(&mut *tx).await?;
                 }
-                sqlx::query("UPDATE inv_document_lines SET applied = $2 WHERE id = $1").bind(l.id).bind(delta).execute(&mut *tx).await?;
+                sqlx::query!("UPDATE inv_document_lines SET applied = $2 WHERE id = $1", l.id, delta).execute(&mut *tx).await?;
             }
         }
     }
-    sqlx::query("UPDATE inv_documents SET status = 'posted', posted_by = $2, posted_at = now(), updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(auth.id)
+    sqlx::query!("UPDATE inv_documents SET status = 'posted', posted_by = $2, posted_at = now(), updated_at = now() WHERE id = $1", id, auth.id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -462,9 +415,7 @@ async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
             }
             "writeoff" => {
                 // Back at the cost it was written off at.
-                let unit: Option<Decimal> = sqlx::query_scalar("SELECT unit_cost FROM inv_movements WHERE document_id = $1 AND product_id = $2 AND delta < 0 ORDER BY created_at DESC LIMIT 1")
-                    .bind(id)
-                    .bind(l.product_id)
+                let unit: Option<Decimal> = sqlx::query_scalar!("SELECT unit_cost FROM inv_movements WHERE document_id = $1 AND product_id = $2 AND delta < 0 ORDER BY created_at DESC LIMIT 1", id, l.product_id)
                     .fetch_optional(&mut *tx)
                     .await?
                     .flatten();
@@ -481,7 +432,7 @@ async fn cancel(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
             }
         }
     }
-    sqlx::query("UPDATE inv_documents SET status = 'cancelled', updated_at = now() WHERE id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query!("UPDATE inv_documents SET status = 'cancelled', updated_at = now() WHERE id = $1", id).execute(&mut *tx).await?;
     tx.commit().await?;
     view(&state, id).await.map(Json)
 }

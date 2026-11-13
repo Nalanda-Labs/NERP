@@ -41,13 +41,13 @@ pub fn router() -> Router<AppState> {
 // ---- skills ----
 
 async fn employee(state: &AppState, id: Uuid) -> AppResult<()> {
-    let found: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND NOT is_guest AND NOT is_system)").bind(id).fetch_one(&state.db).await?;
+    let found: bool = sqlx::query_scalar!(r#"SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND NOT is_guest AND NOT is_system) AS "v!""#, id).fetch_one(&state.db).await?;
     if found { Ok(()) } else { Err(AppError::NotFound("employee")) }
 }
 
 async fn get_skills(State(state): State<AppState>, _auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     employee(&state, id).await?;
-    let skills: Vec<String> = sqlx::query_scalar("SELECT skill FROM user_skills WHERE user_id = $1 ORDER BY lower(skill)").bind(id).fetch_all(&state.db).await?;
+    let skills: Vec<String> = sqlx::query_scalar!("SELECT skill FROM user_skills WHERE user_id = $1 ORDER BY lower(skill)", id).fetch_all(&state.db).await?;
     Ok(Json(json!({ "skills": skills })))
 }
 
@@ -69,8 +69,8 @@ async fn put_skills(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
         return Err(AppError::bad("at most 50 skills of up to 60 characters"));
     }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM user_skills WHERE user_id = $1").bind(id).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO user_skills (user_id, skill) SELECT $1, unnest($2::text[])").bind(id).bind(&skills).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM user_skills WHERE user_id = $1", id).execute(&mut *tx).await?;
+    sqlx::query!("INSERT INTO user_skills (user_id, skill) SELECT $1, unnest($2::text[])", id, &skills).execute(&mut *tx).await?;
     tx.commit().await?;
     if id != auth.id {
         audit::record(&state.db, Some(auth.id), "user.skills", "user", Some(id.to_string()), json!({ "skills": skills }), None).await;
@@ -81,7 +81,7 @@ async fn put_skills(State(state): State<AppState>, auth: AuthUser, Path(id): Pat
 // ---- who is in ----
 
 async fn company_tz(state: &AppState) -> chrono_tz::Tz {
-    let v: Option<Value> = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'default_timezone'").fetch_optional(&state.db).await.ok().flatten();
+    let v: Option<Value> = sqlx::query_scalar!("SELECT value FROM settings WHERE key = 'default_timezone'").fetch_optional(&state.db).await.ok().flatten();
     v.and_then(|v| v.as_str().and_then(|s| s.parse().ok())).unwrap_or(chrono_tz::UTC)
 }
 
@@ -89,22 +89,15 @@ async fn company_tz(state: &AppState) -> chrono_tz::Tz {
 pub async fn in_today(state: &AppState, users: &[Uuid], checked_in: bool) -> AppResult<HashMap<Uuid, (bool, String)>> {
     let today = Utc::now().with_timezone(&company_tz(state).await).date_naive();
     let week_start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
-    let holiday: Option<String> = sqlx::query_scalar("SELECT name FROM hr_holidays WHERE day = $1").bind(today).fetch_optional(&state.db).await?;
-    let weekdays: Vec<i32> = sqlx::query_scalar("SELECT work_weekdays FROM hr_settings LIMIT 1").fetch_optional(&state.db).await?.unwrap_or(vec![1, 2, 3, 4, 5]);
-    let away: Vec<(Uuid, String)> = sqlx::query_as("SELECT user_id, kind FROM hr_absences WHERE user_id = ANY($1) AND status = 'approved' AND starts_on <= $2 AND ends_on >= $2")
-        .bind(users)
-        .bind(today)
+    let holiday: Option<String> = sqlx::query_scalar!("SELECT name FROM hr_holidays WHERE day = $1", today).fetch_optional(&state.db).await?;
+    let weekdays: Vec<i32> = sqlx::query_scalar!("SELECT work_weekdays FROM hr_settings LIMIT 1").fetch_optional(&state.db).await?.unwrap_or(vec![1, 2, 3, 4, 5]);
+    let away: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT user_id, kind FROM hr_absences WHERE user_id = ANY($1) AND status = 'approved' AND starts_on <= $2 AND ends_on >= $2"#, users, today).map(|r| (r.user_id, r.kind))
         .fetch_all(&state.db)
         .await?;
-    let rota: Vec<(Uuid, NaiveDate)> = sqlx::query_as("SELECT user_id, day FROM hr_rota WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3")
-        .bind(users)
-        .bind(week_start)
-        .bind(week_start + Duration::days(6))
+    let rota: Vec<(Uuid, NaiveDate)> = sqlx::query!(r#"SELECT user_id, day FROM hr_rota WHERE user_id = ANY($1) AND day BETWEEN $2 AND $3"#, users, week_start, week_start + Duration::days(6)).map(|r| (r.user_id, r.day))
         .fetch_all(&state.db)
         .await?;
-    let started: Vec<(Uuid, bool)> = sqlx::query_as("SELECT user_id, ended_at IS NULL FROM hr_work_days WHERE user_id = ANY($1) AND day = $2")
-        .bind(users)
-        .bind(today)
+    let started: Vec<(Uuid, bool)> = sqlx::query!(r#"SELECT user_id AS "user_id!", ended_at IS NULL AS "c1!" FROM hr_work_days WHERE user_id = ANY($1) AND day = $2"#, users, today).map(|r| (r.user_id, r.c1))
         .fetch_all(&state.db)
         .await?;
     let iso = today.weekday().number_from_monday() as i32;
@@ -136,11 +129,11 @@ pub async fn in_today(state: &AppState, users: &[Uuid], checked_in: bool) -> App
 /// The value of a record's field, as text values to match skills against.
 async fn field_values(state: &AppState, item: Uuid, field: &str) -> AppResult<Vec<String>> {
     let v: Option<Value> = if let Some(code) = field.strip_prefix("uf.") {
-        sqlx::query_scalar("SELECT uf -> $2 FROM crm_items WHERE id = $1").bind(item).bind(code).fetch_optional(&state.db).await?.flatten()
+        sqlx::query_scalar!("SELECT uf -> $2 FROM crm_items WHERE id = $1", item, code).fetch_optional(&state.db).await?.flatten()
     } else if ["country", "city", "region"].contains(&field) {
-        sqlx::query_scalar("SELECT address -> $2 FROM crm_items WHERE id = $1").bind(item).bind(field).fetch_optional(&state.db).await?.flatten()
+        sqlx::query_scalar!("SELECT address -> $2 FROM crm_items WHERE id = $1", item, field).fetch_optional(&state.db).await?.flatten()
     } else {
-        sqlx::query_scalar("SELECT to_jsonb(i) -> $2 FROM crm_items i WHERE id = $1").bind(item).bind(field).fetch_optional(&state.db).await?.flatten()
+        sqlx::query_scalar!("SELECT to_jsonb(i) -> $2 FROM crm_items i WHERE id = $1", item, field).fetch_optional(&state.db).await?.flatten()
     };
     let text = |v: &Value| match v {
         Value::String(s) => Some(s.trim().to_lowercase()),
@@ -173,26 +166,20 @@ pub struct Options {
 
 /// Each candidate with why they would or wouldn't get the record; the pick first.
 pub async fn evaluate(state: &AppState, entity_type: i16, item: Option<Uuid>, users: &[Uuid], o: &Options, turn: u64) -> AppResult<(Option<Uuid>, Vec<Value>, String)> {
-    let active: Vec<(Uuid, String)> = sqlx::query_as("SELECT id, trim(first_name || ' ' || last_name) FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest")
-        .bind(users)
+    let active: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT id AS "id!", trim(first_name || ' ' || last_name) AS "c1!" FROM users WHERE id = ANY($1) AND is_active AND NOT is_guest"#, users).map(|r| (r.id, r.c1))
         .fetch_all(&state.db)
         .await?;
     let ids: Vec<Uuid> = users.iter().copied().filter(|u| active.iter().any(|a| a.0 == *u)).collect();
     let presence = in_today(state, &ids, o.checked_in).await?;
-    let load: HashMap<Uuid, (i64, i64)> = sqlx::query_as::<_, (Uuid, i64, i64)>(
-        "SELECT u, (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = u AND t.status IN ('new', 'in_progress', 'review')),
-                   (SELECT COUNT(*) FROM crm_items i WHERE i.assigned_to = u AND i.entity_type = $2 AND i.deleted_at IS NULL AND NOT i.is_closed AND ($3::uuid IS NULL OR i.id <> $3))
-         FROM unnest($1::uuid[]) AS u",
-    )
-    .bind(&ids)
-    .bind(entity_type)
-    .bind(item)
+    let load: HashMap<Uuid, (i64, i64)> = sqlx::query!(r#"SELECT u AS "u!", (SELECT COUNT(*) FROM tasks t WHERE t.responsible_id = u AND t.status IN ('new', 'in_progress', 'review')) AS "c1!",
+                   (SELECT COUNT(*) FROM crm_items i WHERE i.assigned_to = u AND i.entity_type = $2 AND i.deleted_at IS NULL AND NOT i.is_closed AND ($3::uuid IS NULL OR i.id <> $3)) AS "c2!"
+         FROM unnest($1::uuid[]) AS u"#, &ids, entity_type, item).map(|r| (r.u, r.c1, r.c2))
     .fetch_all(&state.db)
     .await?
     .into_iter()
     .map(|(u, t, r)| (u, (t, r)))
     .collect();
-    let skills: Vec<(Uuid, String)> = sqlx::query_as("SELECT user_id, lower(skill) FROM user_skills WHERE user_id = ANY($1)").bind(&ids).fetch_all(&state.db).await?;
+    let skills: Vec<(Uuid, String)> = sqlx::query!(r#"SELECT user_id AS "user_id!", lower(skill) AS "c1!" FROM user_skills WHERE user_id = ANY($1)"#, &ids).map(|r| (r.user_id, r.c1)).fetch_all(&state.db).await?;
     let wanted = match (&o.skill_field, item) {
         (Some(f), Some(i)) if !f.is_empty() => field_values(state, i, f).await?,
         _ => vec![],

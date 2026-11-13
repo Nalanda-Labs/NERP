@@ -95,8 +95,7 @@ pub async fn emit(state: &AppState, event: &str, data: Value) {
 }
 
 async fn try_emit(state: &AppState, event: &str, data: Value) -> AppResult<usize> {
-    let subs: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM webhook_subscriptions WHERE is_active AND $1 = ANY(events)")
-        .bind(event)
+    let subs: Vec<Uuid> = sqlx::query_scalar!("SELECT id FROM webhook_subscriptions WHERE is_active AND $1 = ANY(events)", event)
     .fetch_all(&state.db)
     .await?;
     for sub in &subs {
@@ -111,11 +110,7 @@ async fn try_emit(state: &AppState, event: &str, data: Value) -> AppResult<usize
 async fn queue(state: &AppState, sub: Uuid, event: &str, data: &Value) -> AppResult<Uuid> {
     let id = Uuid::new_v4();
     let payload = json!({ "id": id, "event": event, "occurred_at": Utc::now(), "data": data });
-    sqlx::query("INSERT INTO webhook_deliveries (id, subscription_id, event, payload, next_attempt_at) VALUES ($1, $2, $3, $4, now())")
-        .bind(id)
-        .bind(sub)
-        .bind(event)
-        .bind(&payload)
+    sqlx::query!("INSERT INTO webhook_deliveries (id, subscription_id, event, payload, next_attempt_at) VALUES ($1, $2, $3, $4, now())", id, sub, event, &payload)
         .execute(&state.db)
         .await?;
     jobs::enqueue(&state.db, JOB, json!({ "delivery_id": id }), None).await?;
@@ -125,11 +120,8 @@ async fn queue(state: &AppState, sub: Uuid, event: &str, data: &Value) -> AppRes
 /// Background job: one delivery attempt.
 pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     let id: Uuid = serde_json::from_value(payload["delivery_id"].clone())?;
-    let row: Option<(String, Value, i32, String, String, bool, String)> = sqlx::query_as(
-        "SELECT d.status, d.payload, d.attempts, s.url, s.secret, s.is_active, d.event
-         FROM webhook_deliveries d JOIN webhook_subscriptions s ON s.id = d.subscription_id WHERE d.id = $1",
-    )
-    .bind(id)
+    let row: Option<(String, Value, i32, String, String, bool, String)> = sqlx::query!(r#"SELECT d.status, d.payload, d.attempts, s.url, s.secret, s.is_active, d.event
+         FROM webhook_deliveries d JOIN webhook_subscriptions s ON s.id = d.subscription_id WHERE d.id = $1"#, id).map(|r| (r.status, r.payload, r.attempts, r.url, r.secret, r.is_active, r.event))
     .fetch_optional(&state.db)
     .await?;
     let Some((status, body, attempts, url, secret, active, event)) = row else { return Ok(()) };
@@ -137,7 +129,7 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
         return Ok(());
     }
     if !active {
-        sqlx::query("UPDATE webhook_deliveries SET status = 'failed', error = 'the webhook was turned off', next_attempt_at = NULL WHERE id = $1").bind(id).execute(&state.db).await?;
+        sqlx::query!("UPDATE webhook_deliveries SET status = 'failed', error = 'the webhook was turned off', next_attempt_at = NULL WHERE id = $1", id).execute(&state.db).await?;
         return Ok(());
     }
     let attempt = attempts + 1;
@@ -157,24 +149,13 @@ pub async fn run_job(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     };
     match result {
         Ok(r) => {
-            sqlx::query("UPDATE webhook_deliveries SET status = 'done', attempts = $2, response_status = $3, response_body = $4, error = NULL, delivered_at = now(), next_attempt_at = NULL WHERE id = $1")
-                .bind(id)
-                .bind(attempt)
-                .bind(r.status as i32)
-                .bind(r.snippet)
+            sqlx::query!("UPDATE webhook_deliveries SET status = 'done', attempts = $2, response_status = $3, response_body = $4, error = NULL, delivered_at = now(), next_attempt_at = NULL WHERE id = $1", id, attempt, r.status as i32, r.snippet)
                 .execute(&state.db)
                 .await?;
         }
         Err(f) => {
             let next = (f.retry && (attempt as usize) <= RETRY_MINUTES.len()).then(|| Utc::now() + Duration::minutes(RETRY_MINUTES[attempt as usize - 1]));
-            sqlx::query("UPDATE webhook_deliveries SET status = $2, attempts = $3, response_status = $4, response_body = $5, error = $6, next_attempt_at = $7 WHERE id = $1")
-                .bind(id)
-                .bind(if next.is_some() { "pending" } else { "failed" })
-                .bind(attempt)
-                .bind(f.status.map(|s| s as i32))
-                .bind(f.snippet)
-                .bind(f.msg)
-                .bind(next)
+            sqlx::query!("UPDATE webhook_deliveries SET status = $2, attempts = $3, response_status = $4, response_body = $5, error = $6, next_attempt_at = $7 WHERE id = $1", id, if next.is_some() { "pending" } else { "failed" }, attempt, f.status.map(|s| s as i32), f.snippet, f.msg, next)
                 .execute(&state.db)
                 .await?;
             if let Some(at) = next {
@@ -255,17 +236,11 @@ fn check_webhook_url(url: &str) -> AppResult<String> {
 
 async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Body>) -> AppResult<Json<Subscription>> {
     auth.require(perm::WEBHOOKS_MANAGE)?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhook_subscriptions").fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM webhook_subscriptions"#).fetch_one(&state.db).await?;
     if n >= 50 {
         return Err(AppError::bad("at most 50 webhooks"));
     }
-    let id: Uuid = sqlx::query_scalar("INSERT INTO webhook_subscriptions (name, url, secret, events, is_active, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id")
-        .bind(required("name", b.name.as_deref().unwrap_or(""), 100)?)
-        .bind(check_webhook_url(b.url.as_deref().unwrap_or(""))?)
-        .bind(tokens::random_token(24))
-        .bind(check_events(&b.events.unwrap_or_default())?)
-        .bind(b.is_active.unwrap_or(true))
-        .bind(auth.id)
+    let id: Uuid = sqlx::query_scalar!("INSERT INTO webhook_subscriptions (name, url, secret, events, is_active, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id", required("name", b.name.as_deref().unwrap_or(""), 100)?, check_webhook_url(b.url.as_deref().unwrap_or(""))?, tokens::random_token(24), &(check_events(&b.events.unwrap_or_default())?), b.is_active.unwrap_or(true), auth.id)
         .fetch_one(&state.db)
         .await?;
     crate::audit::record(&state.db, Some(auth.id), "webhook.create", "webhook", Some(id.to_string()), json!({}), None).await;
@@ -275,13 +250,7 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bod
 async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Json(b): Json<Body>) -> AppResult<Json<Subscription>> {
     auth.require(perm::WEBHOOKS_MANAGE)?;
     let cur = load(&state, id).await?;
-    sqlx::query("UPDATE webhook_subscriptions SET name = $2, url = $3, events = $4, is_active = $5, secret = $6, updated_at = now() WHERE id = $1")
-        .bind(id)
-        .bind(match &b.name { Some(n) => required("name", n, 100)?, None => cur.name })
-        .bind(match &b.url { Some(u) => check_webhook_url(u)?, None => cur.url })
-        .bind(match &b.events { Some(e) => check_events(e)?, None => cur.events })
-        .bind(b.is_active.unwrap_or(cur.is_active))
-        .bind(if b.rotate_secret == Some(true) { tokens::random_token(24) } else { cur.secret })
+    sqlx::query!("UPDATE webhook_subscriptions SET name = $2, url = $3, events = $4, is_active = $5, secret = $6, updated_at = now() WHERE id = $1", id, match &b.name { Some(n) => required("name", n, 100)?, None => cur.name }, match &b.url { Some(u) => check_webhook_url(u)?, None => cur.url }, &(match &b.events { Some(e) => check_events(e)?, None => cur.events }), b.is_active.unwrap_or(cur.is_active), if b.rotate_secret == Some(true) { tokens::random_token(24) } else { cur.secret })
         .execute(&state.db)
         .await?;
     Ok(Json(load(&state, id).await?))
@@ -289,7 +258,7 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uu
 
 async fn remove(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     auth.require(perm::WEBHOOKS_MANAGE)?;
-    let n = sqlx::query("DELETE FROM webhook_subscriptions WHERE id = $1").bind(id).execute(&state.db).await?.rows_affected();
+    let n = sqlx::query!("DELETE FROM webhook_subscriptions WHERE id = $1", id).execute(&state.db).await?.rows_affected();
     if n == 0 {
         return Err(AppError::NotFound("webhook"));
     }
@@ -321,13 +290,8 @@ struct DeliveriesQuery {
 async fn deliveries(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Query(q): Query<DeliveriesQuery>) -> AppResult<Json<Value>> {
     auth.require(perm::WEBHOOKS_MANAGE)?;
     load(&state, id).await?;
-    let items: Vec<Delivery> = sqlx::query_as(
-        "SELECT id, event, status, attempts, response_status, response_body, error, next_attempt_at, delivered_at, created_at, payload
-         FROM webhook_deliveries WHERE subscription_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC LIMIT $3",
-    )
-    .bind(id)
-    .bind(q.status.filter(|s| !s.is_empty()))
-    .bind(q.limit.unwrap_or(50).clamp(1, 200))
+    let items: Vec<Delivery> = sqlx::query_as!(Delivery, r#"SELECT id, event, status, attempts, response_status AS "response_status?", response_body AS "response_body?", error AS "error?", next_attempt_at AS "next_attempt_at?", delivered_at AS "delivered_at?", created_at, payload
+         FROM webhook_deliveries WHERE subscription_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC LIMIT $3"#, id, q.status.filter(|s| !s.is_empty()), q.limit.unwrap_or(50).clamp(1, 200))
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({ "items": items })))
@@ -348,7 +312,7 @@ async fn test(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid
 /// Sends a delivery's payload again, as a new delivery.
 async fn redeliver(State(state): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> AppResult<Json<Value>> {
     auth.require(perm::WEBHOOKS_MANAGE)?;
-    let row: Option<(Uuid, String, Value)> = sqlx::query_as("SELECT subscription_id, event, payload FROM webhook_deliveries WHERE id = $1").bind(id).fetch_optional(&state.db).await?;
+    let row: Option<(Uuid, String, Value)> = sqlx::query!(r#"SELECT subscription_id, event, payload FROM webhook_deliveries WHERE id = $1"#, id).map(|r| (r.subscription_id, r.event, r.payload)).fetch_optional(&state.db).await?;
     let Some((sub, event, payload)) = row else { return Err(AppError::NotFound("delivery")) };
     let new = queue(&state, sub, &event, &payload["data"]).await?;
     state.job_wakeup.notify_one();

@@ -84,16 +84,16 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bod
     let name = required("name", b.name.as_deref().unwrap_or(""), 60)?;
     let plural = required("plural name", b.name_plural.as_deref().unwrap_or(&name), 60)?;
     let icon = icon(b.icon.as_deref())?;
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_entity_types WHERE NOT is_system").fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_entity_types WHERE NOT is_system"#).fetch_one(&state.db).await?;
     if n >= 100 {
         return Err(AppError::bad("at most 100 smart processes"));
     }
     // A readable, stable URL code: "contracts", "shipments", else "type-<id>".
     let mut tx = state.db.begin().await?;
-    let id: i16 = sqlx::query_scalar("SELECT (GREATEST(127, COALESCE(MAX(id), 0)) + 1)::smallint FROM crm_entity_types").fetch_one(&mut *tx).await?;
+    let id: i16 = sqlx::query_scalar!(r#"SELECT (GREATEST(127, COALESCE(MAX(id), 0)) + 1)::smallint AS "v!" FROM crm_entity_types"#).fetch_one(&mut *tx).await?;
     let base = slug(&plural);
     let mut code = if base.len() >= 2 && !RESERVED.contains(&base.as_str()) && !base.chars().next().unwrap().is_ascii_digit() { base } else { format!("type-{id}") };
-    let taken: Vec<String> = sqlx::query_scalar("SELECT code FROM crm_entity_types").fetch_all(&mut *tx).await?;
+    let taken: Vec<String> = sqlx::query_scalar!("SELECT code FROM crm_entity_types").fetch_all(&mut *tx).await?;
     if taken.contains(&code) {
         code = format!("{code}-{id}");
     }
@@ -111,25 +111,17 @@ async fn create(State(state): State<AppState>, auth: AuthUser, Json(b): Json<Bod
     .bind(&icon)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO crm_counters (entity_type) VALUES ($1)").bind(id).execute(&mut *tx).await?;
-    let cat: uuid::Uuid = sqlx::query_scalar("INSERT INTO crm_categories (entity_type, name, sort, is_default) VALUES ($1, $2, 10, TRUE) RETURNING id")
-        .bind(id)
-        .bind(&plural)
+    sqlx::query!("INSERT INTO crm_counters (entity_type) VALUES ($1)", id).execute(&mut *tx).await?;
+    let cat: uuid::Uuid = sqlx::query_scalar!("INSERT INTO crm_categories (entity_type, name, sort, is_default) VALUES ($1, $2, 10, TRUE) RETURNING id", id, &plural)
         .fetch_one(&mut *tx)
         .await?;
     for (i, (stage, color, semantics)) in [("New", "#3b82f6", "process"), ("In progress", "#f59e0b", "process"), ("Done", "#22c55e", "success"), ("Cancelled", "#ef4444", "failure")].iter().enumerate() {
-        sqlx::query("INSERT INTO crm_stages (category_id, name, color, sort, semantics) VALUES ($1, $2, $3, $4, $5)")
-            .bind(cat)
-            .bind(stage)
-            .bind(color)
-            .bind((i as i32 + 1) * 10)
-            .bind(semantics)
+        sqlx::query!("INSERT INTO crm_stages (category_id, name, color, sort, semantics) VALUES ($1, $2, $3, $4, $5)", cat, stage, color, (i as i32 + 1) * 10, semantics)
             .execute(&mut *tx)
             .await?;
     }
     // Same access rights as deals to start with; admins adjust them under Access rights.
-    sqlx::query("INSERT INTO crm_role_permissions (role_id, entity_type, action, scope) SELECT role_id, $1, action, scope FROM crm_role_permissions WHERE entity_type = 2")
-        .bind(id)
+    sqlx::query!("INSERT INTO crm_role_permissions (role_id, entity_type, action, scope) SELECT role_id, $1, action, scope FROM crm_role_permissions WHERE entity_type = 2", id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -152,21 +144,12 @@ async fn update(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
         return Err(AppError::bad(format!("{} always have an amount and a client", t.name_plural.to_lowercase())));
     }
     if b.has_pipelines == Some(false) && t.has_pipelines {
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_categories WHERE entity_type = $1").bind(t.id).fetch_one(&state.db).await?;
+        let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_categories WHERE entity_type = $1"#, t.id).fetch_one(&state.db).await?;
         if n > 1 {
             return Err(AppError::bad("delete the extra pipelines first"));
         }
     }
-    sqlx::query(
-        "UPDATE crm_entity_types SET name = $2, name_plural = $3, icon = $4, has_pipelines = $5, has_amount = $6, has_client = $7 WHERE id = $1",
-    )
-    .bind(t.id)
-    .bind(match &b.name { Some(n) => required("name", n, 60)?, None => t.name.clone() })
-    .bind(match &b.name_plural { Some(n) => required("plural name", n, 60)?, None => t.name_plural.clone() })
-    .bind(match &b.icon { Some(i) => icon(Some(i))?, None => t.icon.clone() })
-    .bind(b.has_pipelines.unwrap_or(t.has_pipelines))
-    .bind(b.has_amount.unwrap_or(t.has_amount))
-    .bind(b.has_client.unwrap_or(t.has_client))
+    sqlx::query!("UPDATE crm_entity_types SET name = $2, name_plural = $3, icon = $4, has_pipelines = $5, has_amount = $6, has_client = $7 WHERE id = $1", t.id, match &b.name { Some(n) => required("name", n, 60)?, None => t.name.clone() }, match &b.name_plural { Some(n) => required("plural name", n, 60)?, None => t.name_plural.clone() }, match &b.icon { Some(i) => icon(Some(i))?, None => t.icon.clone() }, b.has_pipelines.unwrap_or(t.has_pipelines), b.has_amount.unwrap_or(t.has_amount), b.has_client.unwrap_or(t.has_client))
     .execute(&state.db)
     .await?;
     Ok(Json(describe(&load(&state, t.id).await?)))
@@ -180,7 +163,7 @@ async fn remove(State(state): State<AppState>, auth: AuthUser, Path(code): Path<
     if t.kind.is_some() {
         return Err(AppError::bad(format!("{} are built in and cannot be deleted", t.name_plural.to_lowercase())));
     }
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crm_items WHERE entity_type = $1").bind(t.id).fetch_one(&state.db).await?;
+    let n: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "v!" FROM crm_items WHERE entity_type = $1"#, t.id).fetch_one(&state.db).await?;
     if n > 0 {
         return Err(AppError::bad(format!("delete its {n} records first (including the recycle bin)")));
     }
